@@ -65,17 +65,24 @@ def run_agent_job(
         started_at=utc_now_iso(),
     )
 
-    argv = _agent_argv(profile, role, prompt_path, output_path)
-    exit_code, stdout, stderr, error = _run_process(
-        argv,
-        repo_root=repo_root,
-        timeout_seconds=timeout_seconds,
-        shell=False,
-        log_path=log_path,
-        log_header="$ " + " ".join(argv) + "\n",
-    )
-    if profile.output_capture in {"stdout", "structured-stdout"}:
-        output_path.write_text(stdout, encoding="utf-8")
+    argv = _agent_argv(profile, role, prompt, output_path)
+    exit_code: Optional[int]
+    error: Optional[str]
+    try:
+        exit_code, stdout, stderr, error = _run_process(
+            argv,
+            repo_root=repo_root,
+            timeout_seconds=timeout_seconds,
+            shell=False,
+            log_path=log_path,
+            log_header="$ " + " ".join(argv) + "\n",
+        )
+        if profile.output_capture in {"stdout", "structured-stdout"}:
+            output_path.write_text(stdout, encoding="utf-8")
+    except Exception as exc:
+        exit_code = None
+        error = _exception_message(exc)
+        _append_error(log_path, error)
 
     if error is None and exit_code != 0:
         error = f"exit code {exit_code}"
@@ -130,21 +137,26 @@ def run_checks_job(
     failed_command: Optional[str] = None
     final_exit_code = 0
     error: Optional[str] = None
-    log_path.write_text("", encoding="utf-8")
-    for command in commands:
-        exit_code, stdout, stderr, process_error = _run_process(
-            command,
-            repo_root=repo_root,
-            timeout_seconds=timeout_seconds,
-            shell=True,
-            log_path=log_path,
-            log_header=f"$ {command}\n",
-        )
-        if process_error is not None or exit_code != 0:
-            failed_command = command
-            final_exit_code = exit_code
-            error = process_error or f"check failed: {command}"
-            break
+    try:
+        log_path.write_text("", encoding="utf-8")
+        for command in commands:
+            exit_code, stdout, stderr, process_error = _run_process(
+                command,
+                repo_root=repo_root,
+                timeout_seconds=timeout_seconds,
+                shell=True,
+                log_path=log_path,
+                log_header=f"$ {command}\n",
+            )
+            if process_error is not None or exit_code != 0:
+                failed_command = command
+                final_exit_code = exit_code
+                error = process_error or f"check failed: {command}"
+                break
+    except Exception as exc:
+        final_exit_code = None
+        error = _exception_message(exc)
+        _append_error(log_path, error)
 
     status = "SUCCEEDED" if error is None else "FAILED"
     _finish_job(
@@ -178,7 +190,7 @@ def run_checks_job(
 
 
 def _agent_argv(
-    profile: AgentProfile, role: str, prompt_path: Path, output_path: Path
+    profile: AgentProfile, role: str, prompt: str, output_path: Path
 ) -> list[str]:
     if role in READ_ONLY_ROLES:
         role_flags = profile.read_only_flags
@@ -190,7 +202,7 @@ def _agent_argv(
     argv = [profile.command, *profile.prompt_args, *role_flags]
     if profile.output_capture == "last-message-file":
         argv.extend(["--output-last-message", str(output_path)])
-    argv.append(str(prompt_path))
+    argv.append(prompt)
     return argv
 
 
@@ -202,20 +214,25 @@ def _run_process(
     shell: bool,
     log_path: Path,
     log_header: str,
-) -> tuple[int, str, str, Optional[str]]:
+) -> tuple[Optional[int], str, str, Optional[str]]:
     with log_path.open("a", encoding="utf-8") as log_file:
         log_file.write(log_header)
         log_file.flush()
-        process = subprocess.Popen(
-            command,
-            cwd=repo_root,
-            shell=shell,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            start_new_session=True,
-        )
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=repo_root,
+                shell=shell,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            error = f"failed to start process: {exc}"
+            log_file.write(f"\n[error]\n{error}\n")
+            return None, "", "", error
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
         lock = threading.Lock()
@@ -233,9 +250,8 @@ def _run_process(
         try:
             exit_code = process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
-            _kill_process_group(process)
-            exit_code = -signal.SIGTERM
-            error = f"timeout after {timeout_seconds:g}s"
+            exit_code, signal_name = _kill_process_group(process)
+            error = f"timeout after {timeout_seconds:g}s; killed with {signal_name}"
         stdout_thread.join(timeout=2)
         stderr_thread.join(timeout=2)
         if error is not None:
@@ -256,18 +272,19 @@ def _pump_stream(stream, chunks: list[str], log_file, lock: threading.Lock) -> N
                 log_file.flush()
 
 
-def _kill_process_group(process: subprocess.Popen) -> None:
+def _kill_process_group(process: subprocess.Popen) -> tuple[int, str]:
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        return process.returncode or -signal.SIGTERM, "SIGTERM"
     try:
-        process.wait(timeout=2)
+        return process.wait(timeout=2), "SIGTERM"
     except subprocess.TimeoutExpired:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
-            return
+            return process.returncode or -signal.SIGKILL, "SIGKILL"
+        return process.wait(), "SIGKILL"
 
 
 def _ensure_no_running_job(connection: sqlite3.Connection, project_id: int) -> None:
@@ -292,7 +309,7 @@ def _finish_job(
     job_id: int,
     *,
     status: str,
-    exit_code: int,
+    exit_code: Optional[int],
     error: Optional[str],
     finished_sha: Optional[str],
 ) -> None:
@@ -311,6 +328,15 @@ def _finish_job(
         (status, exit_code, error, finished_sha, now, now, job_id),
     )
     connection.commit()
+
+
+def _append_error(log_path: Path, error: str) -> None:
+    with log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"\n[error]\n{error}\n")
+
+
+def _exception_message(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _record_event(

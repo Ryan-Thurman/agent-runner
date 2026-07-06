@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import shlex
 import subprocess
 import sys
@@ -52,8 +53,12 @@ def write_fake_agent(path: Path) -> None:
         """
 import json
 import os
+import signal
 import sys
 import time
+
+if os.environ.get("FAKE_AGENT_IGNORE_TERM"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 argv_path = os.environ.get("FAKE_AGENT_ARGV")
 if argv_path:
@@ -139,6 +144,44 @@ class Phase4JobTests(unittest.TestCase):
             self.assertEqual(row["started_sha"], expected_sha)
             self.assertEqual(row["finished_sha"], expected_sha)
 
+    def test_agent_receives_prompt_text_not_prompt_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            argv_path = root / "argv.json"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            script = root / "fake_agent.py"
+            write_fake_agent(script)
+            project, plan, phase = setup_state(home, repo)
+            old_environ = os.environ.copy()
+            os.environ["FAKE_AGENT_ARGV"] = str(argv_path)
+            prompt = "Do the actual phase work."
+
+            try:
+                with connect_db(home) as db:
+                    result = run_agent_job(
+                        db,
+                        project_id=project["id"],
+                        plan_id=plan["id"],
+                        phase_id=phase["id"],
+                        job_type="IMPLEMENT",
+                        role="coder",
+                        profile=make_profile(script),
+                        prompt=prompt,
+                        repo_root=repo,
+                        log_dir=home / "logs" / "phase-4",
+                        timeout_seconds=5,
+                    )
+            finally:
+                os.environ.clear()
+                os.environ.update(old_environ)
+
+            argv = json.loads(argv_path.read_text(encoding="utf-8"))
+            self.assertIn(prompt, argv)
+            self.assertNotIn(str(result.prompt_path), argv)
+
     def test_agent_job_nonzero_exit_marks_failed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -174,6 +217,60 @@ class Phase4JobTests(unittest.TestCase):
             self.assertEqual(result.status, "FAILED")
             self.assertEqual(result.exit_code, 7)
             self.assertEqual(result.error, "exit code 7")
+
+    def test_agent_spawn_failure_marks_job_failed_and_unblocks_project(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            project, plan, phase = setup_state(home, repo)
+            missing_profile = AgentProfile(
+                name="missing",
+                command=str(root / "does-not-exist"),
+                prompt_args=[],
+                write_flags=[],
+                read_only_flags=[],
+                output_capture="stdout",
+            )
+            script = root / "fake_agent.py"
+            write_fake_agent(script)
+
+            with connect_db(home) as db:
+                failed = run_agent_job(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan["id"],
+                    phase_id=phase["id"],
+                    job_type="IMPLEMENT",
+                    role="coder",
+                    profile=missing_profile,
+                    prompt="Implement.",
+                    repo_root=repo,
+                    log_dir=home / "logs" / "phase-4",
+                    timeout_seconds=5,
+                )
+                row = get_job(db, failed.job_id)
+                second = run_agent_job(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan["id"],
+                    phase_id=phase["id"],
+                    job_type="FIX",
+                    role="coder",
+                    profile=make_profile(script),
+                    prompt="Try again.",
+                    repo_root=repo,
+                    log_dir=home / "logs" / "phase-4-second",
+                    timeout_seconds=5,
+                )
+
+            self.assertEqual(failed.status, "FAILED")
+            self.assertIsNone(failed.exit_code)
+            self.assertIn("failed to start process", failed.error)
+            self.assertEqual(row["status"], "FAILED")
+            self.assertEqual(second.status, "SUCCEEDED")
 
     def test_agent_job_timeout_marks_failed_and_preserves_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,6 +310,43 @@ class Phase4JobTests(unittest.TestCase):
             self.assertIn("timeout after", result.error)
             self.assertTrue(result.log_path.exists())
 
+    def test_timeout_escalates_to_sigkill_when_sigterm_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            script = root / "fake_agent.py"
+            write_fake_agent(script)
+            project, plan, phase = setup_state(home, repo)
+            old_environ = os.environ.copy()
+            os.environ["FAKE_AGENT_SLEEP"] = "5"
+            os.environ["FAKE_AGENT_IGNORE_TERM"] = "1"
+
+            try:
+                with connect_db(home) as db:
+                    result = run_agent_job(
+                        db,
+                        project_id=project["id"],
+                        plan_id=plan["id"],
+                        phase_id=phase["id"],
+                        job_type="IMPLEMENT",
+                        role="coder",
+                        profile=make_profile(script),
+                        prompt="Ignore term.",
+                        repo_root=repo,
+                        log_dir=home / "logs" / "phase-4",
+                        timeout_seconds=0.2,
+                    )
+            finally:
+                os.environ.clear()
+                os.environ.update(old_environ)
+
+            self.assertEqual(result.status, "FAILED")
+            self.assertEqual(result.exit_code, -signal.SIGKILL)
+            self.assertIn("SIGKILL", result.error)
+
     def test_reviewer_uses_readonly_flags_and_last_message_capture(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -247,6 +381,7 @@ class Phase4JobTests(unittest.TestCase):
                 os.environ.update(old_environ)
 
             argv = json.loads(argv_path.read_text(encoding="utf-8"))
+            self.assertIn("Review the phase.", argv)
             self.assertIn("--read-only-flag", argv)
             self.assertNotIn("--write-flag", argv)
             self.assertIn("--output-last-message", argv)
@@ -323,6 +458,36 @@ class Phase4JobTests(unittest.TestCase):
             self.assertIn("second check", log_text)
             self.assertFalse(marker.exists())
             self.assertEqual(row["type"], "RUN_CHECKS")
+
+    def test_checks_job_refuses_to_start_when_project_has_running_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            project, plan, phase = setup_state(home, repo)
+
+            with connect_db(home) as db:
+                create_job(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan["id"],
+                    phase_id=phase["id"],
+                    job_type="IMPLEMENT",
+                    status="RUNNING",
+                )
+                with self.assertRaisesRegex(JobError, "already running"):
+                    run_checks_job(
+                        db,
+                        project_id=project["id"],
+                        plan_id=plan["id"],
+                        phase_id=phase["id"],
+                        commands=[f"{shlex.quote(sys.executable)} -c \"print('nope')\""],
+                        repo_root=repo,
+                        log_dir=home / "logs" / "phase-4",
+                        timeout_seconds=5,
+                    )
 
 
 if __name__ == "__main__":

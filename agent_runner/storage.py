@@ -37,21 +37,14 @@ class StoragePaths:
     logs_dir: Path
 
 
-class RunnerConnection(sqlite3.Connection):
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        result = super().__exit__(exc_type, exc, tb)
-        self.close()
-        return result
-
-
 def storage_paths(home: Path) -> StoragePaths:
     return StoragePaths(db_path=home / DB_FILENAME, logs_dir=home / "logs")
 
 
-def connect_db(home: Path) -> RunnerConnection:
+def connect_db(home: Path) -> sqlite3.Connection:
     paths = storage_paths(home)
     paths.db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(paths.db_path, factory=RunnerConnection)
+    connection = sqlite3.connect(paths.db_path)
     connection.row_factory = sqlite3.Row
     configure_connection(connection)
     ensure_schema(connection)
