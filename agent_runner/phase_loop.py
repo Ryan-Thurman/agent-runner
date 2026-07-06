@@ -35,7 +35,12 @@ def run_phase_loop(
     parsed_phase = _parsed_phase(parsed_plan, phase_number)
     status = phase["status"]
 
-    if status in {"REVIEWING", "CLOSING", "COMPLETE", "BLOCKED"}:
+    if status == "BLOCKED":
+        return PhaseLoopResult(
+            f"phase {phase_number} is BLOCKED; inspect status before rerunning",
+            blocked=True,
+        )
+    if status in {"REVIEWING", "CLOSING"}:
         return PhaseLoopResult(
             f"phase {phase_number} is {status}; later phases handle the next step"
         )
@@ -44,7 +49,9 @@ def run_phase_loop(
             f"phase {phase_number} is FIXING; Phase 6 handles fix execution"
         )
     if status in {"PENDING", "IMPLEMENTING"}:
-        _ensure_clean_or_allowed(config, repo_root)
+        preexisting_dirty_paths = None
+        if status == "PENDING":
+            preexisting_dirty_paths = _ensure_clean_or_allowed(config, repo_root)
         return _run_implement(
             connection,
             project_id=project_id,
@@ -53,6 +60,7 @@ def run_phase_loop(
             parsed_phase=parsed_phase,
             config=config,
             repo_root=repo_root,
+            preexisting_dirty_paths=preexisting_dirty_paths,
         )
     if status == "CHECKING":
         return _run_checks(
@@ -77,6 +85,7 @@ def _run_implement(
     parsed_phase: ParsedPhase,
     config: RunnerConfig,
     repo_root: Path,
+    preexisting_dirty_paths: Optional[set[str]],
 ) -> PhaseLoopResult:
     phase = update_phase_status(connection, phase["id"], "IMPLEMENTING")
     record_event(
@@ -115,7 +124,7 @@ def _run_implement(
             blocked=True,
         )
 
-    _git_add_all(repo_root)
+    _stage_implementation_changes(repo_root, preexisting_dirty_paths)
     update_phase_status(connection, phase["id"], "CHECKING")
     record_event(
         connection,
@@ -237,23 +246,23 @@ def _profile_for_role(config: RunnerConfig, role: str):
         raise JobError(f"missing configured role: {role}") from exc
 
 
-def _ensure_clean_or_allowed(config: RunnerConfig, repo_root: Path) -> None:
-    status = _git_status_porcelain(repo_root)
-    if not status:
-        return
+def _ensure_clean_or_allowed(config: RunnerConfig, repo_root: Path) -> Optional[set[str]]:
+    dirty_paths = _git_dirty_paths(repo_root)
+    if not dirty_paths:
+        return None
     if config.allow_dirty:
         print(
             "[agent-runner] warning: worktree is dirty; continuing",
             file=sys.stderr,
             flush=True,
         )
-        return
+        return dirty_paths
     raise JobError(
         "dirty worktree; commit, stash, or set allowDirty=true before starting a job"
     )
 
 
-def _git_status_porcelain(repo_root: Path) -> str:
+def _git_dirty_paths(repo_root: Path) -> set[str]:
     result = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=repo_root,
@@ -263,12 +272,53 @@ def _git_status_porcelain(repo_root: Path) -> str:
     )
     if result.returncode != 0:
         raise JobError(result.stderr.strip() or "git status failed")
-    return result.stdout.strip()
+    return _parse_porcelain_paths(result.stdout)
+
+
+def _parse_porcelain_paths(output: str) -> set[str]:
+    paths: set[str] = set()
+    for line in output.splitlines():
+        if not line:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            old_path, new_path = path.split(" -> ", 1)
+            paths.add(old_path)
+            paths.add(new_path)
+        else:
+            paths.add(path)
+    return paths
+
+
+def _stage_implementation_changes(
+    repo_root: Path, preexisting_dirty_paths: Optional[set[str]]
+) -> None:
+    if preexisting_dirty_paths is None:
+        _git_add_all(repo_root)
+        return
+
+    changed_paths = _git_dirty_paths(repo_root)
+    paths_to_stage = sorted(changed_paths - preexisting_dirty_paths)
+    if not paths_to_stage:
+        return
+    _git_add_paths(repo_root, paths_to_stage)
 
 
 def _git_add_all(repo_root: Path) -> None:
     result = subprocess.run(
         ["git", "add", "-A"],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise JobError(result.stderr.strip() or "git add -A failed")
+
+
+def _git_add_paths(repo_root: Path, paths: list[str]) -> None:
+    result = subprocess.run(
+        ["git", "add", "-A", "--", *paths],
         cwd=repo_root,
         text=True,
         stdout=subprocess.PIPE,
