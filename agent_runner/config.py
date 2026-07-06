@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -165,8 +166,11 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
 
 
 def project_slug(repo_root: Path) -> str:
-    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", repo_root.name.strip()).strip("-._")
-    return slug or "project"
+    name_slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", repo_root.name.strip()).strip("-._")
+    path_hash = hashlib.sha256(str(repo_root.resolve()).encode("utf-8")).hexdigest()[
+        :12
+    ]
+    return f"{name_slug or 'project'}-{path_hash}"
 
 
 def _validate_agent_profile(name: str, profile: dict[str, Any]) -> AgentProfile:
