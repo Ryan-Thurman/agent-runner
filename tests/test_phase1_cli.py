@@ -46,6 +46,15 @@ def write_config(repo: Path, overrides: Optional[dict] = None) -> None:
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def write_plan(repo: Path) -> None:
+    plan_path = repo / "docs" / "plan.md"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text(
+        "## Phase 1: Test phase\n\nAcceptance Criteria:\n- Pass.\n",
+        encoding="utf-8",
+    )
+
+
 def _strip_sample_comments(text: str) -> str:
     from agent_runner.config import strip_json_comments
 
@@ -165,6 +174,7 @@ class Phase1CliTests(unittest.TestCase):
             repo.mkdir()
             git_init(repo)
             write_config(repo, {"checks": []})
+            write_plan(repo)
 
             result = run_cli(repo, home, "run")
 
@@ -178,6 +188,7 @@ class Phase1CliTests(unittest.TestCase):
             repo.mkdir()
             git_init(repo)
             write_config(repo)
+            write_plan(repo)
             locks = home / "locks"
             locks.mkdir(parents=True)
             lock_path = locks / f"{project_slug(repo)}.lock"
@@ -210,6 +221,7 @@ class Phase1CliTests(unittest.TestCase):
             repo.mkdir()
             git_init(repo)
             write_config(repo)
+            write_plan(repo)
             locks = home / "locks"
             locks.mkdir(parents=True)
             lock_path = locks / f"{project_slug(repo)}.lock"
@@ -236,6 +248,7 @@ class Phase1CliTests(unittest.TestCase):
             repo.mkdir()
             git_init(repo)
             write_config(repo)
+            write_plan(repo)
             locks = home / "locks"
             locks.mkdir(parents=True)
             lock_path = locks / f"{project_slug(repo)}.lock"
@@ -253,6 +266,7 @@ class Phase1CliTests(unittest.TestCase):
             repo.mkdir()
             git_init(repo)
             write_config(repo)
+            write_plan(repo)
             env = os.environ.copy()
             env["AGENT_RUNNER_HOME"] = str(home)
             env["AGENT_RUNNER_HOLD_SECONDS"] = "20"

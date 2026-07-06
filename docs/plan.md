@@ -34,7 +34,7 @@ retries run out, then a closure job updates docs + plan + handoff and commits.
 
 ## Phase 1: CLI scaffold, config, project detection, locking
 
-Status: PENDING
+Status: COMPLETE
 
 Build the skeleton everything else hangs on: an `agent-runner` entrypoint with
 subcommand routing (`init`, `run`, `status`, `pause`, `resume`, `logs`, `reset-lock` —
@@ -60,7 +60,7 @@ Acceptance Criteria:
 
 ## Phase 2: SQLite state layer and event log
 
-Status: PENDING
+Status: COMPLETE
 
 Implement the storage module: global DB at `~/.agent-runner/runner.sqlite`, WAL +
 `busy_timeout=10000`, schema per the design doc **including its deltas** — `projects`,
@@ -82,7 +82,7 @@ Acceptance Criteria:
 
 ## Phase 3: Plan parsing, registration, and change detection
 
-Status: PENDING
+Status: REVIEWING
 
 Parse the plan markdown: phases are `## Phase <number>: <title>` blocks, each phase's
 content runs to the next phase heading. A runner-owned `Status: <STATE>` marker line

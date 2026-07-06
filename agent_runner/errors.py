@@ -12,3 +12,7 @@ class GitRepoError(AgentRunnerError):
 
 class LockError(AgentRunnerError):
     """Raised when the per-project runner lock cannot be acquired."""
+
+
+class PlanError(AgentRunnerError):
+    """Raised when a project plan cannot be parsed or safely registered."""
