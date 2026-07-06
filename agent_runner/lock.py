@@ -29,6 +29,11 @@ class ProjectLock:
             repo_path = existing.get("repoPath", "unknown")
             started_at = existing.get("startedAt", "unknown")
             if isinstance(pid, int) and pid_is_alive(pid):
+                if not self._matches_repo_path(repo_path):
+                    raise LockError(
+                        "project lock collision "
+                        f"(lock {self.path}, repo {repo_path}, pid {pid})"
+                    )
                 raise LockError(
                     "project is already locked "
                     f"(pid {pid}, repo {repo_path}, started {started_at})"
@@ -73,7 +78,17 @@ class ProjectLock:
                 payload = json.load(lock_file)
         except (json.JSONDecodeError, OSError):
             return {"pid": None, "repoPath": "unknown", "startedAt": "unknown"}
-        return payload if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return {"pid": None, "repoPath": "unknown", "startedAt": "unknown"}
+        return payload
+
+    def _matches_repo_path(self, repo_path: object) -> bool:
+        if not isinstance(repo_path, str) or not repo_path:
+            return False
+        try:
+            return Path(repo_path).resolve() == self.repo_root.resolve()
+        except OSError:
+            return False
 
 
 def reset_project_lock(locks_dir: Path, project_slug: str) -> Path:

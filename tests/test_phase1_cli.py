@@ -8,9 +8,12 @@ import time
 import unittest
 from pathlib import Path
 from typing import Optional
+from unittest import mock
 
-from agent_runner.config import SAMPLE_CONFIG, load_config
-from agent_runner.errors import ConfigError
+from agent_runner.config import SAMPLE_CONFIG, load_config, project_slug
+from agent_runner.errors import ConfigError, GitRepoError, LockError
+from agent_runner.git import find_git_root
+from agent_runner.lock import ProjectLock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +95,51 @@ class Phase1CliTests(unittest.TestCase):
             self.assertNotEqual(missing_config.returncode, 0)
             self.assertIn("missing .agent-runner.json", missing_config.stderr)
 
+    def test_find_git_root_reports_missing_git_without_traceback(self):
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            with self.assertRaisesRegex(GitRepoError, "git executable was not found"):
+                find_git_root()
+
+    def test_project_slug_includes_absolute_repo_path_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "first" / "backend"
+            second = Path(tmp) / "second" / "backend"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+
+            first_slug = project_slug(first)
+            second_slug = project_slug(second)
+
+            self.assertRegex(first_slug, r"^backend-[0-9a-f]{12}$")
+            self.assertRegex(second_slug, r"^backend-[0-9a-f]{12}$")
+            self.assertNotEqual(first_slug, second_slug)
+
+    def test_live_lock_for_different_repo_path_reports_collision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            other_repo = Path(tmp) / "other" / "repo"
+            locks = Path(tmp) / "locks"
+            repo.mkdir()
+            other_repo.mkdir(parents=True)
+            locks.mkdir()
+            lock_path = locks / "shared.lock"
+            lock_path.write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "repoPath": str(other_repo),
+                        "startedAt": "2026-07-06T00:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            lock = ProjectLock(locks, "shared", repo)
+
+            with self.assertRaisesRegex(LockError, "project lock collision"):
+                lock.acquire()
+            self.assertTrue(lock_path.exists())
+
     def test_config_validation_rejects_bad_roles_and_missing_profile_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -132,7 +180,7 @@ class Phase1CliTests(unittest.TestCase):
             write_config(repo)
             locks = home / "locks"
             locks.mkdir(parents=True)
-            lock_path = locks / "repo.lock"
+            lock_path = locks / f"{project_slug(repo)}.lock"
             lock_path.write_text(
                 json.dumps(
                     {
@@ -164,7 +212,7 @@ class Phase1CliTests(unittest.TestCase):
             write_config(repo)
             locks = home / "locks"
             locks.mkdir(parents=True)
-            lock_path = locks / "repo.lock"
+            lock_path = locks / f"{project_slug(repo)}.lock"
             lock_path.write_text(
                 json.dumps(
                     {
@@ -175,6 +223,23 @@ class Phase1CliTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+
+            result = run_cli(repo, home, "run")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(lock_path.exists())
+
+    def test_non_object_lock_payload_is_reaped_automatically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            repo.mkdir()
+            git_init(repo)
+            write_config(repo)
+            locks = home / "locks"
+            locks.mkdir(parents=True)
+            lock_path = locks / f"{project_slug(repo)}.lock"
+            lock_path.write_text(json.dumps(["not", "an", "object"]), encoding="utf-8")
 
             result = run_cli(repo, home, "run")
 
@@ -201,7 +266,7 @@ class Phase1CliTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            lock_path = home / "locks" / "repo.lock"
+            lock_path = home / "locks" / f"{project_slug(repo)}.lock"
             deadline = time.time() + 5
             while time.time() < deadline and not lock_path.exists():
                 time.sleep(0.05)
