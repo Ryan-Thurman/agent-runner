@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 import time
@@ -10,6 +11,15 @@ from .errors import AgentRunnerError, ConfigError, GitRepoError, LockError
 from .git import find_git_root
 from .lock import ProjectLock, SignalLockRelease, reset_project_lock
 from .paths import ensure_runner_layout
+from .storage import (
+    connect_db,
+    get_or_create_project,
+    list_phases_for_plan,
+    list_plans_for_project,
+    list_recent_events,
+    reap_orphaned_jobs,
+    rows_to_dicts,
+)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -73,6 +83,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         with lock, SignalLockRelease(lock):
             print(f"[agent-runner] acquired lock for {slug}", file=sys.stderr)
+            with connect_db(home) as db:
+                project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+                reaped_jobs = reap_orphaned_jobs(db, project["id"])
+            if reaped_jobs:
+                print(
+                    f"[agent-runner] reaped {len(reaped_jobs)} orphaned job(s)",
+                    file=sys.stderr,
+                )
             hold_seconds = float(os.environ.get("AGENT_RUNNER_HOLD_SECONDS", "0"))
             if hold_seconds > 0:
                 time.sleep(hold_seconds)
@@ -89,10 +107,48 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     repo_root = find_git_root()
-    print(
-        f"[agent-runner] status storage is not implemented yet for {repo_root}",
-        file=sys.stderr,
-    )
+    home = ensure_runner_layout()
+    slug = project_slug(repo_root)
+    with connect_db(home) as db:
+        project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+        plans = list_plans_for_project(db, project["id"])
+        plan_payloads = []
+        for plan in plans:
+            phases = list_phases_for_plan(db, plan["id"])
+            plan_payloads.append(
+                {
+                    **dict(plan),
+                    "phases": rows_to_dicts(phases),
+                }
+            )
+        events = list_recent_events(db, project["id"])
+
+    print(f"[agent-runner] project: {repo_root}", file=sys.stderr)
+    if not plan_payloads:
+        print("[agent-runner] no plan registered yet", file=sys.stderr)
+    else:
+        for plan in plan_payloads:
+            print(
+                f"[agent-runner] plan: {plan['path']} ({plan['status']})",
+                file=sys.stderr,
+            )
+            if not plan["phases"]:
+                print("[agent-runner]   no phases registered yet", file=sys.stderr)
+            for phase in plan["phases"]:
+                publish = _format_publish_state(phase)
+                print(
+                    "[agent-runner]   "
+                    f"phase {phase['phase_number']}: {phase['status']} "
+                    f"retries={phase['retry_count']}{publish}",
+                    file=sys.stderr,
+                )
+
+    payload = {
+        "project": dict(project),
+        "plans": plan_payloads,
+        "recentEvents": rows_to_dicts(events),
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
@@ -127,3 +183,11 @@ def cmd_reset_lock(args: argparse.Namespace) -> int:
 def emit_config_warnings(warnings: list[str]) -> None:
     for warning in warnings:
         print(f"[agent-runner] warning: {warning}", file=sys.stderr)
+
+
+def _format_publish_state(phase: dict) -> str:
+    details = []
+    for key in ("publish_mode", "branch_name", "pr_url", "published_sha"):
+        if phase.get(key):
+            details.append(f"{key}={phase[key]}")
+    return f" ({', '.join(details)})" if details else ""
