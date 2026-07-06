@@ -16,3 +16,7 @@ class LockError(AgentRunnerError):
 
 class PlanError(AgentRunnerError):
     """Raised when a project plan cannot be parsed or safely registered."""
+
+
+class JobError(AgentRunnerError):
+    """Raised when a runner job cannot be started or completed."""

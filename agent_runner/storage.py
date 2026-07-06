@@ -427,7 +427,8 @@ def reap_orphaned_jobs(connection: sqlite3.Connection, project_id: int) -> list[
 
     now = utc_now_iso()
     reaped_ids: list[int] = []
-    with connection:
+    try:
+        connection.execute("BEGIN")
         for job in running_jobs:
             connection.execute(
                 """
@@ -471,6 +472,11 @@ def reap_orphaned_jobs(connection: sqlite3.Connection, project_id: int) -> list[
                 ),
             )
             reaped_ids.append(job["id"])
+    except Exception:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
     return reaped_ids
 
 

@@ -82,7 +82,7 @@ Acceptance Criteria:
 
 ## Phase 3: Plan parsing, registration, and change detection
 
-Status: REVIEWING
+Status: COMPLETE
 
 Parse the plan markdown: phases are `## Phase <number>: <title>` blocks, each phase's
 content runs to the next phase heading. A runner-owned `Status: <STATE>` marker line
@@ -102,7 +102,7 @@ Acceptance Criteria:
 
 ## Phase 4: Job execution engine
 
-Status: PENDING
+Status: REVIEWING
 
 The generic "run an agent or a command as a job" layer: create the job row, write the
 prompt to `phase-N/<type>-prompt.md`, launch the child process from the repo root with
