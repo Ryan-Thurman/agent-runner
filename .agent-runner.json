@@ -13,6 +13,7 @@
       "promptArgs": ["-p"],
       "writeFlags": ["--permission-mode", "acceptEdits"],
       "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "promptPrefix": "use a sonnet 5 or opus agent for this PR. If its simple code never use the opus agent. Reserve opus for complex PR reviews",
       "outputCapture": "stdout"
     },
     "codex": {
@@ -24,8 +25,8 @@
     }
   },
   "roles": {
-    "coder": "claude",
-    "reviewer": "codex"
+    "coder": "codex",
+    "reviewer": "claude"
   },
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,

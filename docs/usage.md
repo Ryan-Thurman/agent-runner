@@ -91,6 +91,7 @@ Minimum config shape:
       "promptArgs": ["-p"],
       "writeFlags": ["--permission-mode", "acceptEdits"],
       "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "promptPrefix": "",
       "outputCapture": "stdout"
     },
     "codex": {
@@ -102,8 +103,8 @@ Minimum config shape:
     }
   },
   "roles": {
-    "coder": "claude",
-    "reviewer": "codex"
+    "coder": "codex",
+    "reviewer": "claude"
   },
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
@@ -116,6 +117,8 @@ Current notes:
 
 - `roles.coder` is used now. `roles.reviewer` is validated now and used in
   Phase 6.
+- `promptPrefix` is optional. When set, the runner prepends it to every prompt
+  sent to that agent profile.
 - `checks` run as shell commands from the repo root, in order. The first failure
   stops the check job.
 - `timeoutMinutes` applies per agent/check process.

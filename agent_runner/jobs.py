@@ -48,7 +48,8 @@ def run_agent_job(
     prompt_path = log_dir / f"{job_name}-prompt.md"
     log_path = log_dir / f"{job_name}.log"
     output_path = log_dir / _output_filename(job_type, profile.output_capture)
-    prompt_path.write_text(prompt, encoding="utf-8")
+    effective_prompt = _effective_prompt(profile, prompt)
+    prompt_path.write_text(effective_prompt, encoding="utf-8")
 
     started_sha = _git_sha(repo_root)
     job = create_job(
@@ -65,7 +66,7 @@ def run_agent_job(
         started_at=utc_now_iso(),
     )
 
-    argv = _agent_argv(profile, role, prompt, output_path)
+    argv = _agent_argv(profile, role, effective_prompt, output_path)
     exit_code: Optional[int]
     error: Optional[str]
     try:
@@ -204,6 +205,12 @@ def _agent_argv(
         argv.extend(["--output-last-message", str(output_path)])
     argv.append(prompt)
     return argv
+
+
+def _effective_prompt(profile: AgentProfile, prompt: str) -> str:
+    if not profile.prompt_prefix:
+        return prompt
+    return f"{profile.prompt_prefix.rstrip()}\n\n{prompt}"
 
 
 def _run_process(

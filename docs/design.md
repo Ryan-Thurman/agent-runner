@@ -131,6 +131,7 @@ describes each agent as a profile, and roles reference a profile:
       "promptArgs": ["-p"],
       "writeFlags": ["--permission-mode", "acceptEdits"],
       "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "promptPrefix": "",
       "outputCapture": "stdout"
     },
     "codex": {
@@ -149,6 +150,8 @@ Swapping who codes and who reviews is flipping the two `roles` values. The runne
 `writeFlags` to coder/closer jobs and `readOnlyFlags` to reviewer jobs, so the
 reviewer-never-edits invariant holds whichever agent reviews. Same-vendor for both roles is
 also fine — independence comes from the fresh process/context, not the vendor.
+Profiles can also set `promptPrefix`; when present, the runner prepends it to every
+prompt sent to that profile.
 
 Invoking the toolbelt from headless agents: with the packs installed in the target repo
 (`install.sh --harness`), `claude -p "/dev-implement-task …"` runs the installed command

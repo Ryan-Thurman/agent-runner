@@ -29,6 +29,7 @@ class AgentProfile:
     write_flags: list[str]
     read_only_flags: list[str]
     output_capture: str
+    prompt_prefix: str = ""
 
 
 @dataclass(frozen=True)
@@ -197,6 +198,9 @@ def _validate_agent_profile(name: str, profile: dict[str, Any]) -> AgentProfile:
         raise ConfigError(
             f"invalid agents.{name}.outputCapture: expected one of {allowed}"
         )
+    prompt_prefix = profile.get("promptPrefix", "")
+    if not isinstance(prompt_prefix, str):
+        raise ConfigError(f"invalid agents.{name}.promptPrefix: expected string")
 
     return AgentProfile(
         name=name,
@@ -205,6 +209,7 @@ def _validate_agent_profile(name: str, profile: dict[str, Any]) -> AgentProfile:
         write_flags=write_flags,
         read_only_flags=read_only_flags,
         output_capture=output_capture,
+        prompt_prefix=prompt_prefix,
     )
 
 
@@ -268,6 +273,7 @@ SAMPLE_CONFIG = """{
       "promptArgs": ["-p"],
       "writeFlags": ["--permission-mode", "acceptEdits"],
       "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "promptPrefix": "",
       "outputCapture": "stdout"
     },
     "codex": {

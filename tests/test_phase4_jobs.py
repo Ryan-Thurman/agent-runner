@@ -92,6 +92,18 @@ def make_profile(script: Path, *, output_capture: str = "stdout") -> AgentProfil
     )
 
 
+def make_prefixed_profile(script: Path, prefix: str) -> AgentProfile:
+    return AgentProfile(
+        name="fake",
+        command=sys.executable,
+        prompt_args=[str(script)],
+        write_flags=["--write-flag"],
+        read_only_flags=["--read-only-flag"],
+        output_capture="stdout",
+        prompt_prefix=prefix,
+    )
+
+
 def setup_state(home: Path, repo: Path):
     with connect_db(home) as db:
         project = get_or_create_project(db, slug="repo", repo_path=repo)
@@ -181,6 +193,46 @@ class Phase4JobTests(unittest.TestCase):
             argv = json.loads(argv_path.read_text(encoding="utf-8"))
             self.assertIn(prompt, argv)
             self.assertNotIn(str(result.prompt_path), argv)
+
+    def test_agent_prompt_includes_profile_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            argv_path = root / "argv.json"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            script = root / "fake_agent.py"
+            write_fake_agent(script)
+            project, plan, phase = setup_state(home, repo)
+            old_environ = os.environ.copy()
+            os.environ["FAKE_AGENT_ARGV"] = str(argv_path)
+            prefix = "Use a specific review agent."
+            prompt = "Review the phase."
+
+            try:
+                with connect_db(home) as db:
+                    result = run_agent_job(
+                        db,
+                        project_id=project["id"],
+                        plan_id=plan["id"],
+                        phase_id=phase["id"],
+                        job_type="REVIEW",
+                        role="reviewer",
+                        profile=make_prefixed_profile(script, prefix),
+                        prompt=prompt,
+                        repo_root=repo,
+                        log_dir=home / "logs" / "phase-4",
+                        timeout_seconds=5,
+                    )
+            finally:
+                os.environ.clear()
+                os.environ.update(old_environ)
+
+            expected_prompt = f"{prefix}\n\n{prompt}"
+            argv = json.loads(argv_path.read_text(encoding="utf-8"))
+            self.assertIn(expected_prompt, argv)
+            self.assertEqual(result.prompt_path.read_text(encoding="utf-8"), expected_prompt)
 
     def test_agent_job_nonzero_exit_marks_failed(self):
         with tempfile.TemporaryDirectory() as tmp:
