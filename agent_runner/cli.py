@@ -11,6 +11,7 @@ from .errors import AgentRunnerError, ConfigError, GitRepoError, LockError
 from .git import find_git_root
 from .lock import ProjectLock, SignalLockRelease, reset_project_lock
 from .paths import ensure_runner_layout
+from .plan import parse_plan_file, register_or_resume_plan
 from .storage import (
     connect_db,
     get_or_create_project,
@@ -40,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.set_defaults(func=cmd_init)
 
     run_parser = subcommands.add_parser("run", help="run the next project job")
+    run_parser.add_argument(
+        "--accept-plan-change",
+        action="store_true",
+        help="accept changed in-progress or complete phase content",
+    )
     run_parser.set_defaults(func=cmd_run)
 
     status_parser = subcommands.add_parser("status", help="show project status")
@@ -83,20 +89,51 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         with lock, SignalLockRelease(lock):
             print(f"[agent-runner] acquired lock for {slug}", file=sys.stderr)
+            parsed_plan = parse_plan_file(repo_root, config.plan_path)
             with connect_db(home) as db:
                 project = get_or_create_project(db, slug=slug, repo_path=repo_root)
                 reaped_jobs = reap_orphaned_jobs(db, project["id"])
+                plan_result = register_or_resume_plan(
+                    db,
+                    project_id=project["id"],
+                    project_slug=slug,
+                    logs_dir=home / "logs",
+                    parsed_plan=parsed_plan,
+                    accept_plan_change=args.accept_plan_change,
+                )
             if reaped_jobs:
                 print(
                     f"[agent-runner] reaped {len(reaped_jobs)} orphaned job(s)",
+                    file=sys.stderr,
+                )
+            print(
+                "[agent-runner] "
+                f"{'registered' if plan_result.created else 'resumed'} plan "
+                f"{config.plan_path} with {plan_result.phase_count} phase(s)",
+                file=sys.stderr,
+            )
+            if plan_result.changed_phase_numbers:
+                phase_list = ", ".join(
+                    str(number) for number in plan_result.changed_phase_numbers
+                )
+                print(
+                    f"[agent-runner] updated changed phase(s): {phase_list}",
+                    file=sys.stderr,
+                )
+            if plan_result.accepted_phase_numbers:
+                phase_list = ", ".join(
+                    str(number) for number in plan_result.accepted_phase_numbers
+                )
+                print(
+                    f"[agent-runner] accepted protected plan change(s): {phase_list}",
                     file=sys.stderr,
                 )
             hold_seconds = float(os.environ.get("AGENT_RUNNER_HOLD_SECONDS", "0"))
             if hold_seconds > 0:
                 time.sleep(hold_seconds)
             print(
-                "[agent-runner] run loop is not implemented until Phase 2+; "
-                "config and lock checks passed",
+                "[agent-runner] job loop is not implemented until Phase 4+; "
+                "config, lock, storage, and plan checks passed",
                 file=sys.stderr,
             )
     except KeyboardInterrupt:
