@@ -8,7 +8,7 @@ from typing import Optional
 
 from .errors import PlanError
 from .lock import utc_now_iso
-from .storage import phase_log_dir
+from .storage import PHASE_STATUSES, phase_log_dir
 
 
 PHASE_HEADING_RE = re.compile(r"^## Phase\s+(\d+):\s*(.+?)\s*$")
@@ -20,6 +20,7 @@ PROTECTED_CHANGE_STATUSES = {
     "FIXING",
     "CLOSING",
     "COMPLETE",
+    "BLOCKED",
 }
 
 
@@ -51,10 +52,15 @@ class PlanRegistrationResult:
 def parse_plan_markdown(text: str, *, path: str) -> ParsedPlan:
     lines = text.splitlines(keepends=True)
     headings: list[tuple[int, int, str]] = []
+    seen_phase_numbers: set[int] = set()
     for index, line in enumerate(lines):
         match = PHASE_HEADING_RE.match(line.rstrip("\r\n"))
         if match:
-            headings.append((index, int(match.group(1)), match.group(2).strip()))
+            phase_number = int(match.group(1))
+            if phase_number in seen_phase_numbers:
+                raise PlanError(f"duplicate phase number in plan: {phase_number}")
+            seen_phase_numbers.add(phase_number)
+            headings.append((index, phase_number, match.group(2).strip()))
 
     phases: list[ParsedPhase] = []
     for heading_index, phase_number, title in headings:
@@ -83,7 +89,12 @@ def parse_plan_markdown(text: str, *, path: str) -> ParsedPlan:
 
 
 def parse_plan_file(repo_root: Path, plan_path: str) -> ParsedPlan:
-    path = repo_root / plan_path
+    repo_root = repo_root.resolve()
+    path = (repo_root / plan_path).resolve()
+    try:
+        path.relative_to(repo_root)
+    except ValueError as exc:
+        raise PlanError(f"plan path escapes repository: {plan_path}") from exc
     if not path.exists():
         raise PlanError(f"missing plan file {plan_path}")
     if not path.is_file():
@@ -102,6 +113,7 @@ def register_or_resume_plan(
 ) -> PlanRegistrationResult:
     changed_phase_numbers: list[int] = []
     accepted_phase_numbers: list[int] = []
+    log_dirs: list[Path] = []
 
     try:
         connection.execute("BEGIN")
@@ -147,7 +159,7 @@ def register_or_resume_plan(
                 plan_path=parsed_plan.path,
                 phase_number=phase.phase_number,
             )
-            log_dir.mkdir(parents=True, exist_ok=True)
+            log_dirs.append(log_dir)
 
             if existing_phase is None:
                 cursor = connection.execute(
@@ -194,10 +206,10 @@ def register_or_resume_plan(
                     now,
                     content_hash=phase.content_hash,
                 )
-                changed_phase_numbers.append(phase.phase_number)
                 event_type = "phase.plan_change_accepted"
                 if existing_phase["status"] == "PENDING":
                     event_type = "phase.plan_change_updated"
+                    changed_phase_numbers.append(phase.phase_number)
                 else:
                     accepted_phase_numbers.append(phase.phase_number)
                 _insert_event(
@@ -232,6 +244,8 @@ def register_or_resume_plan(
     except Exception:
         connection.rollback()
         raise
+    for log_dir in log_dirs:
+        log_dir.mkdir(parents=True, exist_ok=True)
 
     return PlanRegistrationResult(
         plan_id=plan_id,
@@ -248,7 +262,10 @@ def _extract_status_and_hash_lines(lines: list[str]) -> tuple[str, list[str]]:
     match = STATUS_RE.match(lines[0].rstrip("\r\n"))
     if not match:
         return "PENDING", list(lines)
-    return match.group(1), list(lines[1:])
+    status = match.group(1)
+    if status not in PHASE_STATUSES:
+        raise PlanError(f"invalid phase status marker: {status}")
+    return status, list(lines[1:])
 
 
 def _next_heading_index(

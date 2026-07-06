@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Optional
 
 from agent_runner.config import SAMPLE_CONFIG, project_slug, strip_json_comments
-from agent_runner.plan import parse_plan_markdown
+from agent_runner.errors import PlanError
+from agent_runner.plan import parse_plan_file, parse_plan_markdown
 from agent_runner.storage import connect_db, list_phases_for_plan, list_plans_for_project
 
 
@@ -78,6 +79,27 @@ class Phase3PlanTests(unittest.TestCase):
         self.assertNotIn("Ignored preamble", parsed.phases[0].content)
         self.assertNotIn("Ignored preamble", parsed.phases[1].content)
 
+    def test_parser_rejects_duplicate_phase_numbers(self):
+        text = (
+            "## Phase 1: First\n"
+            "Do first.\n"
+            "## Phase 1: Duplicate\n"
+            "Do duplicate.\n"
+        )
+
+        with self.assertRaisesRegex(PlanError, "duplicate phase number"):
+            parse_plan_markdown(text, path="docs/plan.md")
+
+    def test_parser_rejects_invalid_status_marker(self):
+        text = (
+            "## Phase 1: Bad status\n"
+            "Status: NOT_A_REAL_STATUS\n"
+            "Do work.\n"
+        )
+
+        with self.assertRaisesRegex(PlanError, "invalid phase status marker"):
+            parse_plan_markdown(text, path="docs/plan.md")
+
     def test_status_line_changes_do_not_change_phase_hash(self):
         pending = parse_plan_markdown(
             sample_plan(phase_1_status="PENDING"), path="docs/plan.md"
@@ -88,6 +110,64 @@ class Phase3PlanTests(unittest.TestCase):
 
         self.assertEqual(pending.phases[0].content_hash, complete.phases[0].content_hash)
         self.assertEqual(pending.content_hash, complete.content_hash)
+
+    def test_parse_plan_file_rejects_paths_outside_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+
+            with self.assertRaisesRegex(PlanError, "escapes repository"):
+                parse_plan_file(repo, "../outside-plan.md")
+
+    def test_run_reports_missing_plan_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            repo.mkdir()
+            git_init(repo)
+            write_config(repo)
+
+            result = run_cli(repo, home, "run")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing plan file docs/plan.md", result.stderr)
+
+    def test_run_rejects_duplicate_phase_numbers_without_registering_partial_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            repo.mkdir()
+            git_init(repo)
+            write_config(repo)
+            write_plan(
+                repo,
+                "## Phase 1: First\nDo first.\n## Phase 1: Duplicate\nDo duplicate.\n",
+            )
+
+            result = run_cli(repo, home, "run")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("duplicate phase number", result.stderr)
+            with connect_db(home) as db:
+                phase_count = db.execute("SELECT COUNT(*) FROM phases").fetchone()[0]
+            self.assertEqual(phase_count, 0)
+
+    def test_run_rejects_invalid_status_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            repo.mkdir()
+            git_init(repo)
+            write_config(repo)
+            write_plan(
+                repo,
+                "## Phase 1: Bad status\nStatus: NOT_A_REAL_STATUS\nDo work.\n",
+            )
+
+            result = run_cli(repo, home, "run")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid phase status marker", result.stderr)
 
     def test_run_registers_plan_and_phase_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -235,6 +315,7 @@ class Phase3PlanTests(unittest.TestCase):
 
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
             self.assertIn("accepted protected plan change(s): 3", accepted.stderr)
+            self.assertNotIn("updated changed phase(s): 3", accepted.stderr)
             with connect_db(home) as db:
                 updated = db.execute(
                     """
@@ -251,6 +332,42 @@ class Phase3PlanTests(unittest.TestCase):
                 ).fetchone()
             self.assertNotEqual(updated["content_hash"], original_hash)
             self.assertIsNotNone(event)
+
+    def test_blocked_phase_body_change_includes_accept_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            repo.mkdir()
+            git_init(repo)
+            write_config(repo)
+            write_plan(repo, sample_plan())
+            first = run_cli(repo, home, "run")
+            self.assertEqual(first.returncode, 0, first.stderr)
+
+            with connect_db(home) as db:
+                project = db.execute(
+                    "SELECT * FROM projects WHERE repo_path = ?", (str(repo.resolve()),)
+                ).fetchone()
+                plan = list_plans_for_project(db, project["id"])[0]
+                phase = db.execute(
+                    """
+                    SELECT * FROM phases
+                    WHERE plan_id = ? AND phase_number = 3
+                    """,
+                    (plan["id"],),
+                ).fetchone()
+                db.execute(
+                    "UPDATE phases SET status = 'BLOCKED' WHERE id = ?",
+                    (phase["id"],),
+                )
+                db.commit()
+
+            write_plan(repo, sample_plan(phase_3_body="Changed blocked phase.\n"))
+            blocked = run_cli(repo, home, "run")
+
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("plan changed for phase 3", blocked.stderr)
+            self.assertIn("--accept-plan-change", blocked.stderr)
 
 
 if __name__ == "__main__":
