@@ -1,7 +1,8 @@
 # agent-runner
 
-> **Work in progress** — nothing runs yet; the design and build plan are settled, the
-> code is being built phase by phase.
+> **Work in progress** — Phase 5 is merged, so the runner can register plans, run
+> IMPLEMENT jobs, stage changes, and run checks. Review, fix execution, close-phase,
+> pause/resume, and full log tailing are still being built.
 
 A minimal local CLI (Python 3, stdlib only) that automates the handoff loop between
 coding agents inside a project worktree:
@@ -25,8 +26,9 @@ Roles are vendor-swappable via agent profiles in `.agent-runner.json`.
 - `docs/design.md` — the design: reuse map, corrections, schema, agent profiles,
   CLOSE_PHASE full-circle closure. **Wins on any conflict with the plan.**
 - `docs/plan.md` — the 8-phase build plan, written in the runner's own
-  `## Phase <n>:` format so the runner can dogfood its own remaining plan once
-  Phase 3 lands.
+  `## Phase <n>:` format so the runner can dogfood its own remaining plan.
+- `docs/usage.md` — how to configure and run the current Phase 5 runner while
+  dogfooding.
 - `.agent-runner.json` — the dogfood config for this repo (also serves as the
   reference config shape).
 
