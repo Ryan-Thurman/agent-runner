@@ -11,8 +11,12 @@ CLOSE_PHASE, pause/resume, and rich log tailing are still future phases.
 - `PENDING` or `IMPLEMENTING`: run the configured coder profile with an
   IMPLEMENT prompt for the next phase.
 - Successful IMPLEMENT: stage implementation changes and run configured checks.
-- Passing checks: run the configured reviewer profile with phase content,
-  `git diff --staged`, and check output.
+- Passing checks with `autoCommit=true`: verify the coder committed, pushed,
+  and opened a PR for the current branch, record the PR metadata, then run the
+  configured reviewer profile against the published PR diff plus phase content
+  and check output.
+- Passing checks with `autoCommit=false`: run the configured reviewer profile
+  with phase content, `git diff --staged`, and check output.
 - Failing checks: run a `FIX` job with `trigger="checks"` if retries remain,
   then rerun checks.
 - `CHECKING`: resume by running checks without running IMPLEMENT again.
@@ -115,13 +119,17 @@ Minimum config shape:
 
 Current notes:
 
-- `roles.coder` is used for IMPLEMENT and FIX. `roles.reviewer` is used for
-  read-only review.
+- `roles.coder` is used for IMPLEMENT and FIX. With `autoCommit=true`, the
+  coder/fixer prompt requires committing, pushing, and creating or updating a
+  PR before the job exits. `roles.reviewer` is used for read-only review.
 - `promptPrefix` is optional. When set, the runner prepends it to every prompt
   sent to that agent profile.
 - `checks` run as shell commands from the repo root, in order. The first failure
   stops the check job.
 - `timeoutMinutes` applies per agent/check process.
+- `autoCommit=true` requires the GitHub CLI (`gh`) on `PATH`; after checks pass,
+  the runner verifies `gh pr view` for the current branch before opening the
+  reviewer.
 - `allowDirty=false` is the safest dogfood setting. A dirty worktree blocks
   before an IMPLEMENT job starts.
 - `allowDirty=true` warns and continues; after IMPLEMENT, the runner stages only
@@ -184,16 +192,17 @@ Expected Phase 6 success flow:
 [agent-runner] phase <n> review passed; moved to CLOSING
 ```
 
-After that:
+With `autoCommit=true`, after that:
 
 ```sh
-git diff --staged
 python3 -m agent_runner status
 ```
 
-The staged diff is the implementation output that the reviewer approved. Phase
-7 will automate the close-phase doc/plan/commit step; until then, inspect and
-close manually.
+The phase status line includes `branch_name`, `pr_url`, and `published_sha`.
+The reviewer approved the published PR diff. Phase 7 will automate the
+close-phase doc/plan/handoff step; until then, inspect and close manually.
+
+With `autoCommit=false`, the reviewer still works from `git diff --staged`.
 
 If checks fail, inspect:
 
@@ -211,12 +220,11 @@ history and outstanding blockers.
 When a phase reaches `CLOSING`, the runner has stopped at the current automation
 boundary. For dogfooding now:
 
-1. Inspect `git diff --staged` and the phase logs.
+1. Inspect the phase PR, `python3 -m agent_runner status`, and the phase logs.
 2. Run any extra checks you need.
-3. If changes are good, commit manually.
-4. Update the plan status manually, usually from `CLOSING` to `COMPLETE`.
-5. Set the next phase to `PENDING`.
-6. Run `python3 -m agent_runner run` again.
+3. Update the plan status manually, usually from `CLOSING` to `COMPLETE`.
+4. Set the next phase to `PENDING`.
+5. Run `python3 -m agent_runner run` again.
 
 When a phase reaches `BLOCKED`, use `python3 -m agent_runner status` and the
 latest events to see why. IMPLEMENT failures are recorded as events and in the
@@ -291,8 +299,10 @@ files outside the repo, modify global git config, or interrupt running agent
 processes.
 
 Before a normal IMPLEMENT job starts, the default dirty gate requires a clean
-worktree. After a successful IMPLEMENT, the runner stages the implementation so
-new files appear in `git diff --staged`.
+worktree. With `autoCommit=true`, the coder/fixer must leave committed and
+pushed work on a PR before review starts. With `autoCommit=false`, after a
+successful IMPLEMENT the runner stages the implementation so new files appear
+in `git diff --staged`.
 
-Closer jobs are not automated yet, so commits and PRs are still manual after a
-review pass moves the phase to `CLOSING`.
+Closer jobs are not automated yet, so the final plan/handoff close remains
+manual after a review pass moves the phase to `CLOSING`.

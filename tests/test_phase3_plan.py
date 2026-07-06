@@ -69,6 +69,7 @@ else:
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
     data["planPath"] = plan_path
+    data["autoCommit"] = False
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 

@@ -72,6 +72,7 @@ def write_config(
     *,
     checks: list[str],
     max_retries: int = 3,
+    auto_commit: bool = False,
 ) -> None:
     data = json.loads(strip_json_comments(SAMPLE_CONFIG))
     data["agents"] = {
@@ -86,6 +87,7 @@ def write_config(
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
     data["checks"] = checks
     data["maxRetriesPerPhase"] = max_retries
+    data["autoCommit"] = auto_commit
     data["timeoutMinutes"] = 1
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -95,6 +97,7 @@ def write_phase6_agent(path: Path) -> None:
         r"""
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -103,7 +106,10 @@ mode = os.environ.get("AGENT_MODE", "PASS")
 trace_dir = Path(os.environ["TRACE_DIR"])
 trace_dir.mkdir(parents=True, exist_ok=True)
 
-if "Review the staged phase work independently" in prompt:
+if (
+    "Review the staged phase work independently" in prompt
+    or "Review the published phase PR independently" in prompt
+):
     review_number = len(list(trace_dir.glob("review-*.md"))) + 1
     (trace_dir / f"review-{review_number}.md").write_text(prompt, encoding="utf-8")
     if mode == "GARBAGE":
@@ -142,14 +148,72 @@ if "Fix only" in prompt:
         encoding="utf-8",
     )
     Path("fix-marker.txt").write_text("fixed\n", encoding="utf-8")
+    if os.environ.get("AGENT_PUBLISH") == "1":
+        subprocess.run(["git", "add", "-A"], check=True)
+        subprocess.run([
+            "git",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "fix phase",
+        ], check=True)
     print("fake fixer completed")
     raise SystemExit(0)
 
 Path("generated.txt").write_text("created\n", encoding="utf-8")
+if os.environ.get("AGENT_PUBLISH") == "1":
+    subprocess.run(["git", "add", "-A"], check=True)
+    subprocess.run([
+        "git",
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=Test User",
+        "commit",
+        "-qm",
+        "implement phase",
+    ], check=True)
+    print("https://example.test/pull/1")
 print("fake coder completed")
 """.lstrip(),
         encoding="utf-8",
     )
+
+
+def write_fake_gh(path: Path) -> None:
+    path.write_text(
+        r"""#!/usr/bin/env python3
+import json
+import subprocess
+import sys
+
+args = sys.argv[1:]
+branch = subprocess.check_output(
+    ["git", "branch", "--show-current"], text=True
+).strip()
+sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+
+if args[:2] == ["pr", "view"]:
+    print(json.dumps({
+        "url": "https://example.test/pull/1",
+        "headRefName": branch,
+        "headRefOid": sha,
+    }))
+    raise SystemExit(0)
+
+if args[:2] == ["pr", "diff"]:
+    subprocess.run(["git", "show", "--format=", "--patch", "HEAD"], check=True)
+    raise SystemExit(0)
+
+print(f"unsupported gh args: {args}", file=sys.stderr)
+raise SystemExit(2)
+""".lstrip(),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
 
 
 def phase_row(home: Path, repo: Path):
@@ -204,6 +268,93 @@ class Phase6LoopTests(unittest.TestCase):
             review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("git diff --staged", review_prompt)
             self.assertNotIn("fake coder completed", review_prompt)
+
+    def test_auto_commit_requires_published_pr_before_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                checks=[
+                    f"{shlex.quote(sys.executable)} -c "
+                    "\"from pathlib import Path; assert Path('generated.txt').exists()\""
+                ],
+                auto_commit=True,
+            )
+            commit_all(repo)
+            subprocess.run(["git", "checkout", "-q", "-b", "dev/test-phase"], cwd=repo, check=True)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "AGENT_PUBLISH": "1",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("review passed", result.stderr)
+            phase = phase_row(home, repo)
+            head_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            self.assertEqual(phase["status"], "CLOSING")
+            self.assertEqual(phase["publish_mode"], "pr")
+            self.assertEqual(phase["branch_name"], "dev/test-phase")
+            self.assertEqual(phase["pr_url"], "https://example.test/pull/1")
+            self.assertEqual(phase["published_sha"], head_sha)
+            review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
+            self.assertIn("Review the published phase PR independently", review_prompt)
+            self.assertIn("Published PR: https://example.test/pull/1", review_prompt)
+            self.assertIn("published PR diff", review_prompt)
+            self.assertIn("generated.txt", review_prompt)
+            self.assertNotIn("fake coder completed", review_prompt)
+
+    def test_auto_commit_blocks_unpublished_work_before_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                checks=[
+                    f"{shlex.quote(sys.executable)} -c "
+                    "\"from pathlib import Path; assert Path('generated.txt').exists()\""
+                ],
+                auto_commit=True,
+            )
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("BLOCKED before REVIEW", result.stderr)
+            self.assertIn("worktree is dirty", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            phase_jobs = jobs(home, phase["id"])
+            self.assertNotIn("REVIEW", [job["type"] for job in phase_jobs])
 
     def test_review_changes_requested_runs_fix_then_reruns_checks_and_rereview(self):
         with tempfile.TemporaryDirectory() as tmp:

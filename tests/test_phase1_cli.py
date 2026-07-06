@@ -71,6 +71,7 @@ else:
         }
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
+    data["autoCommit"] = False
     if overrides:
         data.update(overrides)
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")

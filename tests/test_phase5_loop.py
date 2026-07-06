@@ -82,6 +82,7 @@ def write_config(
     *,
     checks: list[str],
     allow_dirty: bool = False,
+    auto_commit: bool = False,
 ) -> None:
     data = json.loads(strip_json_comments(SAMPLE_CONFIG))
     data["agents"] = {
@@ -96,6 +97,7 @@ def write_config(
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
     data["checks"] = checks
     data["allowDirty"] = allow_dirty
+    data["autoCommit"] = auto_commit
     data["timeoutMinutes"] = 1
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 

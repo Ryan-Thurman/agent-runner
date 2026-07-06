@@ -325,6 +325,32 @@ def update_phase_status(
     return get_phase(connection, phase_id)
 
 
+def update_phase_publish_metadata(
+    connection: sqlite3.Connection,
+    phase_id: int,
+    *,
+    publish_mode: str,
+    branch_name: str,
+    pr_url: str,
+    published_sha: str,
+) -> sqlite3.Row:
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE phases
+        SET publish_mode = ?,
+            branch_name = ?,
+            pr_url = ?,
+            published_sha = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (publish_mode, branch_name, pr_url, published_sha, now, phase_id),
+    )
+    connection.commit()
+    return get_phase(connection, phase_id)
+
+
 def create_job(
     connection: sqlite3.Connection,
     *,

@@ -10,7 +10,12 @@ from .config import RunnerConfig
 from .errors import JobError
 from .jobs import JobResult, run_agent_job, run_checks_job
 from .plan import ParsedPhase, ParsedPlan
-from .storage import get_phase, record_event, update_phase_status
+from .storage import (
+    get_phase,
+    record_event,
+    update_phase_publish_metadata,
+    update_phase_status,
+)
 
 
 REVIEW_RESOLVED_INSTRUCTION = (
@@ -22,6 +27,13 @@ REVIEW_RESOLVED_INSTRUCTION = (
 class PhaseLoopResult:
     message: str
     blocked: bool = False
+
+
+@dataclass(frozen=True)
+class PublishMetadata:
+    branch_name: str
+    pr_url: str
+    published_sha: str
 
 
 def run_phase_loop(
@@ -127,7 +139,9 @@ def _run_implement(
         job_type="IMPLEMENT",
         role="coder",
         profile=profile,
-        prompt=_implement_prompt(repo_root, parsed_phase),
+        prompt=_implement_prompt(
+            repo_root, parsed_phase, require_publish=config.auto_commit
+        ),
         repo_root=repo_root,
         log_dir=Path(phase["log_dir"]),
         timeout_seconds=config.timeout_minutes * 60,
@@ -155,7 +169,7 @@ def _run_implement(
         phase_id=phase["id"],
         job_id=result.job_id,
         event_type="phase.checking",
-        message=f"IMPLEMENT succeeded; staged changes for phase {phase['phase_number']}",
+        message=f"IMPLEMENT succeeded; checking phase {phase['phase_number']}",
     )
     return _run_checks(
         connection,
@@ -189,6 +203,44 @@ def _run_checks(
         timeout_seconds=config.timeout_minutes * 60,
     )
     if result.status == "SUCCEEDED":
+        phase = get_phase(connection, phase["id"])
+        if config.auto_commit:
+            try:
+                metadata = _verify_published_phase(repo_root)
+            except JobError as exc:
+                return _block_phase_after_publish_failure(
+                    connection,
+                    project_id=project_id,
+                    plan_id=plan_id,
+                    phase=phase,
+                    source_job=result,
+                    message=str(exc),
+                )
+            phase = update_phase_publish_metadata(
+                connection,
+                phase["id"],
+                publish_mode="pr",
+                branch_name=metadata.branch_name,
+                pr_url=metadata.pr_url,
+                published_sha=metadata.published_sha,
+            )
+            record_event(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase_id=phase["id"],
+                job_id=result.job_id,
+                event_type="phase.published",
+                message=(
+                    f"phase {phase['phase_number']} published to PR "
+                    f"{metadata.pr_url}"
+                ),
+                data={
+                    "branchName": metadata.branch_name,
+                    "prUrl": metadata.pr_url,
+                    "publishedSha": metadata.published_sha,
+                },
+            )
         update_phase_status(connection, phase["id"], "REVIEWING")
         record_event(
             connection,
@@ -218,7 +270,9 @@ def _run_checks(
         config=config,
         repo_root=repo_root,
         trigger="checks",
-        prompt=_checks_fix_prompt(parsed_phase, result),
+        prompt=_checks_fix_prompt(
+            parsed_phase, result, require_publish=config.auto_commit
+        ),
         blocker_summary=_checks_blocker_summary(result),
         source_job=result,
     )
@@ -234,6 +288,40 @@ def _run_review(
     config: RunnerConfig,
     repo_root: Path,
 ) -> PhaseLoopResult:
+    if config.auto_commit and not _phase_has_publish_metadata(phase):
+        try:
+            metadata = _verify_published_phase(repo_root)
+        except JobError as exc:
+            return _block_phase_after_publish_failure(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase=phase,
+                source_job=None,
+                message=str(exc),
+            )
+        phase = update_phase_publish_metadata(
+            connection,
+            phase["id"],
+            publish_mode="pr",
+            branch_name=metadata.branch_name,
+            pr_url=metadata.pr_url,
+            published_sha=metadata.published_sha,
+        )
+        record_event(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            event_type="phase.published",
+            message=f"phase {phase['phase_number']} published to PR {metadata.pr_url}",
+            data={
+                "branchName": metadata.branch_name,
+                "prUrl": metadata.pr_url,
+                "publishedSha": metadata.published_sha,
+            },
+        )
+
     profile = _profile_for_role(config, "reviewer")
     log_dir = Path(phase["log_dir"])
     result = run_agent_job(
@@ -244,7 +332,13 @@ def _run_review(
         job_type="REVIEW",
         role="reviewer",
         profile=profile,
-        prompt=_review_prompt(repo_root, parsed_phase, log_dir),
+        prompt=_review_prompt(
+            repo_root,
+            parsed_phase,
+            log_dir,
+            phase=phase,
+            use_published_diff=config.auto_commit,
+        ),
         repo_root=repo_root,
         log_dir=log_dir,
         timeout_seconds=config.timeout_minutes * 60,
@@ -311,7 +405,9 @@ def _run_review(
             config=config,
             repo_root=repo_root,
             trigger="review",
-            prompt=_review_fix_prompt(parsed_phase, blocking_issues),
+            prompt=_review_fix_prompt(
+                parsed_phase, blocking_issues, require_publish=config.auto_commit
+            ),
             blocker_summary=_review_blocker_summary(blocking_issues),
             source_job=result,
         )
@@ -666,6 +762,176 @@ def _git_diff_staged(repo_root: Path) -> str:
     return result.stdout
 
 
+def _verify_published_phase(repo_root: Path) -> PublishMetadata:
+    dirty_paths = _git_dirty_paths(repo_root)
+    if dirty_paths:
+        paths = ", ".join(sorted(dirty_paths)[:5])
+        suffix = "" if len(dirty_paths) <= 5 else ", ..."
+        raise JobError(
+            "publish required before review, but the worktree is dirty: "
+            f"{paths}{suffix}"
+        )
+
+    branch_name = _git_current_branch(repo_root)
+    published_sha = _git_head_sha(repo_root)
+    payload = _gh_pr_view(repo_root)
+
+    pr_url = payload.get("url")
+    if not isinstance(pr_url, str) or not pr_url:
+        raise JobError("publish required before review, but gh returned no PR URL")
+
+    head_ref_name = payload.get("headRefName")
+    if isinstance(head_ref_name, str) and head_ref_name and head_ref_name != branch_name:
+        raise JobError(
+            "publish required before review, but the open PR is for branch "
+            f"{head_ref_name!r}, not current branch {branch_name!r}"
+        )
+
+    head_ref_oid = payload.get("headRefOid")
+    if isinstance(head_ref_oid, str) and head_ref_oid and head_ref_oid != published_sha:
+        raise JobError(
+            "publish required before review, but the PR head is "
+            f"{head_ref_oid[:12]} while local HEAD is {published_sha[:12]}; "
+            "push the branch before review"
+        )
+
+    return PublishMetadata(
+        branch_name=branch_name,
+        pr_url=pr_url,
+        published_sha=published_sha,
+    )
+
+
+def _git_current_branch(repo_root: Path) -> str:
+    result = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise JobError(result.stderr.strip() or "git branch --show-current failed")
+    branch = result.stdout.strip()
+    if not branch:
+        raise JobError("publish required before review, but HEAD is detached")
+    return branch
+
+
+def _git_head_sha(repo_root: Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise JobError(result.stderr.strip() or "git rev-parse HEAD failed")
+    return result.stdout.strip()
+
+
+def _gh_pr_view(repo_root: Path) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", "--json", "url,headRefName,headRefOid"],
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise JobError(
+            "publish required before review, but gh is not installed or not on PATH"
+        ) from exc
+
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "gh pr view failed"
+        raise JobError(
+            "publish required before review; create/push a PR for the current branch "
+            f"first ({detail})"
+        )
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise JobError(f"gh pr view returned invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise JobError("gh pr view returned invalid JSON: expected an object")
+    return payload
+
+
+def _published_phase_diff(repo_root: Path, phase: sqlite3.Row) -> str:
+    pr_url = phase["pr_url"]
+    if pr_url:
+        try:
+            result = subprocess.run(
+                ["gh", "pr", "diff", pr_url, "--patch"],
+                cwd=repo_root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            result = None
+        if result is not None and result.returncode == 0 and result.stdout:
+            return result.stdout
+
+    for base_ref in ("origin/main", "main", "origin/master", "master", "HEAD~1"):
+        result = subprocess.run(
+            ["git", "merge-base", "HEAD", base_ref],
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            continue
+        merge_base = result.stdout.strip()
+        diff = subprocess.run(
+            ["git", "diff", f"{merge_base}..HEAD"],
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if diff.returncode != 0:
+            continue
+        if diff.stdout:
+            return diff.stdout
+
+    return _git_diff_staged(repo_root)
+
+
+def _phase_has_publish_metadata(phase: sqlite3.Row) -> bool:
+    return bool(phase["branch_name"] and phase["pr_url"] and phase["published_sha"])
+
+
+def _block_phase_after_publish_failure(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    source_job: Optional[JobResult],
+    message: str,
+) -> PhaseLoopResult:
+    update_phase_status(connection, phase["id"], "BLOCKED")
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        job_id=source_job.job_id if source_job is not None else None,
+        event_type="phase.blocked",
+        message=f"publish failed for phase {phase['phase_number']}: {message}",
+    )
+    return PhaseLoopResult(
+        f"phase {phase['phase_number']} BLOCKED before REVIEW: {message}",
+        blocked=True,
+    )
+
+
 def _block_phase_after_job(
     connection: sqlite3.Connection,
     *,
@@ -721,13 +987,17 @@ def _block_retries_exhausted(
     return PhaseLoopResult(message, blocked=True)
 
 
-def _implement_prompt(repo_root: Path, phase: ParsedPhase) -> str:
+def _implement_prompt(
+    repo_root: Path, phase: ParsedPhase, *, require_publish: bool
+) -> str:
+    publish = _publish_instructions(require_publish)
     if _toolbelt_installed(repo_root):
         return (
             "/dev-implement-task\n\n"
             f"Phase {phase.phase_number}: {phase.title}\n\n"
             "Scope rules: implement only this phase; do not start future phases; "
             "avoid unrelated refactors; add or update tests with behavior changes.\n\n"
+            f"{publish}"
             f"{phase.content}"
         )
     return (
@@ -740,12 +1010,20 @@ def _implement_prompt(repo_root: Path, phase: ParsedPhase) -> str:
         "- Add or update tests for behavior changes.\n"
         "- Return a brief summary, files changed, tests run, risks, and suggested "
         "commit message.\n\n"
+        f"{publish}"
         "Phase body:\n"
         f"{phase.content}"
     )
 
 
-def _review_prompt(repo_root: Path, phase: ParsedPhase, log_dir: Path) -> str:
+def _review_prompt(
+    repo_root: Path,
+    parsed_phase: ParsedPhase,
+    log_dir: Path,
+    *,
+    phase: sqlite3.Row,
+    use_published_diff: bool,
+) -> str:
     previous_review = ""
     review_json_path = log_dir / "review.json"
     if review_json_path.exists():
@@ -757,9 +1035,24 @@ def _review_prompt(repo_root: Path, phase: ParsedPhase, log_dir: Path) -> str:
             f"{REVIEW_RESOLVED_INSTRUCTION}\n\n"
         )
 
+    if use_published_diff:
+        review_subject = (
+            "Review the published phase PR independently. Do not edit files.\n\n"
+            f"Published PR: {phase['pr_url']}\n"
+            f"Published branch: {phase['branch_name']}\n"
+            f"Published SHA: {phase['published_sha']}\n\n"
+        )
+        diff_label = "published PR diff"
+        diff_text = _published_phase_diff(repo_root, phase)
+    else:
+        review_subject = "Review the staged phase work independently. Do not edit files.\n\n"
+        diff_label = "git diff --staged"
+        diff_text = _git_diff_staged(repo_root)
+
     return (
-        "Review the staged phase work independently. Do not edit files.\n\n"
-        f"Phase {phase.phase_number}: {phase.title}\n\n"
+        review_subject
+        +
+        f"Phase {parsed_phase.phase_number}: {parsed_phase.title}\n\n"
         "Return strict JSON only with this shape:\n"
         "{\n"
         '  "status": "PASS | CHANGES_REQUESTED | BLOCKED",\n'
@@ -772,10 +1065,10 @@ def _review_prompt(repo_root: Path, phase: ParsedPhase, log_dir: Path) -> str:
         "Have findings belong in nonBlockingIssues and are not gating.\n\n"
         f"{previous_review}"
         "Phase body:\n"
-        f"{phase.content}\n\n"
-        "git diff --staged:\n"
+        f"{parsed_phase.content}\n\n"
+        f"{diff_label}:\n"
         "```diff\n"
-        f"{_git_diff_staged(repo_root)}\n"
+        f"{diff_text}\n"
         "```\n\n"
         "Check output:\n"
         "```text\n"
@@ -784,10 +1077,13 @@ def _review_prompt(repo_root: Path, phase: ParsedPhase, log_dir: Path) -> str:
     )
 
 
-def _checks_fix_prompt(phase: ParsedPhase, checks: JobResult) -> str:
+def _checks_fix_prompt(
+    phase: ParsedPhase, checks: JobResult, *, require_publish: bool
+) -> str:
     output = ""
     if checks.log_path.exists():
         output = checks.log_path.read_text(encoding="utf-8")
+    publish = _publish_instructions(require_publish, update_existing=True)
     return (
         "Fix only the check failure for this phase.\n\n"
         f"Phase {phase.phase_number}: {phase.title}\n\n"
@@ -796,6 +1092,7 @@ def _checks_fix_prompt(phase: ParsedPhase, checks: JobResult) -> str:
         "- Do not start future phases.\n"
         "- Avoid unrelated refactors.\n"
         "- Add or update tests when behavior changes.\n\n"
+        f"{publish}"
         "Phase body:\n"
         f"{phase.content}\n\n"
         "Check failure context:\n"
@@ -803,7 +1100,10 @@ def _checks_fix_prompt(phase: ParsedPhase, checks: JobResult) -> str:
     )
 
 
-def _review_fix_prompt(phase: ParsedPhase, blocking_issues: list[Any]) -> str:
+def _review_fix_prompt(
+    phase: ParsedPhase, blocking_issues: list[Any], *, require_publish: bool
+) -> str:
+    publish = _publish_instructions(require_publish, update_existing=True)
     return (
         "Fix only the listed review blocking issues for this phase.\n\n"
         f"Phase {phase.phase_number}: {phase.title}\n\n"
@@ -813,12 +1113,32 @@ def _review_fix_prompt(phase: ParsedPhase, blocking_issues: list[Any]) -> str:
         "- Do not start future phases.\n"
         "- Avoid unrelated refactors.\n"
         "- Add or update tests when behavior changes.\n\n"
+        f"{publish}"
         "Phase body:\n"
         f"{phase.content}\n\n"
         "Blocking issues:\n"
         "```json\n"
         f"{json.dumps(blocking_issues, indent=2, sort_keys=True)}\n"
         "```"
+    )
+
+
+def _publish_instructions(require_publish: bool, *, update_existing: bool = False) -> str:
+    if not require_publish:
+        return ""
+
+    pr_action = (
+        "update the existing PR for this branch"
+        if update_existing
+        else "create a PR for the current branch"
+    )
+    return (
+        "Publish requirements before you finish:\n"
+        "- Commit all changes for this phase on the current branch.\n"
+        "- Push the current branch.\n"
+        f"- {pr_action}; do not merge it.\n"
+        "- Leave the worktree clean.\n"
+        "- Include the PR URL and commit SHA in your final response.\n\n"
     )
 
 
