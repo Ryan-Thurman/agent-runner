@@ -33,7 +33,6 @@ retries run out, then a closure job updates docs + plan + handoff and commits.
   and (where useful) JSON to stdout so scripts can parse them.
 
 ## Phase 1: CLI scaffold, config, project detection, locking
-
 Status: COMPLETE
 
 Build the skeleton everything else hangs on: an `agent-runner` entrypoint with
@@ -59,7 +58,6 @@ Acceptance Criteria:
   explicitly; the lock is removed on clean exit and on SIGINT.
 
 ## Phase 2: SQLite state layer and event log
-
 Status: COMPLETE
 
 Implement the storage module: global DB at `~/.agent-runner/runner.sqlite`, WAL +
@@ -81,7 +79,6 @@ Acceptance Criteria:
   their paths are stored in SQLite.
 
 ## Phase 3: Plan parsing, registration, and change detection
-
 Status: COMPLETE
 
 Parse the plan markdown: phases are `## Phase <number>: <title>` blocks, each phase's
@@ -101,7 +98,6 @@ Acceptance Criteria:
   `--accept-plan-change`; the flag unblocks and records an event.
 
 ## Phase 4: Job execution engine
-
 Status: COMPLETE
 
 The generic "run an agent or a command as a job" layer: create the job row, write the
@@ -123,7 +119,6 @@ Acceptance Criteria:
 - Checks variant runs commands in order, stops at first failure, records which failed.
 
 ## Phase 5: IMPLEMENT and RUN_CHECKS loop
-
 Status: COMPLETE
 
 Wire the first half of the phase loop. Dirty-repo gate first (`git status --porcelain`;
@@ -145,7 +140,6 @@ Acceptance Criteria:
 - Dirty repo without `allowDirty` blocks before any job starts.
 
 ## Phase 6: REVIEW and FIX convergence loop
-
 Status: PENDING
 
 The reviewer leg and the retry loop, with the four convergence rules from the design
@@ -174,7 +168,6 @@ Acceptance Criteria:
   `review.log`.
 
 ## Phase 7: CLOSE_PHASE — the full circle
-
 Status: PENDING
 
 On PASS, launch the **closer** (coder profile, write flags) with the closure prompt:
@@ -198,7 +191,6 @@ Acceptance Criteria:
 - Multi-phase plan: completing phase 1 automatically starts phase 2's IMPLEMENT.
 
 ## Phase 8: Resume, pause, logs, and end-to-end dogfood
-
 Status: PENDING
 
 Finish the operator surface. `pause`/`resume` flip project status; a paused project
