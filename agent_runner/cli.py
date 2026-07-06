@@ -11,6 +11,7 @@ from .errors import AgentRunnerError, ConfigError, GitRepoError, LockError
 from .git import find_git_root
 from .lock import ProjectLock, SignalLockRelease, reset_project_lock
 from .paths import ensure_runner_layout
+from .phase_loop import run_phase_loop
 from .plan import parse_plan_file, register_or_resume_plan
 from .storage import (
     connect_db,
@@ -131,11 +132,17 @@ def cmd_run(args: argparse.Namespace) -> int:
             hold_seconds = float(os.environ.get("AGENT_RUNNER_HOLD_SECONDS", "0"))
             if hold_seconds > 0:
                 time.sleep(hold_seconds)
-            print(
-                "[agent-runner] job loop is not implemented until Phase 4+; "
-                "config, lock, storage, and plan checks passed",
-                file=sys.stderr,
-            )
+            with connect_db(home) as db:
+                loop_result = run_phase_loop(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan_result.plan_id,
+                    parsed_plan=parsed_plan,
+                    config=config,
+                    repo_root=repo_root,
+                )
+            print(f"[agent-runner] {loop_result.message}", file=sys.stderr)
+            return 1 if loop_result.blocked else 0
     except KeyboardInterrupt:
         print("[agent-runner] interrupted; lock released", file=sys.stderr)
         return 130
@@ -177,6 +184,14 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "[agent-runner]   "
                     f"phase {phase['phase_number']}: {phase['status']} "
                     f"retries={phase['retry_count']}{publish}",
+                    file=sys.stderr,
+                )
+        if events:
+            print("[agent-runner] recent events:", file=sys.stderr)
+            for event in events:
+                print(
+                    "[agent-runner]   "
+                    f"{event['event_type']}: {event['message']}",
                     file=sys.stderr,
                 )
 

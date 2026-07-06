@@ -290,6 +290,41 @@ def list_phases_for_plan(
     )
 
 
+def update_phase_status(
+    connection: sqlite3.Connection,
+    phase_id: int,
+    status: str,
+    *,
+    increment_retry: bool = False,
+) -> sqlite3.Row:
+    if status not in PHASE_STATUSES:
+        raise ValueError(f"invalid phase status: {status}")
+    now = utc_now_iso()
+    if increment_retry:
+        connection.execute(
+            """
+            UPDATE phases
+            SET status = ?,
+                updated_at = ?,
+                retry_count = retry_count + 1
+            WHERE id = ?
+            """,
+            (status, now, phase_id),
+        )
+    else:
+        connection.execute(
+            """
+            UPDATE phases
+            SET status = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (status, now, phase_id),
+        )
+    connection.commit()
+    return get_phase(connection, phase_id)
+
+
 def create_job(
     connection: sqlite3.Connection,
     *,
