@@ -259,13 +259,19 @@ def register_or_resume_plan(
 def _extract_status_and_hash_lines(lines: list[str]) -> tuple[str, list[str]]:
     if not lines:
         return "PENDING", []
-    match = STATUS_RE.match(lines[0].rstrip("\r\n"))
+    status_index = 0
+    while status_index < len(lines) and not lines[status_index].strip():
+        status_index += 1
+    if status_index == len(lines):
+        return "PENDING", list(lines)
+
+    match = STATUS_RE.match(lines[status_index].rstrip("\r\n"))
     if not match:
         return "PENDING", list(lines)
     status = match.group(1)
     if status not in PHASE_STATUSES:
         raise PlanError(f"invalid phase status marker: {status}")
-    return status, list(lines[1:])
+    return status, list(lines[status_index + 1 :])
 
 
 def _next_heading_index(

@@ -111,6 +111,34 @@ class Phase3PlanTests(unittest.TestCase):
         self.assertEqual(pending.phases[0].content_hash, complete.phases[0].content_hash)
         self.assertEqual(pending.content_hash, complete.content_hash)
 
+    def test_status_marker_can_follow_blank_lines(self):
+        direct = parse_plan_markdown(
+            "## Phase 1: CLI\n"
+            "Status: COMPLETE\n\n"
+            "Build CLI.\n",
+            path="docs/plan.md",
+        )
+        spaced = parse_plan_markdown(
+            "## Phase 1: CLI\n\n"
+            "Status: COMPLETE\n\n"
+            "Build CLI.\n",
+            path="docs/plan.md",
+        )
+
+        self.assertEqual(spaced.phases[0].status, "COMPLETE")
+        self.assertEqual(spaced.phases[0].content_hash, direct.phases[0].content_hash)
+        self.assertEqual(spaced.content_hash, direct.content_hash)
+
+    def test_invalid_status_marker_after_blank_lines_is_rejected(self):
+        text = (
+            "## Phase 1: Bad status\n\n"
+            "Status: NOT_A_REAL_STATUS\n"
+            "Do work.\n"
+        )
+
+        with self.assertRaisesRegex(PlanError, "invalid phase status marker"):
+            parse_plan_markdown(text, path="docs/plan.md")
+
     def test_parse_plan_file_rejects_paths_outside_repo(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
