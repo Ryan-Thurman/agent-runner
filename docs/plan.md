@@ -124,7 +124,7 @@ Acceptance Criteria:
 
 ## Phase 5: IMPLEMENT and RUN_CHECKS loop
 
-Status: REVIEWING
+Status: COMPLETE
 
 Wire the first half of the phase loop. Dirty-repo gate first (`git status --porcelain`;
 block unless `allowDirty`, then warn). IMPLEMENT: generate the coder prompt — thin mode
