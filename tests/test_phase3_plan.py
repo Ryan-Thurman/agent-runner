@@ -38,6 +38,36 @@ def git_init(path: Path) -> None:
 
 def write_config(repo: Path, plan_path: str = "docs/plan.md") -> None:
     data = json.loads(strip_json_comments(SAMPLE_CONFIG))
+    agent_script = repo / "fake_agent.py"
+    agent_script.write_text(
+        """
+import json
+import sys
+
+prompt = sys.argv[-1]
+if "Review the staged phase work independently" in prompt:
+    print(json.dumps({
+        "status": "PASS",
+        "summary": "accepted",
+        "blockingIssues": [],
+        "nonBlockingIssues": [],
+        "recommendedFixPrompt": ""
+    }))
+else:
+    print("fake agent completed")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    data["agents"] = {
+        "fake": {
+            "command": sys.executable,
+            "promptArgs": [str(agent_script)],
+            "writeFlags": [],
+            "readOnlyFlags": [],
+            "outputCapture": "stdout",
+        }
+    }
+    data["roles"] = {"coder": "fake", "reviewer": "fake"}
     data["planPath"] = plan_path
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -218,7 +248,7 @@ class Phase3PlanTests(unittest.TestCase):
                 phases = list_phases_for_plan(db, plans[0]["id"])
             self.assertEqual(plans[0]["path"], "docs/plan.md")
             self.assertEqual([phase["phase_number"] for phase in phases], [1, 3])
-            self.assertEqual(phases[0]["status"], "REVIEWING")
+            self.assertEqual(phases[0]["status"], "CLOSING")
             self.assertEqual(phases[1]["status"], "PENDING")
             self.assertTrue((home / "logs" / project_slug(repo) / "docs-plan.md" / "phase-1").is_dir())
 

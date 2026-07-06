@@ -41,6 +41,7 @@ def run_agent_job(
     repo_root: Path,
     log_dir: Path,
     timeout_seconds: float,
+    trigger: Optional[str] = None,
 ) -> JobResult:
     _ensure_no_running_job(connection, project_id)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -59,6 +60,7 @@ def run_agent_job(
         phase_id=phase_id,
         job_type=job_type,
         status="RUNNING",
+        trigger=trigger,
         prompt_path=prompt_path,
         log_path=log_path,
         output_path=output_path,

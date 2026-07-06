@@ -140,7 +140,7 @@ Acceptance Criteria:
 - Dirty repo without `allowDirty` blocks before any job starts.
 
 ## Phase 6: REVIEW and FIX convergence loop
-Status: PENDING
+Status: COMPLETE
 
 The reviewer leg and the retry loop, with the four convergence rules from the design
 doc: (1) the review prompt contains phase content + `git diff --staged` + check output —
