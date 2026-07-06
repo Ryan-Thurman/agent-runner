@@ -1,7 +1,7 @@
 import json
 import os
-import signal
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile

@@ -81,14 +81,7 @@ def run_agent_job(
         if profile.output_capture in {"stdout", "structured-stdout"}:
             output_path.write_text(stdout, encoding="utf-8")
     except KeyboardInterrupt:
-        _finish_job(
-            connection,
-            job["id"],
-            status="FAILED",
-            exit_code=None,
-            error="interrupted",
-            finished_sha=_git_sha(repo_root),
-        )
+        _mark_job_interrupted(connection, job["id"], repo_root)
         raise
     except Exception as exc:
         exit_code = None
@@ -165,14 +158,7 @@ def run_checks_job(
                 error = process_error or f"check failed: {command}"
                 break
     except KeyboardInterrupt:
-        _finish_job(
-            connection,
-            job["id"],
-            status="FAILED",
-            exit_code=None,
-            error="interrupted",
-            finished_sha=_git_sha(repo_root),
-        )
+        _mark_job_interrupted(connection, job["id"], repo_root)
         raise
     except Exception as exc:
         final_exit_code = None
@@ -265,18 +251,18 @@ def _run_process(
             error = f"failed to start process: {exc}"
             log_file.write(f"\n[error]\n{error}\n")
             return None, "", "", error
-        stdout_thread = threading.Thread(
-            target=_pump_stream,
-            args=(process.stdout, stdout_chunks, log_file, lock),
-        )
-        stderr_thread = threading.Thread(
-            target=_pump_stream,
-            args=(process.stderr, stderr_chunks, log_file, lock),
-        )
-        stdout_thread.start()
-        stderr_thread.start()
         error = None
         try:
+            stdout_thread = threading.Thread(
+                target=_pump_stream,
+                args=(process.stdout, stdout_chunks, log_file, lock),
+            )
+            stderr_thread = threading.Thread(
+                target=_pump_stream,
+                args=(process.stderr, stderr_chunks, log_file, lock),
+            )
+            stdout_thread.start()
+            stderr_thread.start()
             exit_code = process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             exit_code, signal_name = _kill_process_group(process)
@@ -290,8 +276,10 @@ def _run_process(
                 log_file.flush()
             raise
         finally:
-            _join_thread(stdout_thread)
-            _join_thread(stderr_thread)
+            _close_stream_without_thread(process.stdout, stdout_thread)
+            _close_stream_without_thread(process.stderr, stderr_thread)
+            _join_thread(stdout_thread, timeout=2)
+            _join_thread(stderr_thread, timeout=2)
         if error is not None:
             with lock:
                 log_file.write(f"\n[error]\n{error}\n")
@@ -310,9 +298,14 @@ def _pump_stream(stream, chunks: list[str], log_file, lock: threading.Lock) -> N
                 log_file.flush()
 
 
-def _join_thread(thread: Optional[threading.Thread]) -> None:
+def _join_thread(thread: Optional[threading.Thread], *, timeout: float) -> None:
     if thread is not None:
-        thread.join()
+        thread.join(timeout=timeout)
+
+
+def _close_stream_without_thread(stream, thread: Optional[threading.Thread]) -> None:
+    if thread is None and stream is not None:
+        stream.close()
 
 
 def _kill_process_group(process: subprocess.Popen) -> tuple[int, str]:
@@ -371,6 +364,19 @@ def _finish_job(
         (status, exit_code, error, finished_sha, now, now, job_id),
     )
     connection.commit()
+
+
+def _mark_job_interrupted(
+    connection: sqlite3.Connection, job_id: int, repo_root: Path
+) -> None:
+    _finish_job(
+        connection,
+        job_id,
+        status="FAILED",
+        exit_code=None,
+        error="interrupted",
+        finished_sha=_git_sha(repo_root),
+    )
 
 
 def _append_error(log_path: Path, error: str) -> None:

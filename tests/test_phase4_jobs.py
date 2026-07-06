@@ -7,10 +7,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_runner.config import AgentProfile
 from agent_runner.errors import JobError
-from agent_runner.jobs import run_agent_job, run_checks_job
+from agent_runner.jobs import _run_process, run_agent_job, run_checks_job
 from agent_runner.storage import (
     connect_db,
     create_job,
@@ -398,6 +399,73 @@ class Phase4JobTests(unittest.TestCase):
             self.assertEqual(result.status, "FAILED")
             self.assertEqual(result.exit_code, -signal.SIGKILL)
             self.assertIn("SIGKILL", result.error)
+
+    def test_run_process_interrupt_during_thread_setup_kills_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            script = root / "sleep.py"
+            script.write_text(
+                "import time\n"
+                "while True:\n"
+                "    time.sleep(1)\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch(
+                "agent_runner.jobs.threading.Thread", side_effect=KeyboardInterrupt
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    _run_process(
+                        [sys.executable, str(script)],
+                        repo_root=repo,
+                        timeout_seconds=5,
+                        shell=False,
+                        log_path=root / "interrupt.log",
+                        log_header="$ sleep\n",
+                    )
+
+            self.assertIn(
+                "interrupted",
+                (root / "interrupt.log").read_text(encoding="utf-8"),
+            )
+
+    def test_run_process_timeout_does_not_hang_on_open_grandchild_pipe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            script = root / "grandchild_pipe.py"
+            script.write_text(
+                """
+import subprocess
+import sys
+import time
+
+subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    stdout=sys.stdout,
+    stderr=sys.stderr,
+)
+time.sleep(30)
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            exit_code, stdout, stderr, error = _run_process(
+                [sys.executable, str(script)],
+                repo_root=repo,
+                timeout_seconds=0.2,
+                shell=False,
+                log_path=root / "timeout.log",
+                log_header="$ grandchild\n",
+            )
+
+            self.assertEqual(exit_code, -signal.SIGTERM)
+            self.assertIn("timeout after", error)
 
     def test_reviewer_uses_readonly_flags_and_last_message_capture(self):
         with tempfile.TemporaryDirectory() as tmp:
