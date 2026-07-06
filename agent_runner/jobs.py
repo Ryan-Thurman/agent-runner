@@ -80,6 +80,16 @@ def run_agent_job(
         )
         if profile.output_capture in {"stdout", "structured-stdout"}:
             output_path.write_text(stdout, encoding="utf-8")
+    except KeyboardInterrupt:
+        _finish_job(
+            connection,
+            job["id"],
+            status="FAILED",
+            exit_code=None,
+            error="interrupted",
+            finished_sha=_git_sha(repo_root),
+        )
+        raise
     except Exception as exc:
         exit_code = None
         error = _exception_message(exc)
@@ -154,6 +164,16 @@ def run_checks_job(
                 final_exit_code = exit_code
                 error = process_error or f"check failed: {command}"
                 break
+    except KeyboardInterrupt:
+        _finish_job(
+            connection,
+            job["id"],
+            status="FAILED",
+            exit_code=None,
+            error="interrupted",
+            finished_sha=_git_sha(repo_root),
+        )
+        raise
     except Exception as exc:
         final_exit_code = None
         error = _exception_message(exc)
@@ -225,6 +245,11 @@ def _run_process(
     with log_path.open("a", encoding="utf-8") as log_file:
         log_file.write(log_header)
         log_file.flush()
+        stdout_thread: Optional[threading.Thread] = None
+        stderr_thread: Optional[threading.Thread] = None
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        lock = threading.Lock()
         try:
             process = subprocess.Popen(
                 command,
@@ -240,9 +265,6 @@ def _run_process(
             error = f"failed to start process: {exc}"
             log_file.write(f"\n[error]\n{error}\n")
             return None, "", "", error
-        stdout_chunks: list[str] = []
-        stderr_chunks: list[str] = []
-        lock = threading.Lock()
         stdout_thread = threading.Thread(
             target=_pump_stream,
             args=(process.stdout, stdout_chunks, log_file, lock),
@@ -259,8 +281,17 @@ def _run_process(
         except subprocess.TimeoutExpired:
             exit_code, signal_name = _kill_process_group(process)
             error = f"timeout after {timeout_seconds:g}s; killed with {signal_name}"
-        stdout_thread.join(timeout=2)
-        stderr_thread.join(timeout=2)
+        except KeyboardInterrupt:
+            if process.poll() is None:
+                _kill_process_group(process)
+            error = "interrupted"
+            with lock:
+                log_file.write(f"\n[error]\n{error}\n")
+                log_file.flush()
+            raise
+        finally:
+            _join_thread(stdout_thread)
+            _join_thread(stderr_thread)
         if error is not None:
             with lock:
                 log_file.write(f"\n[error]\n{error}\n")
@@ -277,6 +308,11 @@ def _pump_stream(stream, chunks: list[str], log_file, lock: threading.Lock) -> N
             with lock:
                 log_file.write(text)
                 log_file.flush()
+
+
+def _join_thread(thread: Optional[threading.Thread]) -> None:
+    if thread is not None:
+        thread.join()
 
 
 def _kill_process_group(process: subprocess.Popen) -> tuple[int, str]:

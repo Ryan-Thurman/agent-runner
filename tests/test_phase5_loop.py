@@ -1,9 +1,11 @@
 import json
 import os
+import signal
 import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Optional
@@ -114,6 +116,28 @@ if "Phase 5: Test implementation" not in prompt:
 {create_line}
 print("fake coder completed")
 raise SystemExit({exit_code})
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+
+def write_sleeping_agent(path: Path) -> None:
+    path.write_text(
+        """
+import signal
+import sys
+import time
+from pathlib import Path
+
+def handle_term(signum, frame):
+    Path("agent-terminated.txt").write_text("terminated\\n", encoding="utf-8")
+    raise SystemExit(143)
+
+signal.signal(signal.SIGTERM, handle_term)
+Path("agent-started.txt").write_text("started\\n", encoding="utf-8")
+while True:
+    print("tick", flush=True)
+    time.sleep(0.1)
 """.lstrip(),
         encoding="utf-8",
     )
@@ -250,6 +274,56 @@ class Phase5LoopTests(unittest.TestCase):
                 job_count = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
             self.assertEqual(job_count, 0)
             self.assertEqual(phase_row(home, repo)["status"], "PENDING")
+
+    def test_sigint_during_agent_job_marks_failed_without_thread_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "sleeping_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_sleeping_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[])
+            commit_all(repo)
+            env = os.environ.copy()
+            env["AGENT_RUNNER_HOME"] = str(home)
+            env["PYTHONPATH"] = str(ROOT)
+
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "agent_runner", "run"],
+                cwd=repo,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                deadline = time.time() + 10
+                while time.time() < deadline and not (repo / "agent-started.txt").exists():
+                    time.sleep(0.05)
+                self.assertTrue((repo / "agent-started.txt").exists())
+
+                proc.send_signal(signal.SIGINT)
+                stdout, stderr = proc.communicate(timeout=10)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate(timeout=5)
+
+            self.assertEqual(proc.returncode, 130, stderr + stdout)
+            self.assertIn("interrupted; lock released", stderr)
+            self.assertNotIn("Exception in thread", stderr)
+            self.assertNotIn("Traceback", stderr)
+            self.assertFalse(
+                (home / "locks" / f"{project_slug(repo)}.lock").exists()
+            )
+            self.assertTrue((repo / "agent-terminated.txt").exists())
+            with connect_db(home) as db:
+                job = db.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertEqual(job["status"], "FAILED")
+            self.assertEqual(job["error"], "interrupted")
 
     def test_implementing_resume_skips_dirty_gate_after_orphan_reap(self):
         with tempfile.TemporaryDirectory() as tmp:
