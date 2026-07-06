@@ -1,0 +1,35 @@
+{
+  "projectName": "agent-runner",
+  "planName": "Agent Runner Build Plan",
+  "planPath": "docs/plan.md",
+  "baseBranch": "main",
+  "checks": [
+    "python3 -m compileall -q .",
+    "python3 -m unittest discover -s tests -v"
+  ],
+  "agents": {
+    "claude": {
+      "command": "claude",
+      "promptArgs": ["-p"],
+      "writeFlags": ["--permission-mode", "acceptEdits"],
+      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "outputCapture": "stdout"
+    },
+    "codex": {
+      "command": "codex",
+      "promptArgs": ["exec"],
+      "writeFlags": ["--sandbox", "workspace-write"],
+      "readOnlyFlags": ["--sandbox", "read-only"],
+      "outputCapture": "last-message-file"
+    }
+  },
+  "roles": {
+    "coder": "claude",
+    "reviewer": "codex"
+  },
+  "maxRetriesPerPhase": 3,
+  "timeoutMinutes": 45,
+  "autoCommit": true,
+  "openPrWhenComplete": false,
+  "allowDirty": false
+}
