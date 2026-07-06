@@ -176,7 +176,7 @@ class Phase3PlanTests(unittest.TestCase):
             repo.mkdir()
             git_init(repo)
             write_config(repo)
-            write_plan(repo, sample_plan())
+            write_plan(repo, sample_plan(phase_1_status="REVIEWING"))
 
             result = run_cli(repo, home, "run")
 
@@ -190,7 +190,8 @@ class Phase3PlanTests(unittest.TestCase):
                 phases = list_phases_for_plan(db, plans[0]["id"])
             self.assertEqual(plans[0]["path"], "docs/plan.md")
             self.assertEqual([phase["phase_number"] for phase in phases], [1, 3])
-            self.assertEqual(phases[0]["status"], "PENDING")
+            self.assertEqual(phases[0]["status"], "REVIEWING")
+            self.assertEqual(phases[1]["status"], "PENDING")
             self.assertTrue((home / "logs" / project_slug(repo) / "docs-plan.md" / "phase-1").is_dir())
 
     def test_pending_phase_body_change_updates_only_that_phase(self):
@@ -200,7 +201,7 @@ class Phase3PlanTests(unittest.TestCase):
             repo.mkdir()
             git_init(repo)
             write_config(repo)
-            write_plan(repo, sample_plan())
+            write_plan(repo, sample_plan(phase_1_status="REVIEWING"))
             first = run_cli(repo, home, "run")
             self.assertEqual(first.returncode, 0, first.stderr)
 
@@ -214,7 +215,13 @@ class Phase3PlanTests(unittest.TestCase):
                     for phase in list_phases_for_plan(db, plan["id"])
                 }
 
-            write_plan(repo, sample_plan(phase_3_body="Parse plan with changes.\n"))
+            write_plan(
+                repo,
+                sample_plan(
+                    phase_1_status="REVIEWING",
+                    phase_3_body="Parse plan with changes.\n",
+                ),
+            )
             second = run_cli(repo, home, "run")
 
             self.assertEqual(second.returncode, 0, second.stderr)
@@ -241,7 +248,7 @@ class Phase3PlanTests(unittest.TestCase):
             repo.mkdir()
             git_init(repo)
             write_config(repo)
-            write_plan(repo, sample_plan())
+            write_plan(repo, sample_plan(phase_1_status="REVIEWING"))
             first = run_cli(repo, home, "run")
             self.assertEqual(first.returncode, 0, first.stderr)
 
@@ -264,7 +271,13 @@ class Phase3PlanTests(unittest.TestCase):
                 db.commit()
                 original_hash = phase["content_hash"]
 
-            write_plan(repo, sample_plan(phase_3_body="Changed protected phase.\n"))
+            write_plan(
+                repo,
+                sample_plan(
+                    phase_1_status="REVIEWING",
+                    phase_3_body="Changed protected phase.\n",
+                ),
+            )
             blocked = run_cli(repo, home, "run")
 
             self.assertNotEqual(blocked.returncode, 0)
@@ -287,7 +300,7 @@ class Phase3PlanTests(unittest.TestCase):
             repo.mkdir()
             git_init(repo)
             write_config(repo)
-            write_plan(repo, sample_plan())
+            write_plan(repo, sample_plan(phase_1_status="REVIEWING"))
             first = run_cli(repo, home, "run")
             self.assertEqual(first.returncode, 0, first.stderr)
 
@@ -310,7 +323,13 @@ class Phase3PlanTests(unittest.TestCase):
                 db.commit()
                 original_hash = phase["content_hash"]
 
-            write_plan(repo, sample_plan(phase_3_body="Accepted protected change.\n"))
+            write_plan(
+                repo,
+                sample_plan(
+                    phase_1_status="REVIEWING",
+                    phase_3_body="Accepted protected change.\n",
+                ),
+            )
             accepted = run_cli(repo, home, "run", "--accept-plan-change")
 
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
@@ -340,7 +359,7 @@ class Phase3PlanTests(unittest.TestCase):
             repo.mkdir()
             git_init(repo)
             write_config(repo)
-            write_plan(repo, sample_plan())
+            write_plan(repo, sample_plan(phase_1_status="REVIEWING"))
             first = run_cli(repo, home, "run")
             self.assertEqual(first.returncode, 0, first.stderr)
 
@@ -362,7 +381,13 @@ class Phase3PlanTests(unittest.TestCase):
                 )
                 db.commit()
 
-            write_plan(repo, sample_plan(phase_3_body="Changed blocked phase.\n"))
+            write_plan(
+                repo,
+                sample_plan(
+                    phase_1_status="REVIEWING",
+                    phase_3_body="Changed blocked phase.\n",
+                ),
+            )
             blocked = run_cli(repo, home, "run")
 
             self.assertNotEqual(blocked.returncode, 0)

@@ -1,0 +1,401 @@
+import json
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Optional
+
+from agent_runner.config import SAMPLE_CONFIG, project_slug, strip_json_comments
+from agent_runner.plan import parse_plan_file
+from agent_runner.storage import (
+    connect_db,
+    create_job,
+    create_phase,
+    create_plan,
+    get_or_create_project,
+    phase_log_dir,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def run_cli(cwd: Path, home: Path, *args: str, extra_env: Optional[dict[str, str]] = None):
+    env = os.environ.copy()
+    env["AGENT_RUNNER_HOME"] = str(home)
+    env["PYTHONPATH"] = str(ROOT)
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        [sys.executable, "-m", "agent_runner", *args],
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def git_init(path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+
+
+def commit_all(repo: Path, message: str = "baseline") -> None:
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            message,
+        ],
+        cwd=repo,
+        check=True,
+    )
+
+
+def write_plan(repo: Path, *, status: str = "PENDING") -> None:
+    plan_path = repo / "docs" / "plan.md"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text(
+        "## Phase 5: Test implementation\n"
+        f"Status: {status}\n\n"
+        "Create the generated marker file.\n\n"
+        "Acceptance Criteria:\n"
+        "- Marker file exists.\n",
+        encoding="utf-8",
+    )
+
+
+def write_config(
+    repo: Path,
+    agent_script: Path,
+    *,
+    checks: list[str],
+    allow_dirty: bool = False,
+) -> None:
+    data = json.loads(strip_json_comments(SAMPLE_CONFIG))
+    data["agents"] = {
+        "fake": {
+            "command": sys.executable,
+            "promptArgs": [str(agent_script)],
+            "writeFlags": [],
+            "readOnlyFlags": [],
+            "outputCapture": "stdout",
+        }
+    }
+    data["roles"] = {"coder": "fake", "reviewer": "fake"}
+    data["checks"] = checks
+    data["allowDirty"] = allow_dirty
+    data["timeoutMinutes"] = 1
+    (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def write_fake_agent(path: Path, *, exit_code: int = 0, create_file: bool = True) -> None:
+    create_line = ""
+    if create_file:
+        create_line = "Path('generated.txt').write_text('created by fake coder\\n')"
+    path.write_text(
+        f"""
+import sys
+from pathlib import Path
+
+prompt = sys.argv[-1]
+if "Phase 5: Test implementation" not in prompt:
+    print("missing phase prompt", file=sys.stderr)
+    raise SystemExit(12)
+{create_line}
+print("fake coder completed")
+raise SystemExit({exit_code})
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+
+def phase_row(home: Path, repo: Path):
+    with connect_db(home) as db:
+        return db.execute(
+            """
+            SELECT phases.*
+            FROM phases
+            JOIN projects ON projects.id = phases.project_id
+            WHERE projects.repo_path = ?
+            """,
+            (str(repo.resolve()),),
+        ).fetchone()
+
+
+class Phase5LoopTests(unittest.TestCase):
+    def test_implement_stages_untracked_file_and_passes_checks_to_reviewing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "fake_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_fake_agent(script)
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                checks=[
+                    f"{shlex.quote(sys.executable)} -c "
+                    "\"from pathlib import Path; assert Path('generated.txt').exists()\""
+                ],
+            )
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("checks passed", result.stderr)
+            staged = subprocess.run(
+                ["git", "diff", "--staged", "--name-only"],
+                cwd=repo,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.splitlines()
+            self.assertIn("generated.txt", staged)
+            self.assertEqual(phase_row(home, repo)["status"], "REVIEWING")
+
+    def test_coder_failure_blocks_phase_and_status_explains_why(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "fake_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_fake_agent(script, exit_code=7, create_file=False)
+            write_plan(repo)
+            write_config(repo, script, checks=[])
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run")
+            status = run_cli(repo, home, "status")
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(phase_row(home, repo)["status"], "BLOCKED")
+            self.assertIn("IMPLEMENT failed", status.stderr)
+            self.assertIn("exit code 7", status.stderr)
+
+    def test_checks_failure_enqueues_fix_with_check_output_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "fake_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_fake_agent(script)
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                checks=[
+                    f"{shlex.quote(sys.executable)} -c "
+                    "\"import sys; print('bad check output'); sys.exit(3)\""
+                ],
+            )
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "FIXING")
+            self.assertEqual(phase["retry_count"], 1)
+            with connect_db(home) as db:
+                fix_job = db.execute(
+                    """
+                    SELECT * FROM jobs
+                    WHERE phase_id = ? AND type = 'FIX'
+                    """,
+                    (phase["id"],),
+                ).fetchone()
+            self.assertIsNotNone(fix_job)
+            self.assertEqual(fix_job["status"], "PENDING")
+            self.assertEqual(fix_job["trigger"], "checks")
+            prompt_text = Path(fix_job["prompt_path"]).read_text(encoding="utf-8")
+            self.assertIn("bad check output", prompt_text)
+
+    def test_dirty_repo_blocks_before_any_job_starts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "fake_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_fake_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[])
+            commit_all(repo)
+            (repo / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+            result = run_cli(repo, home, "run")
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("dirty worktree", result.stderr)
+            with connect_db(home) as db:
+                job_count = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+            self.assertEqual(job_count, 0)
+            self.assertEqual(phase_row(home, repo)["status"], "PENDING")
+
+    def test_implementing_resume_skips_dirty_gate_after_orphan_reap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "fake_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_fake_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[])
+            commit_all(repo)
+            parsed_plan = parse_plan_file(repo, "docs/plan.md")
+            parsed_phase = parsed_plan.phases[0]
+            log_dir = phase_log_dir(
+                home / "logs",
+                project_slug=project_slug(repo),
+                plan_path="docs/plan.md",
+                phase_number=parsed_phase.phase_number,
+            )
+            with connect_db(home) as db:
+                project = get_or_create_project(
+                    db, slug=project_slug(repo), repo_path=repo
+                )
+                plan = create_plan(
+                    db,
+                    project_id=project["id"],
+                    path="docs/plan.md",
+                    content_hash=parsed_plan.content_hash,
+                )
+                phase = create_phase(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan["id"],
+                    phase_number=parsed_phase.phase_number,
+                    title=parsed_phase.title,
+                    content_hash=parsed_phase.content_hash,
+                    log_dir=log_dir,
+                )
+                create_job(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan["id"],
+                    phase_id=phase["id"],
+                    job_type="IMPLEMENT",
+                    status="RUNNING",
+                )
+            (repo / "leftover-from-crash.txt").write_text("partial\n", encoding="utf-8")
+
+            result = run_cli(repo, home, "run")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("reaped 1 orphaned job", result.stderr)
+            self.assertEqual(phase_row(home, repo)["status"], "REVIEWING")
+
+    def test_checking_resume_runs_checks_without_implement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "fake_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_fake_agent(script)
+            write_plan(repo, status="CHECKING")
+            write_config(repo, script, checks=[f"{shlex.quote(sys.executable)} -c \"print('checks only')\""])
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("checks passed", result.stderr)
+            self.assertFalse((repo / "generated.txt").exists())
+            with connect_db(home) as db:
+                job_types = [
+                    row["type"]
+                    for row in db.execute("SELECT type FROM jobs ORDER BY id").fetchall()
+                ]
+            self.assertEqual(job_types, ["RUN_CHECKS"])
+            self.assertEqual(phase_row(home, repo)["status"], "REVIEWING")
+
+    def test_allow_dirty_warns_and_stages_only_new_implementation_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "fake_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_fake_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[], allow_dirty=True)
+            commit_all(repo)
+            (repo / "dirty.txt").write_text("pre-existing\n", encoding="utf-8")
+
+            result = run_cli(repo, home, "run")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("warning: worktree is dirty; continuing", result.stderr)
+            staged = subprocess.run(
+                ["git", "diff", "--staged", "--name-only"],
+                cwd=repo,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.splitlines()
+            self.assertIn("generated.txt", staged)
+            self.assertNotIn("dirty.txt", staged)
+            porcelain = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            self.assertIn("?? dirty.txt", porcelain)
+
+    def test_early_return_status_branches_have_expected_exit_codes(self):
+        cases = [
+            ("REVIEWING", 0, "later phases handle the next step"),
+            ("FIXING", 0, "Phase 6 handles fix execution"),
+            ("BLOCKED", 1, "inspect status before rerunning"),
+        ]
+        for phase_status, expected_code, expected_message in cases:
+            with self.subTest(phase_status=phase_status):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    repo = root / "repo"
+                    home = root / "home"
+                    script = root / "fake_agent.py"
+                    repo.mkdir()
+                    git_init(repo)
+                    write_fake_agent(script)
+                    write_plan(repo, status=phase_status)
+                    write_config(repo, script, checks=[])
+                    commit_all(repo)
+
+                    result = run_cli(repo, home, "run")
+
+                    self.assertEqual(result.returncode, expected_code, result.stderr)
+                    self.assertIn(expected_message, result.stderr)
+                    with connect_db(home) as db:
+                        job_count = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+                    self.assertEqual(job_count, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -50,7 +50,7 @@ def write_plan(repo: Path) -> None:
     plan_path = repo / "docs" / "plan.md"
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path.write_text(
-        "## Phase 1: Test phase\n\nAcceptance Criteria:\n- Pass.\n",
+        "## Phase 1: Test phase\nStatus: REVIEWING\n\nAcceptance Criteria:\n- Pass.\n",
         encoding="utf-8",
     )
 

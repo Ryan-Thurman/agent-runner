@@ -102,7 +102,7 @@ Acceptance Criteria:
 
 ## Phase 4: Job execution engine
 
-Status: REVIEWING
+Status: COMPLETE
 
 The generic "run an agent or a command as a job" layer: create the job row, write the
 prompt to `phase-N/<type>-prompt.md`, launch the child process from the repo root with
@@ -124,7 +124,7 @@ Acceptance Criteria:
 
 ## Phase 5: IMPLEMENT and RUN_CHECKS loop
 
-Status: PENDING
+Status: REVIEWING
 
 Wire the first half of the phase loop. Dirty-repo gate first (`git status --porcelain`;
 block unless `allowDirty`, then warn). IMPLEMENT: generate the coder prompt — thin mode
