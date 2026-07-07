@@ -26,7 +26,7 @@
   },
   "roles": {
     "coder": "codex",
-    "reviewer": "claude"
+    "reviewer": "codex"
   },
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
