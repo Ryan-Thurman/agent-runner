@@ -337,6 +337,23 @@ auto-advance; a restart counter (`AGENT_RUNNER_RESTART_COUNT`) caps runaway
 restarts at 32 per chain, falling back to in-process advance past the cap.
 POSIX only.
 
+### Manual merge reconciliation
+
+If a phase PR is merged outside the runner while SQLite still says the phase is
+`BLOCKED`, the next `run` attempts a conservative repair before starting more
+work. For blocked registered phases with PR metadata, the runner checks
+`gh pr view <url>` for the PR state, head SHA, and merge commit. When the PR is
+`MERGED`, it verifies that the configured `baseBranch` contains the merge
+commit, fetching `origin/<baseBranch>` once if needed.
+
+The phase is marked `COMPLETE` only when the plan also marks that phase
+`Status: COMPLETE` and the protected phase body hash still matches the
+registered SQLite hash. On success, `blocked_from` is cleared, `published_sha`
+is refreshed from the PR head SHA, and a `phase.reconciled` event is recorded.
+If the merged PR lacks matching plan evidence, the runner leaves the phase
+blocked with a message explaining which proof is missing instead of guessing.
+Open or otherwise unmerged PRs are not reconciled.
+
 To pause at the next job boundary while a run is active:
 
 ```sh
