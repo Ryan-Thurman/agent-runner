@@ -249,6 +249,26 @@ the closure commit. With `autoCommit=false`, the runner marks the phase complete
 but stops before starting the next pending phase so local staged work can be
 handled deliberately.
 
+### Self-hosted restart after merges
+
+When the runner operates on its own checkout (the `agent_runner` package lives
+inside the target repo, as when agent-runner develops itself), a merged phase
+brings new runner code into the working tree, but the running process still
+has the old modules in memory. In that case, with `mergeOnClose=true`, the
+runner does not auto-advance in-process after a merge: it records a
+`runner.restart` event, prints `restarting to load updated runner code`,
+releases the project lock, and replaces itself (`exec`, same PID and terminal)
+with a fresh `run` via the repo's `agent-runner` shim. The new process
+re-registers the plan and continues with the next phase on the just-merged
+code. The one-shot `--accept-plan-change` flag is not carried across a
+restart.
+
+For any other repo, behavior is unchanged. Set
+`AGENT_RUNNER_NO_SELF_RESTART=1` to disable the restart and keep in-process
+auto-advance; a restart counter (`AGENT_RUNNER_RESTART_COUNT`) caps runaway
+restarts at 32 per chain, falling back to in-process advance past the cap.
+POSIX only.
+
 To pause at the next job boundary while a run is active:
 
 ```sh

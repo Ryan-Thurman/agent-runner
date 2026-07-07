@@ -12,7 +12,7 @@ from .errors import AgentRunnerError, ConfigError, GitRepoError, LockError
 from .git import find_git_root
 from .lock import ProjectLock, SignalLockRelease, pid_is_alive, reset_project_lock
 from .paths import ensure_runner_layout
-from .phase_loop import run_phase_loop
+from .phase_loop import RESTART_COUNT_ENV, restart_count, run_phase_loop
 from .plan import parse_plan_file, register_or_resume_plan
 from .storage import (
     PHASE_STATUSES,
@@ -189,11 +189,28 @@ def cmd_run(args: argparse.Namespace) -> int:
                     repo_root=repo_root,
                 )
             print(f"[agent-runner] {loop_result.message}", file=sys.stderr)
+            if loop_result.restart:
+                _exec_self_restart(lock, repo_root)
             return 1 if loop_result.blocked else 0
     except KeyboardInterrupt:
         print("[agent-runner] interrupted; lock released", file=sys.stderr)
         return 130
     return 0
+
+
+def _exec_self_restart(lock: ProjectLock, repo_root: Path) -> None:
+    """Replace this process with a fresh `run` so just-merged code loads.
+
+    exec preserves the PID and terminal, but context managers never unwind
+    across it, so the project lock must be released by hand first. Exec'ing
+    the repo shim by absolute path makes the fresh import resolve to this
+    checkout regardless of how the original invocation found the package.
+    The one-shot --accept-plan-change flag is deliberately not carried over.
+    """
+    os.environ[RESTART_COUNT_ENV] = str(restart_count() + 1)
+    lock.release()
+    shim = repo_root / "agent-runner"
+    os.execv(sys.executable, [sys.executable, str(shim), "run"])
 
 
 def cmd_status(args: argparse.Namespace) -> int:

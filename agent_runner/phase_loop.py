@@ -34,11 +34,20 @@ REVIEW_RESOLVED_INSTRUCTION = (
 MERGE_VERIFY_ATTEMPTS = 5
 MERGE_VERIFY_RETRY_SECONDS = 30.0
 
+# When the runner operates on its own checkout, a merged phase brings new
+# runner code into the working tree, but this process keeps the old modules
+# in memory. Instead of auto-advancing in-process, the loop asks the CLI to
+# re-exec so the next phase runs on the just-merged code.
+RESTART_COUNT_ENV = "AGENT_RUNNER_RESTART_COUNT"
+NO_SELF_RESTART_ENV = "AGENT_RUNNER_NO_SELF_RESTART"
+MAX_SELF_RESTARTS = 32
+
 
 @dataclass(frozen=True)
 class PhaseLoopResult:
     message: str
     blocked: bool = False
+    restart: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,6 +55,41 @@ class PublishMetadata:
     branch_name: str
     pr_url: str
     published_sha: str
+
+
+def runner_is_self_hosted(repo_root: Path) -> bool:
+    package_dir = Path(__file__).resolve().parent
+    try:
+        return package_dir.is_relative_to(repo_root.resolve())
+    except OSError:
+        return False
+
+
+def restart_count() -> int:
+    try:
+        return int(os.environ.get(RESTART_COUNT_ENV, "0"))
+    except ValueError:
+        return 0
+
+
+def _should_self_restart(repo_root: Path) -> bool:
+    if os.name != "posix":
+        return False
+    if os.environ.get(NO_SELF_RESTART_ENV):
+        return False
+    if not runner_is_self_hosted(repo_root):
+        return False
+    if not (repo_root / "agent-runner").exists():
+        return False
+    if restart_count() >= MAX_SELF_RESTARTS:
+        print(
+            f"[agent-runner] self-restart cap ({MAX_SELF_RESTARTS}) reached; "
+            "continuing in-process",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    return True
 
 
 def run_phase_loop(
@@ -801,6 +845,22 @@ def _finalize_close_phase(
                 f"{phase['pr_url']} before starting phase "
                 f"{next_phase['phase_number']} (or set mergeOnClose=true)"
             )
+        if _should_self_restart(repo_root):
+            message = (
+                f"phase {phase['phase_number']} merged; restarting to load "
+                "updated runner code"
+            )
+            record_event(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase_id=phase["id"],
+                job_id=job_id,
+                event_type="runner.restart",
+                message=message,
+                data={"restartCount": restart_count() + 1},
+            )
+            return PhaseLoopResult(message, restart=True)
         fresh_plan = parse_plan_file(repo_root, config.plan_path)
         next_parsed_phase = _parsed_phase(fresh_plan, next_phase["phase_number"])
         record_event(
