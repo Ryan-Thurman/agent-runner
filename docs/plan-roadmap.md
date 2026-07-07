@@ -133,7 +133,8 @@ Acceptance Criteria:
   pass.
 
 ## Phase 5: Add live job previews
-Status: PENDING
+Status: COMPLETE
+Evidence: live preview formatter, color controls, stderr streaming, disable switch, docs, tests, and dogfood completed. `docs/plan-live-logs.md` phases 1-3 are marked complete with evidence; dogfood ran `agent-runner run` in `/var/folders/1v/gr6qwz154q77dl8tgsrhvzrr0000gn/T/agent-runner-live-dogfood-1st2kzq4/repo` with `AGENT_RUNNER_COLOR=always`, showing colored coding/checking/reviewing/closing previews while complete logs were written under the temporary runner home. `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
 
 Execute the live-log work from `docs/plan-live-logs.md`, keeping the detailed
 three-phase plan there as the source of implementation requirements.

@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import signal
@@ -11,7 +12,15 @@ from unittest import mock
 
 from agent_runner.config import AgentProfile
 from agent_runner.errors import JobError
-from agent_runner.jobs import _run_process, run_agent_job, run_checks_job
+from agent_runner.jobs import (
+    LivePreviewContext,
+    _format_live_preview_line,
+    _live_preview_context,
+    _resolve_color_enabled,
+    _run_process,
+    run_agent_job,
+    run_checks_job,
+)
 from agent_runner.storage import (
     connect_db,
     create_job,
@@ -69,6 +78,10 @@ if argv_path:
 if os.environ.get("FAKE_AGENT_SLEEP"):
     time.sleep(float(os.environ["FAKE_AGENT_SLEEP"]))
 
+long_stdout = os.environ.get("FAKE_AGENT_LONG_STDOUT")
+if long_stdout:
+    print(long_stdout)
+
 if "--output-last-message" in sys.argv:
     index = sys.argv.index("--output-last-message")
     with open(sys.argv[index + 1], "w", encoding="utf-8") as handle:
@@ -121,6 +134,74 @@ def setup_state(home: Path, repo: Path):
 
 
 class Phase4JobTests(unittest.TestCase):
+    def test_live_preview_labels_for_job_types(self):
+        cases = [
+            ("IMPLEMENT", "coder", "codex", "codex", "coding"),
+            ("REVIEW", "reviewer", "claude", "claude", "reviewing"),
+            ("FIX", "coder", "codex", "codex", "fixing"),
+            ("CLOSE_PHASE", "closer", "claude", "claude", "closing"),
+            ("RUN_CHECKS", "checks", "shell", "checks", "checking"),
+        ]
+
+        for job_type, role, profile, subject, verb in cases:
+            with self.subTest(job_type=job_type):
+                context = _live_preview_context(job_type, role, profile)
+                self.assertEqual(context.subject, subject)
+                self.assertEqual(context.verb, verb)
+
+    def test_live_preview_truncates_without_changing_original_text(self):
+        original = "x" * 80
+        context = LivePreviewContext(subject="codex", verb="coding", max_chars=40)
+
+        preview = _format_live_preview_line(
+            context, original, color_enabled=False
+        )
+
+        self.assertLessEqual(len(preview), 40)
+        self.assertIn("[truncated]", preview)
+        self.assertEqual(original, "x" * 80)
+
+    def test_live_preview_formats_blank_lines_as_single_prefix(self):
+        context = LivePreviewContext(subject="checks", verb="checking")
+
+        preview = _format_live_preview_line(context, "   \n", color_enabled=False)
+
+        self.assertEqual(preview, "checks checking:")
+
+    def test_live_preview_color_modes(self):
+        class FakeStream:
+            def __init__(self, is_tty: bool):
+                self._is_tty = is_tty
+
+            def isatty(self):
+                return self._is_tty
+
+        self.assertTrue(
+            _resolve_color_enabled(
+                mode="auto", stream=FakeStream(True), env={}
+            )
+        )
+        self.assertFalse(
+            _resolve_color_enabled(
+                mode="auto", stream=FakeStream(False), env={}
+            )
+        )
+        self.assertTrue(
+            _resolve_color_enabled(
+                mode="always", stream=FakeStream(False), env={}
+            )
+        )
+        self.assertFalse(
+            _resolve_color_enabled(
+                mode="never", stream=FakeStream(True), env={}
+            )
+        )
+        self.assertFalse(
+            _resolve_color_enabled(
+                mode="auto", stream=FakeStream(True), env={"NO_COLOR": "1"}
+            )
+        )
+
     def test_agent_job_success_writes_prompt_logs_output_and_shas(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -156,6 +237,161 @@ class Phase4JobTests(unittest.TestCase):
             self.assertEqual(result.output_path.read_text(encoding="utf-8"), "fake stdout\n")
             self.assertEqual(row["started_sha"], expected_sha)
             self.assertEqual(row["finished_sha"], expected_sha)
+
+    def test_agent_job_live_preview_streams_to_stderr_and_preserves_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            script = root / "fake_agent.py"
+            write_fake_agent(script)
+            project, plan, phase = setup_state(home, repo)
+            stderr = io.StringIO()
+
+            with mock.patch("sys.stderr", stderr), mock.patch.dict(
+                os.environ, {"AGENT_RUNNER_COLOR": "never"}, clear=False
+            ):
+                with connect_db(home) as db:
+                    result = run_agent_job(
+                        db,
+                        project_id=project["id"],
+                        plan_id=plan["id"],
+                        phase_id=phase["id"],
+                        job_type="IMPLEMENT",
+                        role="coder",
+                        profile=make_profile(script),
+                        prompt="Implement the phase.",
+                        repo_root=repo,
+                        log_dir=home / "logs" / "phase-4",
+                        timeout_seconds=5,
+                    )
+
+            stderr_text = stderr.getvalue()
+            log_text = result.log_path.read_text(encoding="utf-8")
+            self.assertIn("fake coding: fake stdout", stderr_text)
+            self.assertIn("fake coding: fake stderr", stderr_text)
+            self.assertNotIn("\033[", stderr_text)
+            self.assertIn("fake stdout", log_text)
+            self.assertIn("fake stderr", log_text)
+            self.assertEqual(result.output_path.read_text(encoding="utf-8"), "fake stdout\n")
+
+    def test_agent_job_live_preview_truncates_only_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            script = root / "fake_agent.py"
+            write_fake_agent(script)
+            project, plan, phase = setup_state(home, repo)
+            long_output = "long-" + ("x" * 320)
+            stderr = io.StringIO()
+
+            with mock.patch("sys.stderr", stderr), mock.patch.dict(
+                os.environ,
+                {
+                    "AGENT_RUNNER_COLOR": "never",
+                    "FAKE_AGENT_LONG_STDOUT": long_output,
+                },
+                clear=False,
+            ):
+                with connect_db(home) as db:
+                    result = run_agent_job(
+                        db,
+                        project_id=project["id"],
+                        plan_id=plan["id"],
+                        phase_id=phase["id"],
+                        job_type="IMPLEMENT",
+                        role="coder",
+                        profile=make_profile(script),
+                        prompt="Implement the phase.",
+                        repo_root=repo,
+                        log_dir=home / "logs" / "phase-4",
+                        timeout_seconds=5,
+                    )
+
+            stderr_text = stderr.getvalue()
+            self.assertIn("[truncated]", stderr_text)
+            self.assertNotIn(long_output, stderr_text)
+            self.assertIn(long_output, result.log_path.read_text(encoding="utf-8"))
+            self.assertIn(long_output, result.output_path.read_text(encoding="utf-8"))
+
+    def test_agent_job_live_preview_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            script = root / "fake_agent.py"
+            write_fake_agent(script)
+            project, plan, phase = setup_state(home, repo)
+            stderr = io.StringIO()
+
+            with mock.patch("sys.stderr", stderr), mock.patch.dict(
+                os.environ, {"AGENT_RUNNER_LIVE_LOGS": "0"}, clear=False
+            ):
+                with connect_db(home) as db:
+                    result = run_agent_job(
+                        db,
+                        project_id=project["id"],
+                        plan_id=plan["id"],
+                        phase_id=phase["id"],
+                        job_type="IMPLEMENT",
+                        role="coder",
+                        profile=make_profile(script),
+                        prompt="Implement the phase.",
+                        repo_root=repo,
+                        log_dir=home / "logs" / "phase-4",
+                        timeout_seconds=5,
+                    )
+
+            self.assertNotIn("fake coding:", stderr.getvalue())
+            self.assertIn("fake stdout", result.log_path.read_text(encoding="utf-8"))
+
+    def test_checks_job_live_preview_uses_checks_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            project, plan, phase = setup_state(home, repo)
+            stderr = io.StringIO()
+
+            with mock.patch("sys.stderr", stderr), mock.patch.dict(
+                os.environ, {"AGENT_RUNNER_COLOR": "never"}, clear=False
+            ):
+                with connect_db(home) as db:
+                    result = run_checks_job(
+                        db,
+                        project_id=project["id"],
+                        plan_id=plan["id"],
+                        phase_id=phase["id"],
+                        commands=[
+                            f"{shlex.quote(sys.executable)} -c \"print('check output')\""
+                        ],
+                        repo_root=repo,
+                        log_dir=home / "logs" / "phase-4",
+                        timeout_seconds=5,
+                    )
+
+            self.assertEqual(result.status, "SUCCEEDED")
+            self.assertIn("checks checking: check output", stderr.getvalue())
+            self.assertIn("check output", result.log_path.read_text(encoding="utf-8"))
+
+    def test_live_preview_color_is_forced_when_requested(self):
+        context = LivePreviewContext(subject="codex", verb="coding")
+
+        preview = _format_live_preview_line(
+            context, "colored", color_enabled=True
+        )
+
+        self.assertIn("\033[36m", preview)
+        self.assertIn("\033[0m", preview)
 
     def test_agent_receives_prompt_text_not_prompt_path(self):
         with tempfile.TemporaryDirectory() as tmp:

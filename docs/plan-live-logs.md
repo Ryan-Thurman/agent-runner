@@ -33,7 +33,8 @@ to `docs/plan-live-logs.md`. Keep one phase per runner session/PR.
 - Add focused `unittest` coverage and keep the existing suite green.
 
 ## Phase 1: Terminal live-log formatter
-Status: PENDING
+Status: COMPLETE
+Evidence: Implemented in `agent_runner/jobs.py` with focused `tests/test_phase4_jobs.py` coverage for IMPLEMENT/REVIEW/FIX/CLOSE_PHASE/RUN_CHECKS labels, bounded truncation, blank-line handling, `AGENT_RUNNER_COLOR=auto|always|never`, and `NO_COLOR`. `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
 
 Add a small internal formatter for live job lines without wiring it into
 subprocess execution yet.
@@ -71,7 +72,8 @@ Acceptance Criteria:
   `python3 -m unittest discover -s tests`.
 
 ## Phase 2: Stream live previews during jobs
-Status: PENDING
+Status: COMPLETE
+Evidence: `_run_process` now streams bounded previews to stderr for agent and check jobs while preserving complete `.log` files and stdout capture. Tests cover fake-agent streaming, long-output truncation only in stderr, `checks checking:` prefixes, `AGENT_RUNNER_LIVE_LOGS=0`, and no ANSI escapes with color disabled/non-TTY plus forced ANSI formatting. `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
 
 Wire the formatter into the existing job process pumps so users see output while
 the subprocess is running.
@@ -106,7 +108,8 @@ Acceptance Criteria:
   pass.
 
 ## Phase 3: Operator polish, docs, and dogfood
-Status: PENDING
+Status: COMPLETE
+Evidence: Updated `README.md` and `docs/usage.md` to describe live truncated previews, complete log files, `AGENT_RUNNER_LIVE_LOGS=0`, `AGENT_RUNNER_COLOR=auto|always|never`, and `NO_COLOR`. Dogfood command: `AGENT_RUNNER_HOME=/var/folders/1v/gr6qwz154q77dl8tgsrhvzrr0000gn/T/agent-runner-live-dogfood-1st2kzq4/home PYTHONPATH=/Users/mac/workspaces/agent-runner AGENT_RUNNER_COLOR=always python3 -m agent_runner run` in a temporary fake-agent repo. Colors appeared as forced ANSI in live previews for coding, checking, reviewing, and closing; complete logs were written under `/var/folders/1v/gr6qwz154q77dl8tgsrhvzrr0000gn/T/agent-runner-live-dogfood-1st2kzq4/home/logs/repo-cbf64120f5c8/docs-plan.md/phase-1/`. `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
 
 Polish the operator-facing behavior, document it, and run the feature through
 the runner itself.
