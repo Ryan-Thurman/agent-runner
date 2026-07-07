@@ -709,6 +709,72 @@ class Phase7CloseTests(unittest.TestCase):
                 ]
             self.assertIn("phase.reconciled", event_types)
 
+    def test_run_reconciles_final_manually_merged_blocked_phase_and_completes_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, phase_count=1, status="COMPLETE")
+            write_config(repo, script, auto_commit=True, merge_on_close=True)
+            commit_all(repo)
+            add_origin_remote(repo, root)
+            merge_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            seed_blocked_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_PR_STATE": "MERGED",
+                    "GH_MERGE_COMMIT": merge_commit,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "reconciled phase 1 from manually merged PR #1", result.stderr
+            )
+            self.assertIn("phase 1 complete; plan complete", result.stderr)
+            self.assertNotIn("no phase is ready", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "COMPLETE")
+            self.assertIsNone(rows[0]["blocked_from"])
+            self.assertEqual(rows[0]["published_sha"], merge_commit)
+            with connect_db(home) as db:
+                statuses = db.execute(
+                    """
+                    SELECT projects.status AS project_status,
+                           plans.status AS plan_status
+                    FROM projects
+                    JOIN plans ON plans.project_id = projects.id
+                    WHERE projects.repo_path = ?
+                    """,
+                    (str(repo.resolve()),),
+                ).fetchone()
+                event_types = [
+                    row["event_type"]
+                    for row in db.execute(
+                        "SELECT event_type FROM events ORDER BY id"
+                    ).fetchall()
+                ]
+            self.assertEqual(statuses["plan_status"], "COMPLETE")
+            self.assertEqual(statuses["project_status"], "COMPLETE")
+            self.assertIn("phase.reconciled", event_types)
+            self.assertIn("plan.complete", event_types)
+
     def test_manually_merged_phase_blocks_when_plan_marker_is_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -306,6 +306,16 @@ def reconcile_manually_merged_phase_prs(
             file=sys.stderr,
             flush=True,
         )
+        plan_complete = _complete_plan_if_all_phases_complete(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=phase,
+            config=config,
+            commit_sha=head_sha,
+        )
+        if plan_complete is not None:
+            return plan_complete
 
     return None
 
@@ -353,6 +363,41 @@ def _block_manual_reconciliation(
         f"reconciliation: {message}",
         blocked=True,
     )
+
+
+def _complete_plan_if_all_phases_complete(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    config: RunnerConfig,
+    commit_sha: Optional[str],
+) -> PhaseLoopResult | None:
+    incomplete = connection.execute(
+        """
+        SELECT 1
+        FROM phases
+        WHERE plan_id = ? AND status != 'COMPLETE'
+        LIMIT 1
+        """,
+        (plan_id,),
+    ).fetchone()
+    if incomplete is not None:
+        return None
+
+    update_plan_status(connection, plan_id, "COMPLETE")
+    update_project_status(connection, project_id, "COMPLETE")
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        event_type="plan.complete",
+        message=f"plan {config.plan_path} complete",
+        data={"commitSha": commit_sha},
+    )
+    return PhaseLoopResult(f"phase {phase['phase_number']} complete; plan complete")
 
 
 def _pr_head_sha(payload: dict[str, Any], phase: sqlite3.Row) -> str:
