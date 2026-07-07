@@ -43,11 +43,7 @@ phases.
 
 ## Phase 1: Extend role fallbacks to the coder role
 Status: COMPLETE
-Evidence: Shared fallback helper added for reviewer REVIEW and coder
-IMPLEMENT/FIX jobs, including FIX resume paths; config validation now accepts
-`roleFallbacks.coder` without warning and still warns for unrelated roles;
-docs updated for coder/reviewer fallbacks; tests cover IMPLEMENT, FIX, reviewer
-fallback compatibility, and validation warnings.
+Evidence: 6e75dd9; coder IMPLEMENT/FIX fallbacks, docs, and tests accepted; `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
 Checks: `python3 -m compileall -q .`; `python3 -m unittest discover -s tests`.
 
 Today only the reviewer retries with `roleFallbacks` profiles on quota/rate
