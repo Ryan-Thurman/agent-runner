@@ -241,9 +241,16 @@ Current notes:
   on the base blocks the phase instead of being clobbered.
 - `mergeOnClose=false` keeps a human in the loop: after CLOSE_PHASE the runner
   stops and asks you to merge the phase PR before it will start the next phase.
-- Review output must be strict JSON with `status`, `summary`, `blockingIssues`,
-  `nonBlockingIssues`, and `recommendedFixPrompt`. Invalid review JSON blocks
-  the phase and leaves the raw output in `review.log`.
+- Review output must be strict JSON with `status`, `summary`, `findings`, and
+  `recommendedFixPrompt`. `findings` is grouped by bucket, currently
+  `blocking`, `shouldFix`, and `nitpick`. `PASS` is valid only when every
+  findings bucket is empty; any non-empty bucket is treated as
+  `CHANGES_REQUESTED` and sent to the review-triggered FIX prompt. During the
+  migration, legacy `blockingIssues` and `nonBlockingIssues` payloads are still
+  accepted: `blockingIssues` maps to `findings.blocking`, while
+  `nonBlockingIssues` maps to `findings.shouldFix`. The runner still writes
+  those legacy fields into normalized `review.json` for compatibility. Invalid
+  review JSON blocks the phase and leaves the raw output in `review.log`.
 - The closer uses the configured coder profile with write flags. It must update
   docs or record a `not doc-impacting` reason, set the phase plan marker to
   `Status: COMPLETE`, add an `Evidence:` line, and write the phase handoff.

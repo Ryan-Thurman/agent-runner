@@ -49,7 +49,8 @@ Acceptance Criteria:
   pass.
 
 ## Phase 2: Treat all review findings as requested updates
-Status: PENDING
+Status: COMPLETE
+Evidence: bucketed review contract, normalization, fix prompt, tests, and docs updated; `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
 
 Update the review contract so the reviewer reports every requested update and
 the runner sends all findings to the fixer.

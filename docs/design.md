@@ -57,9 +57,12 @@ These are changes to the draft worked out elsewhere; they fix real failure modes
    `CHANGES_REQUESTED`; a checks-fail → FIX → checks-fail cycle never touches it and loops
    forever. Fix: increment on **every FIX enqueue**, whatever triggered it.
 4. **Review never converges without memory.** A fresh reviewer each round finds fresh nits.
-   Fix: feed the previous `review.json` into re-reviews — "verify these blocking issues are
-   resolved; only new **Blocking** findings may block." Only `blockingIssues` drive
-   `CHANGES_REQUESTED`; Should Fix / Nice to Have are recorded, not gating.
+   Fix: feed the previous `review.json` into re-reviews and ask the reviewer to verify
+   all prior requested updates before reporting any remaining or new findings. Review
+   findings are grouped under `findings` buckets such as `blocking`, `shouldFix`, and
+   `nitpick`; `PASS` is valid only when every bucket is empty. Legacy
+   `blockingIssues` and `nonBlockingIssues` are normalized during migration, and any
+   non-empty bucket drives `CHANGES_REQUESTED`.
 5. **Reviewer must be unable to edit.** Run Codex with a read-only sandbox
    (`codex exec --sandbox read-only` or equivalent). Report-first is an invariant across the
    whole review family (`phase-gate`: "the reviewer never edits").
