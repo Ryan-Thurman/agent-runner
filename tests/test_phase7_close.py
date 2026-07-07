@@ -116,6 +116,18 @@ if "Close the accepted phase" in prompt:
     if os.environ.get("CLOSE_FAIL") == "1":
         print("closer failed")
         raise SystemExit(9)
+    if os.environ.get("CLOSE_INVALID_PLAN") == "1":
+        plan = Path("docs/plan.md")
+        text = plan.read_text(encoding="utf-8")
+        text = re.sub(
+            r"(## Phase 1: [^\n]+\n)(?:Status: [A-Z_]+\n)?",
+            r"\1Status: BOGUS_STATUS\n",
+            text,
+            count=1,
+        )
+        plan.write_text(text, encoding="utf-8")
+        print("wrote invalid plan")
+        raise SystemExit(0)
     phase_number = int(re.search(r"Phase (\d+):", prompt).group(1))
     plan = Path("docs/plan.md")
     text = plan.read_text(encoding="utf-8")
@@ -301,6 +313,56 @@ class Phase7CloseTests(unittest.TestCase):
             rows = phase_rows(home, repo)
             self.assertEqual(rows[0]["status"], "BLOCKED")
             self.assertNotIn("Status: COMPLETE", (repo / "docs/plan.md").read_text())
+
+    def test_invalid_closer_plan_write_back_blocks_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_plan(repo, status="CLOSING")
+            write_config(repo, script, auto_commit=False)
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "CLOSE_INVALID_PLAN": "1"},
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("BLOCKED after CLOSE_PHASE validation", result.stderr)
+            self.assertIn("invalid phase status marker: BOGUS_STATUS", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "BLOCKED")
+            with connect_db(home) as db:
+                events = db.execute(
+                    "SELECT event_type, message FROM events ORDER BY id"
+                ).fetchall()
+                jobs = db.execute("SELECT type FROM jobs ORDER BY id").fetchall()
+            self.assertIn(
+                (
+                    "phase.blocked",
+                    "CLOSE_PHASE validation failed for phase 1: "
+                    "invalid phase status marker: BOGUS_STATUS",
+                ),
+                [(event["event_type"], event["message"]) for event in events],
+            )
+            self.assertEqual([job["type"] for job in jobs], ["CLOSE_PHASE"])
+
+            write_plan(repo, status="CLOSING")
+            result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("phase 1 is BLOCKED", result.stderr)
+            with connect_db(home) as db:
+                jobs = db.execute("SELECT type FROM jobs ORDER BY id").fetchall()
+            self.assertEqual([job["type"] for job in jobs], ["CLOSE_PHASE"])
 
     def test_completing_phase_auto_starts_next_pending_phase(self):
         with tempfile.TemporaryDirectory() as tmp:

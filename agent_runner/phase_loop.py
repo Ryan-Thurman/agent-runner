@@ -508,7 +508,7 @@ def _run_close_phase(
             phase=phase,
             fresh_phase=fresh_phase,
         )
-    except JobError as exc:
+    except AgentRunnerError as exc:
         _block_phase_after_job(
             connection,
             project_id=project_id,
