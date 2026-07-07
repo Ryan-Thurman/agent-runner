@@ -42,5 +42,7 @@
   "timeoutMinutes": 45,
   "autoCommit": true,
   "openPrWhenComplete": false,
-  "allowDirty": false
+  "allowDirty": false,
+  "mergeOnClose": true,
+  "mergeStrategy": "squash"
 }

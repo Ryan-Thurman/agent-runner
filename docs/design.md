@@ -81,6 +81,15 @@ These are changes to the draft worked out elsewhere; they fix real failure modes
     failure output matches quota/rate-limit signatures (429, "usage limit", …) and records
     a `review.fallback` event. Non-quota failures still block — a crashing reviewer is a
     bug to surface, not to route around.
+12. **Phase transitions are the runner's job, not the agents'.** Agents never merge
+    (prompts still forbid it); with `mergeOnClose=true` the RUNNER pushes the CLOSE_PHASE
+    commit (so the plan/doc write-back done by the coding agent is inside the reviewed
+    PR) and merges the phase PR deterministically after close validation. Every next
+    phase then starts from a verified state: previous phase PR must be MERGED, fetch
+    `origin/<baseBranch>`, cut a fresh `dev/phase-NN-<slug>` branch from it, and re-check
+    the registered phase body hash against the plan on that base. Stacking phase N+1 on
+    phase N's branch is how PRs snowball and how a stale base silently diverges from
+    main.
 
 ## Full-circle closure: `CLOSE_PHASE`
 

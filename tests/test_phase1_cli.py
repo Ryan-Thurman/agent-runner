@@ -252,6 +252,24 @@ class Phase1CliTests(unittest.TestCase):
 
             config = load_config(repo)
             self.assertEqual(config.role_fallbacks, {"reviewer": ["antigravity"]})
+            self.assertEqual(config.base_branch, "main")
+            self.assertFalse(config.merge_on_close)
+            self.assertEqual(config.merge_strategy, "squash")
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["mergeStrategy"] = "octopus"
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "mergeStrategy"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["mergeOnClose"] = True
+            data["autoCommit"] = False
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "mergeOnClose requires autoCommit"):
+                load_config(repo)
 
     def test_empty_checks_are_accepted_with_warning(self):
         with tempfile.TemporaryDirectory() as tmp:

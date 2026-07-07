@@ -24,8 +24,9 @@ retries run out, then a closure job updates docs + plan + handoff and commits.
 - One phase per session/PR. Do not start future phases or refactor unrelated code.
 - Every phase ships with tests (stdlib `unittest` or `pytest` if already present) and a
   manual verification note in the phase handoff.
-- The runner must never: auto-merge, force-push, delete branches/worktrees, delete files
+- The runner must never: force-push, delete branches/worktrees, delete files
   outside the repo, modify global git config, or run without its project lock.
+  Merging is allowed only for the reviewed phase PR when `mergeOnClose=true`.
 - Never interrupt a running agent process; pause/stop takes effect at job boundaries.
 - Prompts are written per **role** (coder/reviewer/closer), never per vendor. Reviewer
   jobs always get the profile's `readOnlyFlags`; coder/closer jobs get `writeFlags`.

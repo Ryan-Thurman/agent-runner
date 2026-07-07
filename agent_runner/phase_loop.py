@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -135,6 +136,38 @@ def _run_implement(
     repo_root: Path,
     preexisting_dirty_paths: Optional[set[str]],
 ) -> PhaseLoopResult:
+    if (
+        config.auto_commit
+        and config.merge_on_close
+        and phase["status"] == "PENDING"
+    ):
+        try:
+            parsed_phase = _start_phase_branch(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase=phase,
+                config=config,
+                repo_root=repo_root,
+            )
+        except JobError as exc:
+            update_phase_status(connection, phase["id"], "BLOCKED")
+            record_event(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase_id=phase["id"],
+                event_type="phase.blocked",
+                message=(
+                    f"branch preflight failed for phase "
+                    f"{phase['phase_number']}: {exc}"
+                ),
+            )
+            return PhaseLoopResult(
+                f"phase {phase['phase_number']} BLOCKED before IMPLEMENT: {exc}",
+                blocked=True,
+            )
+
     phase = update_phase_status(connection, phase["id"], "IMPLEMENTING")
     record_event(
         connection,
@@ -606,6 +639,40 @@ def _run_close_phase(
                 blocked=True,
             )
 
+    if config.merge_on_close:
+        try:
+            _git_push_current_branch(repo_root)
+            _merge_phase_pr(repo_root, config, phase)
+        except JobError as exc:
+            _block_phase_after_job(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase_id=phase["id"],
+                job=result,
+                message=(
+                    f"CLOSE_PHASE merge failed for phase "
+                    f"{phase['phase_number']}: {exc}"
+                ),
+            )
+            return PhaseLoopResult(
+                f"phase {phase['phase_number']} BLOCKED after CLOSE_PHASE merge: {exc}",
+                blocked=True,
+            )
+        record_event(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            job_id=result.job_id,
+            event_type="phase.merged",
+            message=(
+                f"merged phase {phase['phase_number']} PR {phase['pr_url']} "
+                f"({config.merge_strategy})"
+            ),
+            data={"prUrl": phase["pr_url"], "strategy": config.merge_strategy},
+        )
+
     update_phase_status(connection, phase["id"], "COMPLETE")
     record_event(
         connection,
@@ -632,6 +699,12 @@ def _run_close_phase(
             return PhaseLoopResult(
                 f"phase {phase['phase_number']} complete; next phase "
                 f"{next_phase['phase_number']} is PENDING"
+            )
+        if not config.merge_on_close:
+            return PhaseLoopResult(
+                f"phase {phase['phase_number']} complete; merge PR "
+                f"{phase['pr_url']} before starting phase "
+                f"{next_phase['phase_number']} (or set mergeOnClose=true)"
             )
         fresh_plan = parse_plan_file(repo_root, config.plan_path)
         next_parsed_phase = _parsed_phase(fresh_plan, next_phase["phase_number"])
@@ -1090,6 +1163,193 @@ def _git_diff_staged(repo_root: Path) -> str:
     if result.returncode != 0:
         raise JobError(result.stderr.strip() or "git diff --staged failed")
     return result.stdout
+
+
+def _start_phase_branch(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    config: RunnerConfig,
+    repo_root: Path,
+) -> ParsedPhase:
+    _ensure_previous_phase_merged(connection, repo_root, plan_id=plan_id, phase=phase)
+
+    base = config.base_branch
+    _git_run(
+        repo_root,
+        ["fetch", "-q", "origin", base],
+        error_context=f"failed to fetch origin/{base}",
+    )
+    base_sha = _git_rev_parse(repo_root, "FETCH_HEAD")
+    target = _phase_branch_name(phase)
+    if _git_branch_exists(repo_root, target) and not _git_is_ancestor(
+        repo_root, target, "FETCH_HEAD"
+    ):
+        raise JobError(
+            f"branch {target!r} already exists with commits that are not on "
+            f"origin/{base}; delete or rename it before rerunning"
+        )
+    _git_run(
+        repo_root,
+        ["checkout", "-q", "-B", target, "FETCH_HEAD"],
+        error_context=f"failed to create branch {target} from origin/{base}",
+    )
+
+    fresh_plan = parse_plan_file(repo_root, config.plan_path)
+    parsed_phase = _parsed_phase(fresh_plan, phase["phase_number"])
+    if parsed_phase.content_hash != phase["content_hash"]:
+        raise JobError(
+            f"phase {phase['phase_number']} body on origin/{base} does not match "
+            "the registered phase; rerun the loop so the plan re-registers "
+            "before implementing"
+        )
+
+    message = (
+        f"created branch {target} from origin/{base} @ {base_sha[:12]} for "
+        f"phase {phase['phase_number']}"
+    )
+    print(f"[agent-runner] {message}", file=sys.stderr, flush=True)
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        event_type="phase.branch_created",
+        message=message,
+        data={"branch": target, "base": base, "baseSha": base_sha},
+    )
+    return parsed_phase
+
+
+def _ensure_previous_phase_merged(
+    connection: sqlite3.Connection,
+    repo_root: Path,
+    *,
+    plan_id: int,
+    phase: sqlite3.Row,
+) -> None:
+    previous = connection.execute(
+        """
+        SELECT * FROM phases
+        WHERE plan_id = ? AND phase_number < ? AND pr_url IS NOT NULL
+        ORDER BY phase_number DESC
+        LIMIT 1
+        """,
+        (plan_id, phase["phase_number"]),
+    ).fetchone()
+    if previous is None:
+        return
+    pr_url = previous["pr_url"]
+    payload = _gh_pr_view(
+        repo_root,
+        pr_url=pr_url,
+        failure_context=f"could not verify previous phase PR {pr_url}",
+    )
+    state = payload.get("state")
+    if state != "MERGED":
+        raise JobError(
+            f"previous phase {previous['phase_number']} PR {pr_url} is "
+            f"{state or 'in an unknown state'}, not MERGED; merge it before "
+            f"starting phase {phase['phase_number']}"
+        )
+
+
+def _merge_phase_pr(
+    repo_root: Path, config: RunnerConfig, phase: sqlite3.Row
+) -> None:
+    pr_url = phase["pr_url"]
+    if not pr_url:
+        raise JobError("phase has no stored PR URL to merge")
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "merge", pr_url, f"--{config.merge_strategy}"],
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise JobError(
+            "cannot merge phase PR: gh is not installed or not on PATH"
+        ) from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "gh pr merge failed"
+        raise JobError(f"gh pr merge failed for {pr_url} ({detail})")
+
+    payload = _gh_pr_view(
+        repo_root,
+        pr_url=pr_url,
+        failure_context=f"could not verify merge of {pr_url}",
+    )
+    state = payload.get("state")
+    if state != "MERGED":
+        raise JobError(
+            f"gh pr merge did not merge {pr_url}; PR state is "
+            f"{state or 'unknown'}"
+        )
+
+
+def _phase_branch_name(phase: sqlite3.Row) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", phase["title"].lower()).strip("-")[:40]
+    suffix = f"-{slug.rstrip('-')}" if slug else ""
+    return f"dev/phase-{phase['phase_number']:02d}{suffix}"
+
+
+def _git_push_current_branch(repo_root: Path) -> None:
+    _git_run(
+        repo_root,
+        ["push", "-q", "origin", "HEAD"],
+        error_context="failed to push the current branch to origin",
+    )
+
+
+def _git_run(
+    repo_root: Path, args: list[str], *, error_context: str
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "git failed"
+        raise JobError(f"{error_context}: {detail}")
+    return result
+
+
+def _git_rev_parse(repo_root: Path, ref: str) -> str:
+    result = _git_run(
+        repo_root,
+        ["rev-parse", ref],
+        error_context=f"git rev-parse {ref} failed",
+    )
+    return result.stdout.strip()
+
+
+def _git_branch_exists(repo_root: Path, branch: str) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.returncode == 0
+
+
+def _git_is_ancestor(repo_root: Path, branch: str, ref: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", branch, ref],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.returncode == 0
 
 
 def _verify_published_phase(repo_root: Path) -> PublishMetadata:

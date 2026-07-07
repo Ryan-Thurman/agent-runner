@@ -20,6 +20,8 @@ REQUIRED_AGENT_FIELDS = {
 
 OUTPUT_CAPTURE_MODES = {"stdout", "last-message-file", "structured-stdout"}
 
+MERGE_STRATEGIES = {"merge", "squash", "rebase"}
+
 
 @dataclass(frozen=True)
 class AgentProfile:
@@ -45,6 +47,9 @@ class RunnerConfig:
     timeout_minutes: int
     auto_commit: bool
     allow_dirty: bool
+    base_branch: str
+    merge_on_close: bool
+    merge_strategy: str
     warnings: list[str]
 
 
@@ -155,6 +160,17 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
     timeout_minutes = _required_int(data, "timeoutMinutes", minimum=1)
     auto_commit = _required_bool(data, "autoCommit")
     allow_dirty = _required_bool(data, "allowDirty")
+    base_branch = _optional_string(data, "baseBranch", default="main")
+    merge_on_close = _optional_bool(data, "mergeOnClose", default=False)
+    merge_strategy = _optional_string(data, "mergeStrategy", default="squash")
+    if merge_strategy not in MERGE_STRATEGIES:
+        allowed = ", ".join(sorted(MERGE_STRATEGIES))
+        raise ConfigError(f"invalid mergeStrategy: expected one of {allowed}")
+    if merge_on_close and not auto_commit:
+        raise ConfigError(
+            "invalid config: mergeOnClose requires autoCommit=true (the runner "
+            "merges the reviewed phase PR, which only exists in the PR flow)"
+        )
 
     return RunnerConfig(
         path=path,
@@ -168,6 +184,9 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
         timeout_minutes=timeout_minutes,
         auto_commit=auto_commit,
         allow_dirty=allow_dirty,
+        base_branch=base_branch,
+        merge_on_close=merge_on_close,
+        merge_strategy=merge_strategy,
         warnings=warnings,
     )
 
@@ -298,6 +317,20 @@ def _required_bool(data: dict[str, Any], key: str) -> bool:
     return value
 
 
+def _optional_string(data: dict[str, Any], key: str, *, default: str) -> str:
+    value = data.get(key, default)
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"invalid config: field {key!r} must be a non-empty string")
+    return value
+
+
+def _optional_bool(data: dict[str, Any], key: str, *, default: bool) -> bool:
+    value = data.get(key, default)
+    if not isinstance(value, bool):
+        raise ConfigError(f"invalid config: field {key!r} must be a boolean")
+    return value
+
+
 SAMPLE_CONFIG = """{
   // Path to the markdown plan parsed by later phases.
   "planPath": "docs/plan.md",
@@ -347,6 +380,16 @@ SAMPLE_CONFIG = """{
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
   "autoCommit": true,
-  "allowDirty": false
+  "allowDirty": false,
+
+  // Branch the runner treats as the integration base for phase branches.
+  "baseBranch": "main",
+
+  // With mergeOnClose=true (requires autoCommit), the runner merges the
+  // reviewed phase PR after CLOSE_PHASE, then starts the next phase on a new
+  // branch cut from the latest origin/<baseBranch>. With false, the runner
+  // stops after each phase and waits for a human to merge.
+  "mergeOnClose": false,
+  "mergeStrategy": "squash"
 }
 """

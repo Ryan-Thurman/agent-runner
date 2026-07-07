@@ -39,7 +39,7 @@ def run_cli(cwd: Path, home: Path, *args: str, extra_env: Optional[dict[str, str
 
 
 def git_init(path: Path) -> None:
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=path, check=True)
 
@@ -72,7 +72,13 @@ def write_plan(repo: Path, *, phase_count: int = 1, status: str = "PENDING") -> 
     )
 
 
-def write_config(repo: Path, agent_script: Path, *, auto_commit: bool = True) -> None:
+def write_config(
+    repo: Path,
+    agent_script: Path,
+    *,
+    auto_commit: bool = True,
+    merge_on_close: bool = False,
+) -> None:
     data = json.loads(strip_json_comments(SAMPLE_CONFIG))
     data["agents"] = {
         "fake": {
@@ -89,6 +95,7 @@ def write_config(repo: Path, agent_script: Path, *, auto_commit: bool = True) ->
         "\"from pathlib import Path; assert Path('generated.txt').exists()\""
     ]
     data["autoCommit"] = auto_commit
+    data["mergeOnClose"] = merge_on_close
     data["timeoutMinutes"] = 1
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -180,8 +187,10 @@ def write_fake_gh(path: Path) -> None:
         r"""#!/usr/bin/env python3
 import json
 import os
+import re
 import subprocess
 import sys
+from pathlib import Path
 
 args = sys.argv[1:]
 branch = subprocess.check_output(
@@ -190,16 +199,33 @@ branch = subprocess.check_output(
 sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 branch = os.environ.get("GH_HEAD_REF_NAME", branch)
 sha = os.environ.get("GH_HEAD_REF_OID", sha)
+state_dir = os.environ.get("GH_STATE_DIR")
+
+
+def merge_marker(pr_url):
+    safe = re.sub(r"[^A-Za-z0-9]+", "-", pr_url)
+    return Path(state_dir) / f"merged-{safe}"
+
+
+if args[:2] == ["pr", "merge"] and state_dir:
+    pr_url = args[2]
+    subprocess.run(["git", "push", "-q", "origin", "HEAD:main"], check=True)
+    Path(state_dir).mkdir(parents=True, exist_ok=True)
+    merge_marker(pr_url).write_text("merged\n", encoding="utf-8")
+    raise SystemExit(0)
 
 if args[:2] == ["pr", "view"]:
     pr_url = "https://example.test/pull/1"
     if len(args) > 2 and not args[2].startswith("--"):
         pr_url = args[2]
+    state = os.environ.get("GH_PR_STATE", "OPEN")
+    if state_dir and merge_marker(pr_url).exists():
+        state = "MERGED"
     print(json.dumps({
         "url": pr_url,
         "headRefName": branch,
         "headRefOid": sha,
-        "state": os.environ.get("GH_PR_STATE", "OPEN"),
+        "state": state,
     }))
     raise SystemExit(0)
 
@@ -213,6 +239,14 @@ raise SystemExit(2)
         encoding="utf-8",
     )
     path.chmod(0o755)
+
+
+def add_origin_remote(repo: Path, root: Path) -> Path:
+    origin = root / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=repo, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "main"], cwd=repo, check=True)
+    return origin
 
 
 def seed_closing_published_phase(repo: Path, home: Path) -> str:
@@ -238,6 +272,43 @@ def seed_closing_published_phase(repo: Path, home: Path) -> str:
             title=parsed_phase.title,
             content_hash=parsed_phase.content_hash,
             status="CLOSING",
+            publish_mode="pr",
+            branch_name="dev/test-phase",
+            pr_url="https://example.test/pull/1",
+            published_sha=published_sha,
+            log_dir=phase_log_dir(
+                home / "logs",
+                project_slug=project_slug(repo),
+                plan_path=parsed_plan.path,
+                phase_number=parsed_phase.phase_number,
+            ),
+        )
+    return published_sha
+
+
+def seed_complete_published_phase(repo: Path, home: Path) -> str:
+    published_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+    ).strip()
+    parsed_plan = parse_plan_file(repo, "docs/plan.md")
+    parsed_phase = parsed_plan.phases[0]
+
+    with connect_db(home) as db:
+        project = get_or_create_project(db, slug=project_slug(repo), repo_path=repo)
+        plan = create_plan(
+            db,
+            project_id=project["id"],
+            path=parsed_plan.path,
+            content_hash=parsed_plan.content_hash,
+        )
+        create_phase(
+            db,
+            project_id=project["id"],
+            plan_id=plan["id"],
+            phase_number=parsed_phase.phase_number,
+            title=parsed_phase.title,
+            content_hash=parsed_phase.content_hash,
+            status="COMPLETE",
             publish_mode="pr",
             branch_name="dev/test-phase",
             pr_url="https://example.test/pull/1",
@@ -413,7 +484,79 @@ class Phase7CloseTests(unittest.TestCase):
                 jobs = db.execute("SELECT type FROM jobs ORDER BY id").fetchall()
             self.assertEqual([job["type"] for job in jobs], ["CLOSE_PHASE"])
 
-    def test_completing_phase_auto_starts_next_pending_phase(self):
+    def test_merge_on_close_merges_and_starts_next_phase_on_fresh_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            gh_state = root / "gh-state"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, phase_count=2, status="CLOSING")
+            write_config(repo, script, auto_commit=True, merge_on_close=True)
+            commit_all(repo)
+            add_origin_remote(repo, root)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            seed_closing_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_STATE_DIR": str(gh_state),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("BLOCKED after IMPLEMENT failure", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "COMPLETE")
+            self.assertEqual(rows[1]["status"], "BLOCKED")
+            self.assertTrue((repo / "phase2-started.txt").exists())
+            with connect_db(home) as db:
+                jobs = db.execute(
+                    """
+                    SELECT phases.phase_number, jobs.type
+                    FROM jobs
+                    JOIN phases ON phases.id = jobs.phase_id
+                    ORDER BY jobs.id
+                    """
+                ).fetchall()
+                event_types = [
+                    row["event_type"]
+                    for row in db.execute(
+                        "SELECT event_type FROM events ORDER BY id"
+                    ).fetchall()
+                ]
+            self.assertIn(
+                (2, "IMPLEMENT"), [(row["phase_number"], row["type"]) for row in jobs]
+            )
+            self.assertIn("phase.merged", event_types)
+            self.assertIn("phase.branch_created", event_types)
+
+            current_branch = subprocess.check_output(
+                ["git", "branch", "--show-current"], cwd=repo, text=True
+            ).strip()
+            self.assertEqual(current_branch, "dev/phase-02-second-phase")
+            origin_plan = subprocess.check_output(
+                ["git", "show", "origin/main:docs/plan.md"], cwd=repo, text=True
+            )
+            self.assertIn("## Phase 1: First phase\nStatus: COMPLETE", origin_plan)
+
+    def test_close_without_merge_on_close_stops_before_next_phase(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -446,22 +589,101 @@ class Phase7CloseTests(unittest.TestCase):
                 },
             )
 
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("merge PR", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "COMPLETE")
+            self.assertEqual(rows[1]["status"], "PENDING")
+            with connect_db(home) as db:
+                phase2_jobs = db.execute(
+                    """
+                    SELECT jobs.id
+                    FROM jobs
+                    JOIN phases ON phases.id = jobs.phase_id
+                    WHERE phases.phase_number = 2
+                    """
+                ).fetchall()
+            self.assertEqual(phase2_jobs, [])
+
+    def test_pending_phase_blocked_when_previous_pr_unmerged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            gh_state = root / "gh-state"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, phase_count=2, status="COMPLETE")
+            write_config(repo, script, auto_commit=True, merge_on_close=True)
+            commit_all(repo)
+            add_origin_remote(repo, root)
+            seed_complete_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_STATE_DIR": str(gh_state),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
             self.assertEqual(result.returncode, 1)
-            self.assertIn("BLOCKED after IMPLEMENT failure", result.stderr)
+            self.assertIn("not MERGED", result.stderr)
             rows = phase_rows(home, repo)
             self.assertEqual(rows[0]["status"], "COMPLETE")
             self.assertEqual(rows[1]["status"], "BLOCKED")
-            self.assertTrue((repo / "phase2-started.txt").exists())
-            with connect_db(home) as db:
-                jobs = db.execute(
-                    """
-                    SELECT phases.phase_number, jobs.type
-                    FROM jobs
-                    JOIN phases ON phases.id = jobs.phase_id
-                    ORDER BY jobs.id
-                    """
-            ).fetchall()
-            self.assertIn((2, "IMPLEMENT"), [(row["phase_number"], row["type"]) for row in jobs])
+
+    def test_existing_phase_branch_with_unique_commits_blocks_preflight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            gh_state = root / "gh-state"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, phase_count=1, status="PENDING")
+            write_config(repo, script, auto_commit=True, merge_on_close=True)
+            commit_all(repo)
+            add_origin_remote(repo, root)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/phase-01-first-phase"],
+                cwd=repo,
+                check=True,
+            )
+            (repo / "stray.txt").write_text("stray work\n", encoding="utf-8")
+            commit_all(repo, "stray commit not on main")
+            subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_STATE_DIR": str(gh_state),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("already exists with commits", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "BLOCKED")
 
     def test_auto_commit_blocks_close_when_head_moved_after_review(self):
         with tempfile.TemporaryDirectory() as tmp:

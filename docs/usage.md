@@ -120,7 +120,10 @@ Minimum config shape:
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
   "autoCommit": true,
-  "allowDirty": false
+  "allowDirty": false,
+  "baseBranch": "main",
+  "mergeOnClose": true,
+  "mergeStrategy": "squash"
 }
 ```
 
@@ -149,6 +152,17 @@ Current notes:
   before an IMPLEMENT job starts.
 - `allowDirty=true` warns and continues; after IMPLEMENT, the runner stages only
   paths that were not already dirty before the job.
+- `mergeOnClose=true` (requires `autoCommit`) makes the loop fully autonomous:
+  after the reviewer passes the PR and CLOSE_PHASE lands the doc/plan write-back,
+  the runner pushes the close commit and merges the phase PR with
+  `mergeStrategy` (`squash` by default). Before the next phase's IMPLEMENT, the
+  runner verifies the previous phase's PR is MERGED, fetches
+  `origin/<baseBranch>`, and starts the phase on a fresh
+  `dev/phase-NN-<title>` branch cut from it — the coder never starts on a
+  stale base or a reused branch. A pre-existing phase branch with commits not
+  on the base blocks the phase instead of being clobbered.
+- `mergeOnClose=false` keeps a human in the loop: after CLOSE_PHASE the runner
+  stops and asks you to merge the phase PR before it will start the next phase.
 - Review output must be strict JSON with `status`, `summary`, `blockingIssues`,
   `nonBlockingIssues`, and `recommendedFixPrompt`. Invalid review JSON blocks
   the phase and leaves the raw output in `review.log`.
@@ -357,9 +371,10 @@ canonical phase body.
 
 ## Safety Rules
 
-The runner does not auto-merge, force-push, delete branches, delete files
-outside the repo, modify global git config, or interrupt running agent processes
-for pause/resume.
+The runner does not force-push, delete branches, delete files outside the repo,
+modify global git config, or interrupt running agent processes for pause/resume.
+It merges only the reviewed phase PR, only when `mergeOnClose=true`, and only
+after CLOSE_PHASE validation passes; with `mergeOnClose=false` it never merges.
 
 Before a normal IMPLEMENT job starts, the default dirty gate requires a clean
 worktree. With `autoCommit=true`, the coder/fixer must leave committed and
