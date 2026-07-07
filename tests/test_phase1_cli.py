@@ -136,6 +136,7 @@ class Phase1CliTests(unittest.TestCase):
             config = load_config(repo)
             self.assertEqual(config.roles["coder"], "claude")
             self.assertEqual(config.agents["claude"].prompt_prefix, "")
+            self.assertFalse(config.auto_merge)
 
             second = run_cli(repo, home, "init")
 

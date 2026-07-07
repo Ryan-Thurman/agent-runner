@@ -541,6 +541,21 @@ def _run_close_phase(
     if config.auto_commit:
         try:
             commit_sha = _commit_phase_close(repo_root, phase)
+            if config.auto_merge:
+                merged_sha = _merge_phase_pr_after_close(repo_root, phase)
+                record_event(
+                    connection,
+                    project_id=project_id,
+                    plan_id=plan_id,
+                    phase_id=phase["id"],
+                    job_id=result.job_id,
+                    event_type="phase.merged",
+                    message=f"phase {phase['phase_number']} PR merged",
+                    data={
+                        "prUrl": phase["pr_url"],
+                        "mergedSha": merged_sha,
+                    },
+                )
         except JobError as exc:
             _block_phase_after_job(
                 connection,
@@ -549,12 +564,13 @@ def _run_close_phase(
                 phase_id=phase["id"],
                 job=result,
                 message=(
-                    f"CLOSE_PHASE commit failed for phase "
+                    f"CLOSE_PHASE publish/merge failed for phase "
                     f"{phase['phase_number']}: {exc}"
                 ),
             )
             return PhaseLoopResult(
-                f"phase {phase['phase_number']} BLOCKED after CLOSE_PHASE commit: {exc}",
+                f"phase {phase['phase_number']} BLOCKED after CLOSE_PHASE "
+                f"publish/merge: {exc}",
                 blocked=True,
             )
 
@@ -1021,6 +1037,55 @@ def _verify_stored_phase_pr(repo_root: Path, phase: sqlite3.Row) -> PublishMetad
     )
 
 
+def _merge_phase_pr_after_close(repo_root: Path, phase: sqlite3.Row) -> str:
+    if not _phase_has_publish_metadata(phase):
+        raise JobError("autoMerge requires stored phase PR metadata")
+
+    branch_name = phase["branch_name"]
+    pr_url = phase["pr_url"]
+    head_sha = _git_head_sha(repo_root)
+    _git_push_current_branch(repo_root, branch_name)
+
+    payload = _gh_pr_view(
+        repo_root,
+        pr_url=pr_url,
+        failure_context=f"could not verify phase PR before merge {pr_url}",
+        fields="url,headRefName,headRefOid,state,mergeable,isDraft",
+    )
+    _validate_pr_metadata(
+        payload,
+        pr_url=pr_url,
+        expected_branch=branch_name,
+        expected_sha=head_sha,
+        branch_error="phase PR branch changed before merge: {actual!r} is not {expected!r}",
+        sha_error=(
+            "phase PR head changed before merge: {actual_short} is not "
+            "{expected_short}"
+        ),
+    )
+
+    if payload.get("isDraft") is True:
+        raise JobError(f"phase PR is draft; cannot auto-merge {pr_url}")
+    mergeable = payload.get("mergeable")
+    if mergeable != "MERGEABLE":
+        raise JobError(
+            f"phase PR is not mergeable ({mergeable or 'unknown'}); "
+            f"cannot auto-merge {pr_url}"
+        )
+
+    result = subprocess.run(
+        ["gh", "pr", "merge", pr_url, "--merge"],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "gh pr merge failed"
+        raise JobError(f"auto-merge failed for {pr_url}: {detail}")
+    return head_sha
+
+
 def _verify_reviewed_head_for_close(repo_root: Path, phase: sqlite3.Row) -> None:
     if not _phase_has_publish_metadata(phase):
         raise JobError(
@@ -1125,12 +1190,16 @@ def _git_head_sha(repo_root: Path) -> str:
 
 
 def _gh_pr_view(
-    repo_root: Path, *, pr_url: Optional[str] = None, failure_context: str
+    repo_root: Path,
+    *,
+    pr_url: Optional[str] = None,
+    failure_context: str,
+    fields: str = "url,headRefName,headRefOid,state",
 ) -> dict[str, Any]:
     command = ["gh", "pr", "view"]
     if pr_url:
         command.append(pr_url)
-    command.extend(["--json", "url,headRefName,headRefOid,state"])
+    command.extend(["--json", fields])
     try:
         result = subprocess.run(
             command,
@@ -1461,8 +1530,10 @@ def _close_phase_prompt(
         "3. Handoff: write the handoff file with these markdown sections: "
         "Completed Work, Decisions, Files Changed, Checks Run, Open Risks, "
         "Next-Phase Context.\n"
-        "4. Do not start future phase work. Do not merge PRs, force-push, "
-        "delete branches, or delete files outside this repository.\n\n"
+        "4. Do not start future phase work. Do not merge PRs yourself; the "
+        "runner handles configured autoMerge after validating closer output. "
+        "Do not force-push, delete branches, or delete files outside this "
+        "repository.\n\n"
         "Phase body:\n"
         f"{parsed_phase.content}\n\n"
         "Check output:\n"
@@ -1571,6 +1642,19 @@ def _git_commit(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+
+
+def _git_push_current_branch(repo_root: Path, branch_name: str) -> None:
+    result = subprocess.run(
+        ["git", "push", "-u", "origin", branch_name],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "git push failed"
+        raise JobError(f"failed to push phase branch before auto-merge: {detail}")
 
 
 def _git_identity_missing(output: str) -> bool:

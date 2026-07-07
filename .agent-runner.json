@@ -31,6 +31,7 @@
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
   "autoCommit": true,
+  "autoMerge": true,
   "openPrWhenComplete": false,
   "allowDirty": false
 }

@@ -114,6 +114,7 @@ Minimum config shape:
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
   "autoCommit": true,
+  "autoMerge": false,
   "allowDirty": false
 }
 ```
@@ -131,6 +132,10 @@ Current notes:
 - `autoCommit=true` requires the GitHub CLI (`gh`) on `PATH`; after checks pass,
   the runner verifies `gh pr view` for the current branch before opening the
   reviewer.
+- `autoMerge=true` is opt-in and only applies after a reviewer has passed the
+  phase and `CLOSE_PHASE` has succeeded. The runner pushes the current branch,
+  verifies the PR is open, non-draft, mergeable, and still at local `HEAD`, then
+  runs `gh pr merge <pr-url> --merge`.
 - `allowDirty=false` is the safest dogfood setting. A dirty worktree blocks
   before an IMPLEMENT job starts.
 - `allowDirty=true` warns and continues; after IMPLEMENT, the runner stages only
@@ -207,6 +212,12 @@ If another phase is still `PENDING`, the runner starts its IMPLEMENT job after
 the closure commit. With `autoCommit=false`, the runner marks the phase complete
 but stops before starting the next pending phase so local staged work can be
 handled deliberately.
+
+With `autoMerge=true`, the runner pushes the phase branch after `CLOSE_PHASE`
+and merges the stored PR only after confirming that GitHub still reports the PR
+as open, non-draft, mergeable, on the stored branch, and at the current local
+`HEAD`. A stale, draft, closed, or non-mergeable PR blocks the phase rather than
+silently completing it.
 
 After a published review:
 
@@ -320,9 +331,10 @@ canonical phase body.
 
 ## Safety Rules
 
-The runner currently does not auto-merge, force-push, delete branches, delete
-files outside the repo, modify global git config, or interrupt running agent
-processes.
+The runner currently does not force-push, delete branches, delete files outside
+the repo, modify global git config, or interrupt running agent processes.
+Merging is runner-owned and opt-in via `autoMerge=true`; agents are still told
+not to merge PRs themselves.
 
 Before a normal IMPLEMENT job starts, the default dirty gate requires a clean
 worktree. With `autoCommit=true`, the coder/fixer must leave committed and

@@ -24,8 +24,10 @@ retries run out, then a closure job updates docs + plan + handoff and commits.
 - One phase per session/PR. Do not start future phases or refactor unrelated code.
 - Every phase ships with tests (stdlib `unittest` or `pytest` if already present) and a
   manual verification note in the phase handoff.
-- The runner must never: auto-merge, force-push, delete branches/worktrees, delete files
-  outside the repo, modify global git config, or run without its project lock.
+- The runner must never: force-push, delete branches/worktrees, delete files outside
+  the repo, modify global git config, or run without its project lock. It may merge a
+  reviewed phase PR only when `autoMerge=true` and the PR is still open, mergeable, and
+  at the expected accepted head.
 - Never interrupt a running agent process; pause/stop takes effect at job boundaries.
 - Prompts are written per **role** (coder/reviewer/closer), never per vendor. Reviewer
   jobs always get the profile's `readOnlyFlags`; coder/closer jobs get `writeFlags`.
@@ -182,8 +184,10 @@ marker line and append a one-line evidence note (commit hash, checks) under the 
 heading; (3) write the phase handoff to `.acc/phases/<plan-slug>/phase-NN-handoff.md`
 (completed work, decisions, files changed, checks run, open risks, next-phase context).
 Then the runner commits (`git commit -m "Phase <n>: <title>"` when `autoCommit`; "nothing
-to commit" is logged, not fatal), marks the phase COMPLETE, and advances to the next
-PENDING phase. When no phases remain, the plan and project go COMPLETE with a summary.
+to commit" is logged, not fatal). If `autoMerge=true`, it pushes the current branch,
+verifies the PR is open, non-draft, mergeable, and still at the accepted head, then
+merges it. The runner then marks the phase COMPLETE and advances to the next PENDING
+phase. When no phases remain, the plan and project go COMPLETE with a summary.
 
 Acceptance Criteria:
 - After a passing phase: plan file shows `Status: COMPLETE` for that phase, per-phase
@@ -191,6 +195,8 @@ Acceptance Criteria:
   handoff file exists with the required sections.
 - The closure commit contains the code, the doc updates, the plan write-back, and the
   handoff together on the current branch.
+- With `autoMerge=true`, successful close pushes and merges the phase PR; a draft,
+  closed, stale, or non-mergeable PR blocks instead of marking the phase complete.
 - Closer non-zero exit or timeout → phase BLOCKED (work is not silently marked complete).
 - Multi-phase plan: completing phase 1 automatically starts phase 2's IMPLEMENT.
 

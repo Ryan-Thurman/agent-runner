@@ -43,6 +43,7 @@ class RunnerConfig:
     max_retries_per_phase: int
     timeout_minutes: int
     auto_commit: bool
+    auto_merge: bool
     allow_dirty: bool
     warnings: list[str]
 
@@ -149,6 +150,7 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
     max_retries = _required_int(data, "maxRetriesPerPhase", minimum=0)
     timeout_minutes = _required_int(data, "timeoutMinutes", minimum=1)
     auto_commit = _required_bool(data, "autoCommit")
+    auto_merge = _optional_bool(data, "autoMerge", default=False)
     allow_dirty = _required_bool(data, "allowDirty")
 
     return RunnerConfig(
@@ -161,6 +163,7 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
         max_retries_per_phase=max_retries,
         timeout_minutes=timeout_minutes,
         auto_commit=auto_commit,
+        auto_merge=auto_merge,
         allow_dirty=allow_dirty,
         warnings=warnings,
     )
@@ -256,6 +259,13 @@ def _required_bool(data: dict[str, Any], key: str) -> bool:
     return value
 
 
+def _optional_bool(data: dict[str, Any], key: str, *, default: bool) -> bool:
+    value = data.get(key, default)
+    if not isinstance(value, bool):
+        raise ConfigError(f"invalid config: field {key!r} must be a boolean")
+    return value
+
+
 SAMPLE_CONFIG = """{
   // Path to the markdown plan parsed by later phases.
   "planPath": "docs/plan.md",
@@ -293,6 +303,7 @@ SAMPLE_CONFIG = """{
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
   "autoCommit": true,
+  "autoMerge": false,
   "allowDirty": false
 }
 """

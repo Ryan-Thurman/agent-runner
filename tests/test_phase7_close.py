@@ -49,6 +49,11 @@ def commit_all(repo: Path, message: str = "baseline") -> None:
     subprocess.run(["git", "commit", "-qm", message], cwd=repo, check=True)
 
 
+def add_origin(repo: Path, remote: Path) -> None:
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True)
+
+
 def write_plan(repo: Path, *, phase_count: int = 1, status: str = "PENDING") -> None:
     second_phase = ""
     if phase_count > 1:
@@ -72,7 +77,13 @@ def write_plan(repo: Path, *, phase_count: int = 1, status: str = "PENDING") -> 
     )
 
 
-def write_config(repo: Path, agent_script: Path, *, auto_commit: bool = True) -> None:
+def write_config(
+    repo: Path,
+    agent_script: Path,
+    *,
+    auto_commit: bool = True,
+    auto_merge: bool = False,
+) -> None:
     data = json.loads(strip_json_comments(SAMPLE_CONFIG))
     data["agents"] = {
         "fake": {
@@ -89,6 +100,7 @@ def write_config(repo: Path, agent_script: Path, *, auto_commit: bool = True) ->
         "\"from pathlib import Path; assert Path('generated.txt').exists()\""
     ]
     data["autoCommit"] = auto_commit
+    data["autoMerge"] = auto_merge
     data["timeoutMinutes"] = 1
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 
@@ -200,7 +212,19 @@ if args[:2] == ["pr", "view"]:
         "headRefName": branch,
         "headRefOid": sha,
         "state": os.environ.get("GH_PR_STATE", "OPEN"),
+        "mergeable": os.environ.get("GH_PR_MERGEABLE", "MERGEABLE"),
+        "isDraft": os.environ.get("GH_PR_DRAFT") == "1",
     }))
+    raise SystemExit(0)
+
+if args[:2] == ["pr", "merge"]:
+    merge_log = os.environ.get("GH_MERGE_LOG")
+    if merge_log:
+        with open(merge_log, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(args) + "\n")
+    if os.environ.get("GH_PR_MERGE_FAIL") == "1":
+        print("merge failed", file=sys.stderr)
+        raise SystemExit(1)
     raise SystemExit(0)
 
 if args[:2] == ["pr", "diff"]:
@@ -335,6 +359,106 @@ class Phase7CloseTests(unittest.TestCase):
             self.assertEqual(project["status"], "COMPLETE")
             self.assertEqual(plan["status"], "COMPLETE")
             self.assertEqual([job["type"] for job in jobs][-1], "CLOSE_PHASE")
+
+    def test_auto_merge_merges_pr_after_successful_close(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            remote = root / "origin.git"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            merge_log = root / "merge.log"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            add_origin(repo, remote)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo)
+            write_config(repo, script, auto_merge=True)
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_MERGE_LOG": str(merge_log),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "COMPLETE")
+            self.assertTrue(merge_log.exists())
+            self.assertIn(
+                ["pr", "merge", "https://example.test/pull/1", "--merge"],
+                [
+                    json.loads(line)
+                    for line in merge_log.read_text(encoding="utf-8").splitlines()
+                ],
+            )
+            with connect_db(home) as db:
+                events = db.execute(
+                    "SELECT event_type, message FROM events ORDER BY id"
+                ).fetchall()
+            self.assertIn(
+                ("phase.merged", "phase 1 PR merged"),
+                [(event["event_type"], event["message"]) for event in events],
+            )
+
+    def test_auto_merge_blocks_when_pr_is_not_mergeable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            remote = root / "origin.git"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            merge_log = root / "merge.log"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            add_origin(repo, remote)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo)
+            write_config(repo, script, auto_merge=True)
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_MERGE_LOG": str(merge_log),
+                    "GH_PR_MERGEABLE": "CONFLICTING",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("BLOCKED after CLOSE_PHASE publish/merge", result.stderr)
+            self.assertIn("phase PR is not mergeable", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "BLOCKED")
+            self.assertFalse(merge_log.exists())
 
     def test_closer_failure_blocks_without_marking_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
