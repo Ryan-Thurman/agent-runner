@@ -513,6 +513,61 @@ class Phase7CloseTests(unittest.TestCase):
                 jobs = db.execute("SELECT type FROM jobs ORDER BY id").fetchall()
             self.assertEqual([job["type"] for job in jobs], [])
 
+    def test_auto_commit_blocks_close_on_wrong_local_branch_at_reviewed_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="CLOSING")
+            write_config(repo, script, auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            published_sha = seed_closing_published_phase(repo, home)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/wrong-phase"],
+                cwd=repo,
+                check=True,
+            )
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_HEAD_REF_NAME": "dev/test-phase",
+                    "GH_HEAD_REF_OID": published_sha,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("BLOCKED before CLOSE_PHASE", result.stderr)
+            self.assertIn("current branch 'dev/wrong-phase'", result.stderr)
+            self.assertIn("reviewed published branch 'dev/test-phase'", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "BLOCKED")
+            self.assertFalse((trace / "close-argv.json").exists())
+            head_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            self.assertEqual(head_sha, published_sha)
+            with connect_db(home) as db:
+                jobs = db.execute("SELECT type FROM jobs ORDER BY id").fetchall()
+            self.assertEqual([job["type"] for job in jobs], [])
+
 
 if __name__ == "__main__":
     unittest.main()

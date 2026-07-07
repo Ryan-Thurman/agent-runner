@@ -1038,6 +1038,14 @@ def _verify_reviewed_head_for_close(repo_root: Path, phase: sqlite3.Row) -> None
         )
 
     metadata = _verify_stored_phase_pr(repo_root, phase)
+    current_branch = _git_current_branch(repo_root)
+    if current_branch != metadata.branch_name:
+        raise JobError(
+            "current branch "
+            f"{current_branch!r} does not match reviewed published branch "
+            f"{metadata.branch_name!r}; check out the reviewed branch before closing"
+        )
+
     current_sha = _git_head_sha(repo_root)
     if current_sha != metadata.published_sha:
         raise JobError(
