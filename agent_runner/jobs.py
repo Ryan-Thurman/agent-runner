@@ -269,12 +269,19 @@ def _run_process(
                 bufsize=1,
                 start_new_session=True,
             )
-            if on_spawn is not None:
-                on_spawn(process.pid)
         except OSError as exc:
             error = f"failed to start process: {exc}"
             log_file.write(f"\n[error]\n{error}\n")
             return None, "", "", error
+        if on_spawn is not None:
+            try:
+                on_spawn(process.pid)
+            except Exception as exc:
+                with lock:
+                    log_file.write(
+                        f"\n[warning]\nfailed to report spawned process: {exc}\n"
+                    )
+                    log_file.flush()
         error = None
         try:
             stdout_thread = threading.Thread(

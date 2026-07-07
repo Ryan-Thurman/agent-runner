@@ -203,6 +203,8 @@ branch = subprocess.check_output(
     ["git", "branch", "--show-current"], text=True
 ).strip()
 sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+branch = os.environ.get("GH_HEAD_REF_NAME", branch)
+sha = os.environ.get("GH_HEAD_REF_OID", sha)
 
 if args[:2] == ["pr", "view"]:
     pr_url = "https://example.test/pull/1"
@@ -246,6 +248,43 @@ def jobs(home: Path, phase_id: int):
         return db.execute(
             "SELECT * FROM jobs WHERE phase_id = ? ORDER BY id", (phase_id,)
         ).fetchall()
+
+
+def seed_reviewing_published_phase(repo: Path, home: Path) -> str:
+    published_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+    ).strip()
+    parsed_plan = parse_plan_file(repo, "docs/plan.md")
+    parsed_phase = parsed_plan.phases[0]
+
+    with connect_db(home) as db:
+        project = get_or_create_project(db, slug=project_slug(repo), repo_path=repo)
+        plan = create_plan(
+            db,
+            project_id=project["id"],
+            path=parsed_plan.path,
+            content_hash=parsed_plan.content_hash,
+        )
+        create_phase(
+            db,
+            project_id=project["id"],
+            plan_id=plan["id"],
+            phase_number=parsed_phase.phase_number,
+            title=parsed_phase.title,
+            content_hash=parsed_phase.content_hash,
+            status="REVIEWING",
+            publish_mode="pr",
+            branch_name="dev/test-phase",
+            pr_url="https://example.test/pull/1",
+            published_sha=published_sha,
+            log_dir=phase_log_dir(
+                home / "logs",
+                project_slug=project_slug(repo),
+                plan_path=parsed_plan.path,
+                phase_number=parsed_phase.phase_number,
+            ),
+        )
+    return published_sha
 
 
 class Phase6LoopTests(unittest.TestCase):
@@ -389,41 +428,7 @@ class Phase6LoopTests(unittest.TestCase):
                 cwd=repo,
                 check=True,
             )
-            published_sha = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
-            ).strip()
-            parsed_plan = parse_plan_file(repo, "docs/plan.md")
-            parsed_phase = parsed_plan.phases[0]
-
-            with connect_db(home) as db:
-                project = get_or_create_project(
-                    db, slug=project_slug(repo), repo_path=repo
-                )
-                plan = create_plan(
-                    db,
-                    project_id=project["id"],
-                    path=parsed_plan.path,
-                    content_hash=parsed_plan.content_hash,
-                )
-                phase = create_phase(
-                    db,
-                    project_id=project["id"],
-                    plan_id=plan["id"],
-                    phase_number=parsed_phase.phase_number,
-                    title=parsed_phase.title,
-                    content_hash=parsed_phase.content_hash,
-                    status="REVIEWING",
-                    publish_mode="pr",
-                    branch_name="dev/test-phase",
-                    pr_url="https://example.test/pull/1",
-                    published_sha=published_sha,
-                    log_dir=phase_log_dir(
-                        home / "logs",
-                        project_slug=project_slug(repo),
-                        plan_path=parsed_plan.path,
-                        phase_number=parsed_phase.phase_number,
-                    ),
-                )
+            seed_reviewing_published_phase(repo, home)
 
             result = run_cli(
                 repo,
@@ -442,6 +447,90 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertEqual(phase["status"], "BLOCKED")
             phase_jobs = jobs(home, phase["id"])
             self.assertNotIn("REVIEW", [job["type"] for job in phase_jobs])
+
+    def test_auto_commit_blocks_stored_pr_branch_mismatch_before_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="REVIEWING")
+            write_config(repo, script, checks=[], auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            seed_reviewing_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_HEAD_REF_NAME": "dev/other-phase",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("stored phase PR branch changed", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            self.assertNotIn(
+                "REVIEW", [job["type"] for job in jobs(home, phase["id"])]
+            )
+
+    def test_auto_commit_blocks_stored_pr_sha_mismatch_before_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="REVIEWING")
+            write_config(repo, script, checks=[], auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            seed_reviewing_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_HEAD_REF_OID": "abc123456789",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("stored phase PR head changed", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            self.assertNotIn(
+                "REVIEW", [job["type"] for job in jobs(home, phase["id"])]
+            )
 
     def test_review_changes_requested_runs_fix_then_reruns_checks_and_rereview(self):
         with tempfile.TemporaryDirectory() as tmp:
