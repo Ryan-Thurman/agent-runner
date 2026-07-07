@@ -1586,7 +1586,7 @@ def _single_line(text: str, *, limit: int) -> str:
 def _extract_review_json(result: JobResult, log_dir: Path) -> dict[str, Any]:
     raw_output = _review_capture_output(result)
     try:
-        payload = json.loads(raw_output)
+        payload = json.loads(_review_json_document(raw_output))
     except json.JSONDecodeError as exc:
         _append_review_capture_to_log(result, raw_output)
         raise JobError(f"invalid review JSON: {exc}") from exc
@@ -1597,6 +1597,24 @@ def _extract_review_json(result: JobResult, log_dir: Path) -> dict[str, Any]:
         encoding="utf-8",
     )
     return review
+
+
+def _review_json_document(raw_output: str) -> str:
+    stripped = raw_output.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+    if not lines:
+        return stripped
+    opener = lines[0].strip().lower()
+    if opener not in {"```", "```json"}:
+        return stripped
+
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "```":
+            return "\n".join(lines[1:index]).strip()
+    return stripped
 
 
 def _review_capture_output(result: JobResult) -> str:

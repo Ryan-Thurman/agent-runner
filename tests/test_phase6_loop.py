@@ -132,6 +132,17 @@ if (
             "recommendedFixPrompt": ""
         }))
         raise SystemExit(0)
+    if mode == "FENCED_PASS":
+        print("```json")
+        print(json.dumps({
+            "status": "PASS",
+            "summary": "accepted in markdown",
+            "blockingIssues": [],
+            "nonBlockingIssues": ["Nice to Have: optional cleanup"],
+            "recommendedFixPrompt": ""
+        }))
+        print("```")
+        raise SystemExit(0)
     if mode == "REVIEW_FIX" and not Path("fix-marker.txt").exists():
         print(json.dumps({
             "status": "CHANGES_REQUESTED",
@@ -345,6 +356,36 @@ class Phase6LoopTests(unittest.TestCase):
             review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("git diff --staged", review_prompt)
             self.assertNotIn("fake coder completed", review_prompt)
+
+    def test_reviewer_markdown_fenced_json_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[])
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "AGENT_MODE": "FENCED_PASS"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            review = json.loads(
+                (Path(phase["log_dir"]) / "review.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(review["status"], "PASS")
+            self.assertEqual(review["summary"], "accepted in markdown")
 
     def test_auto_commit_requires_published_pr_before_review(self):
         with tempfile.TemporaryDirectory() as tmp:
