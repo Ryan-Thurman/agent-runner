@@ -83,7 +83,7 @@ class Phase2StorageTests(unittest.TestCase):
 
             self.assertEqual(project["slug"], "repo-abc123")
 
-    def test_connect_db_migrates_jobs_type_check_for_autofix(self):
+    def test_connect_db_migrates_legacy_jobs_schema_for_autofix(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             paths = storage_paths(home)
@@ -139,7 +139,6 @@ class Phase2StorageTests(unittest.TestCase):
                     log_path TEXT,
                     output_path TEXT,
                     error TEXT,
-                    pid INTEGER,
                     started_sha TEXT,
                     finished_sha TEXT,
                     exit_code INTEGER,
@@ -184,6 +183,9 @@ class Phase2StorageTests(unittest.TestCase):
             with connect_db(home) as db:
                 prior = db.execute("SELECT * FROM jobs WHERE id = 1").fetchone()
                 project = db.execute("SELECT * FROM projects WHERE id = 1").fetchone()
+                columns = {
+                    row["name"] for row in db.execute("PRAGMA table_info(jobs)")
+                }
                 create_job(
                     db,
                     project_id=project["id"],
@@ -197,6 +199,7 @@ class Phase2StorageTests(unittest.TestCase):
                 ]
 
             self.assertEqual(prior["type"], "IMPLEMENT")
+            self.assertIn("pid", columns)
             self.assertEqual(types, ["IMPLEMENT", "AUTOFIX"])
 
     def test_unique_constraints_fire_for_plans_and_phases(self):

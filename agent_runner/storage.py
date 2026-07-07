@@ -119,9 +119,9 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
         );
         """
     )
-    _ensure_jobs_type_check_covers_job_types(connection)
     _ensure_column(connection, "jobs", "pid", "INTEGER")
     _ensure_column(connection, "phases", "blocked_from", "TEXT")
+    _ensure_jobs_type_check_covers_job_types(connection)
     _ensure_jobs_indexes(connection)
     connection.commit()
 
