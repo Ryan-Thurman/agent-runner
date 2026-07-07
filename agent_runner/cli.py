@@ -9,7 +9,7 @@ from typing import Optional
 from .config import CONFIG_FILENAME, SAMPLE_CONFIG, load_config, project_slug
 from .errors import AgentRunnerError, ConfigError, GitRepoError, LockError
 from .git import find_git_root
-from .lock import ProjectLock, SignalLockRelease, reset_project_lock
+from .lock import ProjectLock, SignalLockRelease, pid_is_alive, reset_project_lock
 from .paths import ensure_runner_layout
 from .phase_loop import run_phase_loop
 from .plan import parse_plan_file, register_or_resume_plan
@@ -19,6 +19,7 @@ from .storage import (
     list_phases_for_plan,
     list_plans_for_project,
     list_recent_events,
+    list_running_jobs_for_project,
     reap_orphaned_jobs,
     rows_to_dicts,
 )
@@ -155,6 +156,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     slug = project_slug(repo_root)
     with connect_db(home) as db:
         project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+        if _project_lock_is_live(home / "locks", slug, repo_root):
+            reaped_jobs = []
+        else:
+            reaped_jobs = reap_orphaned_jobs(db, project["id"])
         plans = list_plans_for_project(db, project["id"])
         plan_payloads = []
         for plan in plans:
@@ -166,8 +171,18 @@ def cmd_status(args: argparse.Namespace) -> int:
                 }
             )
         events = list_recent_events(db, project["id"])
+        running_jobs = list_running_jobs_for_project(db, project["id"])
 
     print(f"[agent-runner] project: {repo_root}", file=sys.stderr)
+    if reaped_jobs:
+        print(
+            f"[agent-runner] reaped {len(reaped_jobs)} orphaned job(s)",
+            file=sys.stderr,
+        )
+    if running_jobs:
+        print("[agent-runner] running jobs:", file=sys.stderr)
+        for job in running_jobs:
+            print(f"[agent-runner]   {_format_running_job(job)}", file=sys.stderr)
     if not plan_payloads:
         print("[agent-runner] no plan registered yet", file=sys.stderr)
     else:
@@ -198,10 +213,32 @@ def cmd_status(args: argparse.Namespace) -> int:
     payload = {
         "project": dict(project),
         "plans": plan_payloads,
+        "runningJobs": rows_to_dicts(running_jobs),
         "recentEvents": rows_to_dicts(events),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
+
+
+def _project_lock_is_live(locks_dir: Path, slug: str, repo_root: Path) -> bool:
+    path = locks_dir / f"{slug}.lock"
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    pid = payload.get("pid")
+    repo_path = payload.get("repoPath")
+    if not isinstance(pid, int) or not isinstance(repo_path, str):
+        return False
+    try:
+        matches_repo = Path(repo_path).resolve() == repo_root.resolve()
+    except OSError:
+        return False
+    return matches_repo and pid_is_alive(pid)
 
 
 def cmd_pause(args: argparse.Namespace) -> int:
@@ -243,3 +280,13 @@ def _format_publish_state(phase: dict) -> str:
         if phase.get(key):
             details.append(f"{key}={phase[key]}")
     return f" ({', '.join(details)})" if details else ""
+
+
+def _format_running_job(job: dict) -> str:
+    job = dict(job)
+    phase = ""
+    if job.get("phase_number") is not None:
+        phase = f" phase={job['phase_number']}"
+    log = f" log={job['log_path']}" if job.get("log_path") else ""
+    started = f" started={job['started_at']}" if job.get("started_at") else ""
+    return f"job {job['id']}: {job['type']}{phase}{started}{log}"

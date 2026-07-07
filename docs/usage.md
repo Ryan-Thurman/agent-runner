@@ -238,6 +238,10 @@ job log.
 python3 -m agent_runner status
 ```
 
+When a job is active, `status` shows the running job id, type, phase, start
+time, and log path. `run` also prints job start lines as soon as it launches a
+job, including the role/profile, log path, and child PID.
+
 `logs` currently prints the project log root:
 
 ```sh

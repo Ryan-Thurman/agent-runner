@@ -237,6 +237,95 @@ class Phase2StorageTests(unittest.TestCase):
             self.assertEqual(payload["project"]["repo_path"], str(repo.resolve()))
             self.assertEqual(payload["plans"], [])
 
+    def test_status_reaps_orphaned_running_jobs_before_display_without_live_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            repo.mkdir()
+            git_init(repo)
+            write_config(repo)
+            slug = project_slug(repo)
+
+            with connect_db(home) as db:
+                project = get_or_create_project(db, slug=slug, repo_path=repo)
+                plan = create_plan(db, project_id=project["id"], path="docs/plan.md")
+                phase = create_phase(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan["id"],
+                    phase_number=2,
+                    title="Storage",
+                    content_hash="phase-hash",
+                    status="REVIEWING",
+                )
+                create_job(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan["id"],
+                    phase_id=phase["id"],
+                    job_type="REVIEW",
+                    status="RUNNING",
+                    log_path=Path("/tmp/review.log"),
+                    started_at="2026-07-06T00:00:00+00:00",
+                )
+
+            result = run_cli(repo, home, "status")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("reaped 1 orphaned job(s)", result.stderr)
+            self.assertNotIn("running jobs:", result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["runningJobs"], [])
+            self.assertEqual(payload["plans"][0]["phases"][0]["status"], "REVIEWING")
+
+    def test_status_preserves_running_jobs_when_project_lock_is_live(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            repo.mkdir()
+            git_init(repo)
+            write_config(repo)
+            slug = project_slug(repo)
+
+            with connect_db(home) as db:
+                project = get_or_create_project(db, slug=slug, repo_path=repo)
+                plan = create_plan(db, project_id=project["id"], path="docs/plan.md")
+                phase = create_phase(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan["id"],
+                    phase_number=2,
+                    title="Storage",
+                    content_hash="phase-hash",
+                    status="REVIEWING",
+                )
+                create_job(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan["id"],
+                    phase_id=phase["id"],
+                    job_type="REVIEW",
+                    status="RUNNING",
+                    log_path=Path("/tmp/review.log"),
+                    started_at="2026-07-06T00:00:00+00:00",
+                )
+            locks_dir = home / "locks"
+            locks_dir.mkdir(parents=True)
+            (locks_dir / f"{slug}.lock").write_text(
+                json.dumps({"pid": os.getpid(), "repoPath": str(repo.resolve())}),
+                encoding="utf-8",
+            )
+
+            result = run_cli(repo, home, "status")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("reaped 1 orphaned job(s)", result.stderr)
+            self.assertIn("running jobs:", result.stderr)
+            self.assertIn("job 1: REVIEW phase=2", result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["runningJobs"][0]["type"], "REVIEW")
+            self.assertEqual(payload["runningJobs"][0]["phase_number"], 2)
+
     def test_status_lists_registered_phases_publish_state_and_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
@@ -279,9 +368,11 @@ class Phase2StorageTests(unittest.TestCase):
             result = run_cli(repo, home, "status")
 
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("running jobs:", result.stderr)
             self.assertIn("phase 2: REVIEWING retries=1", result.stderr)
             self.assertIn("branch_name=phase-2-sqlite-state", result.stderr)
             payload = json.loads(result.stdout)
+            self.assertEqual(payload["runningJobs"], [])
             self.assertEqual(payload["plans"][0]["path"], "docs/plan.md")
             self.assertEqual(payload["plans"][0]["phases"][0]["status"], "REVIEWING")
             self.assertEqual(

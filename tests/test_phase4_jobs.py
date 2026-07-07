@@ -467,6 +467,33 @@ time.sleep(30)
             self.assertEqual(exit_code, -signal.SIGTERM)
             self.assertIn("timeout after", error)
 
+    def test_spawn_notification_failure_does_not_leak_or_fail_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            script = root / "ok.py"
+            script.write_text("print('done')\n", encoding="utf-8")
+
+            exit_code, stdout, stderr, error = _run_process(
+                [sys.executable, str(script)],
+                repo_root=repo,
+                timeout_seconds=5,
+                shell=False,
+                log_path=root / "spawn.log",
+                log_header="$ ok\n",
+                on_spawn=lambda pid: (_ for _ in ()).throw(BrokenPipeError("closed")),
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertIsNone(error)
+            self.assertEqual(stdout, "done\n")
+            self.assertIn(
+                "failed to report spawned process",
+                (root / "spawn.log").read_text(encoding="utf-8"),
+            )
+
     def test_reviewer_uses_readonly_flags_and_last_message_capture(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

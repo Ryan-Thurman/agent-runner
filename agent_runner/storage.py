@@ -415,6 +415,26 @@ def get_job(connection: sqlite3.Connection, job_id: int) -> sqlite3.Row:
     return row
 
 
+def list_running_jobs_for_project(
+    connection: sqlite3.Connection, project_id: int
+) -> list[sqlite3.Row]:
+    return list(
+        connection.execute(
+            """
+            SELECT
+                jobs.*,
+                phases.phase_number AS phase_number,
+                phases.title AS phase_title
+            FROM jobs
+            LEFT JOIN phases ON phases.id = jobs.phase_id
+            WHERE jobs.project_id = ? AND jobs.status = 'RUNNING'
+            ORDER BY jobs.id
+            """,
+            (project_id,),
+        )
+    )
+
+
 def record_event(
     connection: sqlite3.Connection,
     *,
