@@ -60,9 +60,23 @@ The executable shim also works from this checkout:
 ./agent-runner run
 ```
 
-For another local repo, put this checkout on `PYTHONPATH`, or install/wrap the
-`agent-runner` shim in your shell path. The CLI must be run from inside the git
-worktree it should operate on.
+For a global command that works from any target git worktree, symlink the short
+shim onto your `PATH`:
+
+```sh
+ln -s /path/to/agent-runner/autorun ~/bin/autorun
+autorun --version
+```
+
+The long-form shim can be installed the same way:
+
+```sh
+ln -s /path/to/agent-runner/agent-runner ~/bin/agent-runner
+```
+
+Both shims resolve their real checkout path before importing the package, so a
+symlinked `autorun` or `agent-runner` works from inside any repo. The CLI must
+be run from inside the git worktree it should operate on.
 
 Runner state lives outside the repo by default:
 
@@ -84,11 +98,14 @@ AGENT_RUNNER_HOME="$(mktemp -d)" python3 -m agent_runner status
 Run this from the target repo:
 
 ```sh
-python3 -m agent_runner init
+autorun init
 ```
 
-That creates `.agent-runner.json` if it does not already exist. Edit it before
-running the loop.
+From the runner checkout, `python3 -m agent_runner init` is equivalent.
+
+That creates `.agent-runner.json` if it does not already exist. It detects a
+default `checks` list for Python or npm projects; otherwise it writes a failing
+placeholder check that must be replaced before the first run.
 
 Minimum config shape:
 
@@ -97,31 +114,47 @@ Minimum config shape:
   "planPath": "docs/plan.md",
   "checks": [
     "python3 -m compileall -q .",
-    "python3 -m unittest discover -s tests -v"
+    "python3 -m unittest discover -s tests"
   ],
   "agents": {
-    "claude": {
-      "command": "claude",
-      "promptArgs": ["-p"],
-      "writeFlags": ["--permission-mode", "acceptEdits"],
-      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
-      "promptPrefix": "",
-      "outputCapture": "stdout"
-    },
     "codex": {
       "command": "codex",
       "promptArgs": ["exec"],
       "writeFlags": ["--sandbox", "workspace-write"],
       "readOnlyFlags": ["--sandbox", "read-only"],
       "outputCapture": "last-message-file"
+    },
+    "antigravity": {
+      "command": "agy",
+      "promptArgs": ["-p", "--print-timeout", "40m"],
+      "writeFlags": ["--dangerously-skip-permissions"],
+      "readOnlyFlags": ["--sandbox"],
+      "outputCapture": "stdout"
+    },
+    "claude-opus": {
+      "command": "claude",
+      "promptArgs": ["--model", "claude-opus-4-8", "-p"],
+      "writeFlags": ["--permission-mode", "acceptEdits"],
+      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "promptPrefix": "",
+      "outputCapture": "stdout"
+    },
+    "claude-sonnet": {
+      "command": "claude",
+      "promptArgs": ["--model", "claude-sonnet-5", "-p"],
+      "writeFlags": ["--permission-mode", "acceptEdits"],
+      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "promptPrefix": "",
+      "outputCapture": "stdout"
     }
   },
   "roles": {
     "coder": "codex",
-    "reviewer": "claude"
+    "reviewer": "claude-opus"
   },
   "roleFallbacks": {
-    "reviewer": ["codex"]
+    "reviewer": ["antigravity"],
+    "coder": ["claude-sonnet"]
   },
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,

@@ -97,8 +97,10 @@ else:
         }
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
+    data["roleFallbacks"] = {}
     data["planPath"] = plan_path
     data["autoCommit"] = False
+    data["mergeOnClose"] = False
     data["allowDirty"] = True
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 

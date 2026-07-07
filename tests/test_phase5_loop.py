@@ -95,9 +95,11 @@ def write_config(
         }
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
+    data["roleFallbacks"] = {}
     data["checks"] = checks
     data["allowDirty"] = allow_dirty
     data["autoCommit"] = auto_commit
+    data["mergeOnClose"] = False
     data["timeoutMinutes"] = 1
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 

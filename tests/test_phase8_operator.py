@@ -103,11 +103,13 @@ def write_config(
         data["roles"] = {"coder": "reviewish", "reviewer": "coderish"}
     else:
         data["roles"] = {"coder": "coderish", "reviewer": "reviewish"}
+    data["roleFallbacks"] = {}
     data["checks"] = [
         f"{shlex.quote(sys.executable)} -c "
         "\"from pathlib import Path; assert Path('generated.txt').exists()\""
     ]
     data["autoCommit"] = False
+    data["mergeOnClose"] = False
     data["timeoutMinutes"] = 1
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 
