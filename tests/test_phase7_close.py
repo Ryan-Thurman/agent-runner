@@ -16,6 +16,7 @@ from agent_runner.storage import (
     create_plan,
     get_or_create_project,
     phase_log_dir,
+    update_phase_status,
 )
 
 
@@ -50,6 +51,16 @@ def commit_all(repo: Path, message: str = "baseline") -> None:
 
 
 def write_plan(repo: Path, *, phase_count: int = 1, status: str = "PENDING") -> None:
+    write_custom_plan(repo, phase_count=phase_count, status=status)
+
+
+def write_custom_plan(
+    repo: Path,
+    *,
+    phase_count: int = 1,
+    status: str = "PENDING",
+    phase_1_body: str = "Create generated.txt.",
+) -> None:
     second_phase = ""
     if phase_count > 1:
         second_phase = (
@@ -64,7 +75,7 @@ def write_plan(repo: Path, *, phase_count: int = 1, status: str = "PENDING") -> 
     plan_path.write_text(
         "## Phase 1: First phase\n"
         f"Status: {status}\n\n"
-        "Create generated.txt.\n\n"
+        f"{phase_1_body}\n\n"
         "Acceptance Criteria:\n"
         "- generated.txt exists.\n"
         f"{second_phase}",
@@ -245,6 +256,7 @@ if args[:2] == ["pr", "view"]:
         "state": state,
         "mergeable": os.environ.get("GH_PR_MERGEABLE", "MERGEABLE"),
         "isDraft": os.environ.get("GH_PR_DRAFT") == "1",
+        "mergeCommit": {"oid": os.environ.get("GH_MERGE_COMMIT", sha)},
     }))
     raise SystemExit(0)
 
@@ -341,6 +353,46 @@ def seed_complete_published_phase(repo: Path, home: Path) -> str:
                 phase_number=parsed_phase.phase_number,
             ),
         )
+    return published_sha
+
+
+def seed_blocked_published_phase(
+    repo: Path, home: Path, *, content_hash: Optional[str] = None
+) -> str:
+    published_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+    ).strip()
+    parsed_plan = parse_plan_file(repo, "docs/plan.md")
+    parsed_phase = parsed_plan.phases[0]
+
+    with connect_db(home) as db:
+        project = get_or_create_project(db, slug=project_slug(repo), repo_path=repo)
+        plan = create_plan(
+            db,
+            project_id=project["id"],
+            path=parsed_plan.path,
+            content_hash=parsed_plan.content_hash,
+        )
+        phase = create_phase(
+            db,
+            project_id=project["id"],
+            plan_id=plan["id"],
+            phase_number=parsed_phase.phase_number,
+            title=parsed_phase.title,
+            content_hash=content_hash or parsed_phase.content_hash,
+            status="CLOSING",
+            publish_mode="pr",
+            branch_name="dev/test-phase",
+            pr_url="https://example.test/pull/1",
+            published_sha=published_sha,
+            log_dir=phase_log_dir(
+                home / "logs",
+                project_slug=project_slug(repo),
+                plan_path=parsed_plan.path,
+                phase_number=parsed_phase.phase_number,
+            ),
+        )
+        update_phase_status(db, phase["id"], "BLOCKED")
     return published_sha
 
 
@@ -602,6 +654,201 @@ class Phase7CloseTests(unittest.TestCase):
                 ["git", "show", "origin/main:docs/plan.md"], cwd=repo, text=True
             )
             self.assertIn("## Phase 1: First phase\nStatus: COMPLETE", origin_plan)
+
+    def test_run_reconciles_manually_merged_blocked_phase_and_starts_next_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, phase_count=2, status="COMPLETE")
+            write_config(repo, script, auto_commit=True, merge_on_close=True)
+            commit_all(repo)
+            add_origin_remote(repo, root)
+            merge_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            seed_blocked_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_PR_STATE": "MERGED",
+                    "GH_MERGE_COMMIT": merge_commit,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(
+                "reconciled phase 1 from manually merged PR #1", result.stderr
+            )
+            self.assertIn("BLOCKED after IMPLEMENT failure", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "COMPLETE")
+            self.assertIsNone(rows[0]["blocked_from"])
+            self.assertEqual(rows[0]["published_sha"], merge_commit)
+            self.assertEqual(rows[1]["status"], "BLOCKED")
+            self.assertTrue((repo / "phase2-started.txt").exists())
+            with connect_db(home) as db:
+                event_types = [
+                    row["event_type"]
+                    for row in db.execute(
+                        "SELECT event_type FROM events ORDER BY id"
+                    ).fetchall()
+                ]
+            self.assertIn("phase.reconciled", event_types)
+
+    def test_manually_merged_phase_blocks_when_plan_marker_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="PENDING")
+            write_config(repo, script, auto_commit=True, merge_on_close=True)
+            commit_all(repo)
+            add_origin_remote(repo, root)
+            merge_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            seed_blocked_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_PR_STATE": "MERGED",
+                    "GH_MERGE_COMMIT": merge_commit,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(
+                "plan marker does not prove completion: phase status is PENDING",
+                result.stderr,
+            )
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "BLOCKED")
+            with connect_db(home) as db:
+                event_types = [
+                    row["event_type"]
+                    for row in db.execute(
+                        "SELECT event_type FROM events ORDER BY id"
+                    ).fetchall()
+                ]
+            self.assertNotIn("phase.reconciled", event_types)
+
+    def test_manually_merged_phase_blocks_when_plan_body_hash_mismatches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="PENDING")
+            write_config(repo, script, auto_commit=True, merge_on_close=True)
+            commit_all(repo)
+            stale_hash = parse_plan_file(repo, "docs/plan.md").phases[0].content_hash
+            write_custom_plan(
+                repo,
+                status="COMPLETE",
+                phase_1_body="Create a different generated marker.",
+            )
+            commit_all(repo, "manual merge changed plan body")
+            add_origin_remote(repo, root)
+            merge_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            seed_blocked_published_phase(repo, home, content_hash=stale_hash)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_PR_STATE": "MERGED",
+                    "GH_MERGE_COMMIT": merge_commit,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("plan body hash does not match registered phase", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "BLOCKED")
+            self.assertEqual(rows[0]["content_hash"], stale_hash)
+
+    def test_run_does_not_reconcile_non_merged_phase_pr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="COMPLETE")
+            write_config(repo, script, auto_commit=True, merge_on_close=True)
+            commit_all(repo)
+            add_origin_remote(repo, root)
+            seed_blocked_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_PR_STATE": "OPEN",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("phase 1 is BLOCKED", result.stderr)
+            self.assertNotIn("reconciled phase 1", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "BLOCKED")
+            with connect_db(home) as db:
+                event_types = [
+                    row["event_type"]
+                    for row in db.execute(
+                        "SELECT event_type FROM events ORDER BY id"
+                    ).fetchall()
+                ]
+            self.assertNotIn("phase.reconciled", event_types)
 
     def _run_merge_preflight_case(self, extra_env: dict[str, str]):
         with tempfile.TemporaryDirectory() as tmp:

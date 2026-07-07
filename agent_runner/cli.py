@@ -27,6 +27,7 @@ from .phase_loop import (
     _publish_instructions,
     _record_phase_published,
     _verify_published_phase,
+    reconcile_manually_merged_phase_prs,
     restart_count,
     run_phase_loop,
 )
@@ -213,6 +214,17 @@ def cmd_run(args: argparse.Namespace) -> int:
             if hold_seconds > 0:
                 time.sleep(hold_seconds)
             with connect_db(home) as db:
+                reconcile_result = reconcile_manually_merged_phase_prs(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan_result.plan_id,
+                    parsed_plan=parsed_plan,
+                    config=config,
+                    repo_root=repo_root,
+                )
+                if reconcile_result is not None:
+                    print(f"[agent-runner] {reconcile_result.message}", file=sys.stderr)
+                    return 1 if reconcile_result.blocked else 0
                 loop_result = run_phase_loop(
                     db,
                     project_id=project["id"],

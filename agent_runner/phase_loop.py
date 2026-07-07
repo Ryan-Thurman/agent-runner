@@ -210,6 +210,206 @@ def run_phase_loop(
     raise JobError(f"unsupported phase status: {status}")
 
 
+def reconcile_manually_merged_phase_prs(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    parsed_plan: ParsedPlan,
+    config: RunnerConfig,
+    repo_root: Path,
+) -> PhaseLoopResult | None:
+    phases = connection.execute(
+        """
+        SELECT *
+        FROM phases
+        WHERE plan_id = ?
+          AND status = 'BLOCKED'
+          AND branch_name IS NOT NULL
+          AND pr_url IS NOT NULL
+          AND published_sha IS NOT NULL
+        ORDER BY phase_number
+        """,
+        (plan_id,),
+    ).fetchall()
+
+    for phase in phases:
+        parsed_phase = _parsed_phase(parsed_plan, phase["phase_number"])
+        payload = _gh_pr_view(
+            repo_root,
+            pr_url=phase["pr_url"],
+            failure_context=(
+                "could not check phase PR state for manual merge "
+                f"reconciliation {phase['pr_url']}"
+            ),
+            fields="url,state,headRefOid,mergeCommit",
+        )
+        if payload.get("state") != "MERGED":
+            continue
+
+        try:
+            head_sha = _pr_head_sha(payload, phase)
+            merge_commit = _pr_merge_commit_oid(payload, phase)
+            _ensure_base_contains_merge_commit(
+                repo_root, base_branch=config.base_branch, merge_commit=merge_commit
+            )
+        except JobError as exc:
+            return _block_manual_reconciliation(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase=phase,
+                message=str(exc),
+            )
+
+        proof_errors = _manual_reconciliation_proof_errors(
+            phase, parsed_phase=parsed_phase
+        )
+        if proof_errors:
+            return _block_manual_reconciliation(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase=phase,
+                message="; ".join(proof_errors),
+            )
+
+        update_phase_status(connection, phase["id"], "COMPLETE")
+        update_phase_publish_metadata(
+            connection,
+            phase["id"],
+            publish_mode=phase["publish_mode"] or "pr",
+            branch_name=phase["branch_name"],
+            pr_url=phase["pr_url"],
+            published_sha=head_sha,
+        )
+        record_event(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            event_type="phase.reconciled",
+            message=(
+                f"reconciled phase {phase['phase_number']} from manually merged "
+                f"{format_pr_url(phase['pr_url'])}"
+            ),
+            data={
+                "prUrl": phase["pr_url"],
+                "headSha": head_sha,
+                "mergeCommit": merge_commit,
+                "baseBranch": config.base_branch,
+            },
+        )
+        print(
+            f"[agent-runner] reconciled phase {phase['phase_number']} from "
+            f"manually merged {format_pr_url(phase['pr_url'])}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    return None
+
+
+def _manual_reconciliation_proof_errors(
+    phase: sqlite3.Row, *, parsed_phase: ParsedPhase
+) -> list[str]:
+    errors: list[str] = []
+    if parsed_phase.status != "COMPLETE":
+        errors.append(
+            "plan marker does not prove completion: "
+            f"phase status is {parsed_phase.status}, not COMPLETE"
+        )
+    if parsed_phase.content_hash != phase["content_hash"]:
+        errors.append(
+            "plan body hash does not match registered phase "
+            f"{phase['content_hash'][:12]}"
+        )
+    return errors
+
+
+def _block_manual_reconciliation(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    message: str,
+) -> PhaseLoopResult:
+    update_phase_status(connection, phase["id"], "BLOCKED")
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        event_type="phase.blocked",
+        message=(
+            f"manual merge reconciliation failed for phase "
+            f"{phase['phase_number']}: {message}"
+        ),
+        data={"prUrl": phase["pr_url"]},
+    )
+    return PhaseLoopResult(
+        f"phase {phase['phase_number']} BLOCKED during manual merge "
+        f"reconciliation: {message}",
+        blocked=True,
+    )
+
+
+def _pr_head_sha(payload: dict[str, Any], phase: sqlite3.Row) -> str:
+    head_sha = payload.get("headRefOid")
+    if not isinstance(head_sha, str) or not head_sha:
+        raise JobError(
+            f"merged phase PR {phase['pr_url']} did not report a head SHA"
+        )
+    return head_sha
+
+
+def _pr_merge_commit_oid(payload: dict[str, Any], phase: sqlite3.Row) -> str:
+    merge_commit = payload.get("mergeCommit")
+    if isinstance(merge_commit, dict):
+        oid = merge_commit.get("oid")
+        if isinstance(oid, str) and oid:
+            return oid
+    if isinstance(merge_commit, str) and merge_commit:
+        return merge_commit
+    raise JobError(
+        f"merged phase PR {phase['pr_url']} did not report a merge commit"
+    )
+
+
+def _ensure_base_contains_merge_commit(
+    repo_root: Path, *, base_branch: str, merge_commit: str
+) -> None:
+    refs = [f"refs/remotes/origin/{base_branch}", base_branch]
+    if any(_git_ref_contains_commit(repo_root, ref, merge_commit) for ref in refs):
+        return
+
+    _git_run(
+        repo_root,
+        ["fetch", "-q", "origin", base_branch],
+        error_context=f"failed to fetch origin/{base_branch}",
+    )
+    refs.append("FETCH_HEAD")
+    if any(_git_ref_contains_commit(repo_root, ref, merge_commit) for ref in refs):
+        return
+
+    raise JobError(
+        f"merged PR commit {merge_commit[:12]} is not contained in "
+        f"origin/{base_branch}; fetch or inspect the base branch before continuing"
+    )
+
+
+def _git_ref_contains_commit(repo_root: Path, ref: str, commit: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, ref],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.returncode == 0
+
+
 def _record_phase_published(
     connection: sqlite3.Connection,
     *,
@@ -647,6 +847,21 @@ def _run_review(
         config=config,
         repo_root=repo_root,
     )
+
+
+def _post_review_to_github(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    parsed_phase: ParsedPhase,
+    review: dict[str, Any],
+    source_job: JobResult,
+    repo_root: Path,
+    log_dir: Path,
+) -> None:
+    return None
 
 
 def _run_close_phase(

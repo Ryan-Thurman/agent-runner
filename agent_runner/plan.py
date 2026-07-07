@@ -230,6 +230,12 @@ def register_or_resume_plan(
                 )
                 continue
 
+            if _should_defer_manual_merge_reconciliation(existing_phase, phase):
+                _sync_phase_metadata(
+                    connection, existing_phase["id"], phase, log_dir, now
+                )
+                continue
+
             if existing_phase["status"] in PROTECTED_CHANGE_STATUSES:
                 raise PlanError(
                     "plan changed for phase "
@@ -332,6 +338,18 @@ def _get_phase_by_number(
         """,
         (plan_id, phase_number),
     ).fetchone()
+
+
+def _should_defer_manual_merge_reconciliation(
+    existing_phase: sqlite3.Row, phase: ParsedPhase
+) -> bool:
+    return (
+        existing_phase["status"] == "BLOCKED"
+        and phase.status == "COMPLETE"
+        and existing_phase["branch_name"]
+        and existing_phase["pr_url"]
+        and existing_phase["published_sha"]
+    )
 
 
 def _sync_phase_metadata(

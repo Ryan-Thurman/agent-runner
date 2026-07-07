@@ -18,7 +18,9 @@ bucket. Any non-empty finding bucket means `CHANGES_REQUESTED`, and the runner
 should give all requested updates to the fixer, not only blockers.
 
 ## Phase 1: Reconcile manually merged phase PRs
-Status: PENDING
+Status: COMPLETE
+Evidence: Implemented in this branch; startup reconciliation, tests, and docs added.
+Checks: `python3 -m compileall -q .`; `python3 -m unittest discover -s tests -v`
 
 Teach `agent-runner run` to repair stale SQLite state when a phase PR was
 merged outside the runner but the tracked plan and GitHub PR prove the phase is
