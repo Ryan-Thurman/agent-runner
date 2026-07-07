@@ -15,6 +15,16 @@
 and in the style of the existing code. The build plan history lives in
 `docs/plan.md`; do not touch it.
 
+## Review contract for this plan
+
+Reviews in this workflow are not advisory. The reviewer must report every
+update it wants before approval, bucketed by severity such as `blocking`,
+`shouldFix`, and `nitpick`. `PASS` means there are no requested updates in any
+bucket. Any non-empty finding bucket means `CHANGES_REQUESTED`, and the runner
+should give all requested updates to the fixer, not only blockers. Re-reviews
+verify prior requested updates and may add new findings, but should not
+drip-feed issues that were visible in the first pass.
+
 ## Running this plan (operator bootstrap)
 
 This repo has no `.agent-runner.json` yet. To execute this plan with the
