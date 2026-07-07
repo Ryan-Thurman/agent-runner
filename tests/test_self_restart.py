@@ -28,6 +28,11 @@ from test_phase7_close import (
     write_phase7_agent,
     write_plan,
 )
+from test_phase6_loop import (
+    write_config as write_phase6_config,
+    write_phase6_agent,
+    write_plan as write_phase6_plan,
+)
 
 from agent_runner.storage import connect_db
 
@@ -99,6 +104,62 @@ class ExecSelfRestartTests(unittest.TestCase):
 
 
 class SelfRestartEndToEndTests(unittest.TestCase):
+    def test_implement_in_self_hosted_repo_restarts_before_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_phase6_plan(repo)
+            write_phase6_config(repo, script, checks=[])
+            shutil.copytree(
+                ROOT / "agent_runner",
+                repo / "agent_runner",
+                ignore=shutil.ignore_patterns("__pycache__"),
+            )
+            shutil.copy2(ROOT / "agent-runner", repo / "agent-runner")
+            shutil.copy2(ROOT / ".gitignore", repo / ".gitignore")
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    NO_SELF_RESTART_ENV: "",
+                    RESTART_COUNT_ENV: "0",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "IMPLEMENT complete; restarting to load updated runner code before checks",
+                result.stderr,
+            )
+            self.assertEqual(
+                result.stderr.count("acquired lock"),
+                2,
+                "expected the restarted process to re-acquire the lock",
+            )
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "COMPLETE")
+            with connect_db(home) as db:
+                events = db.execute(
+                    "SELECT event_type, message FROM events ORDER BY id"
+                ).fetchall()
+            self.assertIn("runner.restart", [row["event_type"] for row in events])
+            restart_messages = [
+                row["message"]
+                for row in events
+                if row["event_type"] == "runner.restart"
+            ]
+            self.assertIn("IMPLEMENT complete", restart_messages[0])
+
     def test_merge_in_self_hosted_repo_restarts_and_continues(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -550,6 +550,17 @@ def _run_implement(
     )
     if paused is not None:
         return paused
+    restart = _self_restart_result_after_code_update(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=phase,
+        job_id=result.job_id,
+        repo_root=repo_root,
+        source="IMPLEMENT",
+    )
+    if restart is not None:
+        return restart
     return _run_checks(
         connection,
         project_id=project_id,
@@ -1271,6 +1282,17 @@ def _run_fix(
     )
     if paused is not None:
         return paused
+    restart = _self_restart_result_after_code_update(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=phase,
+        job_id=fix_result.job_id,
+        repo_root=repo_root,
+        source="FIX",
+    )
+    if restart is not None:
+        return restart
     return _run_checks(
         connection,
         project_id=project_id,
@@ -1399,6 +1421,17 @@ def _run_fix_without_increment(
     )
     if paused is not None:
         return paused
+    restart = _self_restart_result_after_code_update(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=phase,
+        job_id=fix_result.job_id,
+        repo_root=repo_root,
+        source="FIX",
+    )
+    if restart is not None:
+        return restart
     return _run_checks(
         connection,
         project_id=project_id,
@@ -1428,6 +1461,35 @@ def _paused_result_if_needed(
         f"project paused at a job boundary after phase {phase_number}; run "
         "`agent-runner resume` then `agent-runner run` to continue"
     )
+
+
+def _self_restart_result_after_code_update(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    job_id: Optional[int],
+    repo_root: Path,
+    source: str,
+) -> Optional[PhaseLoopResult]:
+    if not _should_self_restart(repo_root):
+        return None
+    message = (
+        f"phase {phase['phase_number']} {source} complete; restarting to load "
+        "updated runner code before checks"
+    )
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        job_id=job_id,
+        event_type="runner.restart",
+        message=message,
+        data={"restartCount": restart_count() + 1, "source": source},
+    )
+    return PhaseLoopResult(message, restart=True)
 
 
 def _pending_fix_prompt_path(log_dir: Path) -> Path:
