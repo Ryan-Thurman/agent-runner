@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -8,10 +9,11 @@ from typing import Any, Optional
 
 from .config import RunnerConfig
 from .errors import AgentRunnerError, JobError
-from .jobs import JobResult, run_agent_job, run_checks_job
+from .jobs import JobResult, is_quota_failure, run_agent_job, run_checks_job
 from .plan import ParsedPhase, ParsedPlan, parse_plan_file
 from .storage import (
     get_phase,
+    get_project,
     record_event,
     slug_for_path,
     update_phase_publish_metadata,
@@ -48,6 +50,10 @@ def run_phase_loop(
     config: RunnerConfig,
     repo_root: Path,
 ) -> PhaseLoopResult:
+    paused = _paused_result_if_needed(connection, project_id)
+    if paused is not None:
+        return paused
+
     phase = _next_action_phase(connection, plan_id)
     if phase is None:
         return PhaseLoopResult("no phase is ready for Phase 5 work")
@@ -130,6 +136,38 @@ def _run_implement(
     repo_root: Path,
     preexisting_dirty_paths: Optional[set[str]],
 ) -> PhaseLoopResult:
+    if (
+        config.auto_commit
+        and config.merge_on_close
+        and phase["status"] == "PENDING"
+    ):
+        try:
+            parsed_phase = _start_phase_branch(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase=phase,
+                config=config,
+                repo_root=repo_root,
+            )
+        except JobError as exc:
+            update_phase_status(connection, phase["id"], "BLOCKED")
+            record_event(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase_id=phase["id"],
+                event_type="phase.blocked",
+                message=(
+                    f"branch preflight failed for phase "
+                    f"{phase['phase_number']}: {exc}"
+                ),
+            )
+            return PhaseLoopResult(
+                f"phase {phase['phase_number']} BLOCKED before IMPLEMENT: {exc}",
+                blocked=True,
+            )
+
     phase = update_phase_status(connection, phase["id"], "IMPLEMENTING")
     record_event(
         connection,
@@ -180,6 +218,11 @@ def _run_implement(
         event_type="phase.checking",
         message=f"IMPLEMENT succeeded; checking phase {phase['phase_number']}",
     )
+    paused = _paused_result_if_needed(
+        connection, project_id, phase_number=phase["phase_number"]
+    )
+    if paused is not None:
+        return paused
     return _run_checks(
         connection,
         project_id=project_id,
@@ -260,6 +303,11 @@ def _run_checks(
             event_type="phase.reviewing",
             message=f"checks passed for phase {phase['phase_number']}",
         )
+        paused = _paused_result_if_needed(
+            connection, project_id, phase_number=phase["phase_number"]
+        )
+        if paused is not None:
+            return paused
         return _run_review(
             connection,
             project_id=project_id,
@@ -337,27 +385,55 @@ def _run_review(
                 message=str(exc),
             )
 
-    profile = _profile_for_role(config, "reviewer")
+    profiles = _reviewer_profiles(config)
     log_dir = Path(phase["log_dir"])
-    result = run_agent_job(
-        connection,
-        project_id=project_id,
-        plan_id=plan_id,
-        phase_id=phase["id"],
-        job_type="REVIEW",
-        role="reviewer",
-        profile=profile,
-        prompt=_review_prompt(
-            repo_root,
-            parsed_phase,
-            log_dir,
-            phase=phase,
-            use_published_diff=config.auto_commit,
-        ),
-        repo_root=repo_root,
-        log_dir=log_dir,
-        timeout_seconds=config.timeout_minutes * 60,
+    review_prompt = _review_prompt(
+        repo_root,
+        parsed_phase,
+        log_dir,
+        phase=phase,
+        use_published_diff=config.auto_commit,
     )
+    for attempt, profile in enumerate(profiles):
+        result = run_agent_job(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            job_type="REVIEW",
+            role="reviewer",
+            profile=profile,
+            prompt=review_prompt,
+            repo_root=repo_root,
+            log_dir=log_dir,
+            timeout_seconds=config.timeout_minutes * 60,
+        )
+        if result.status == "SUCCEEDED":
+            break
+        next_profile = (
+            profiles[attempt + 1] if attempt + 1 < len(profiles) else None
+        )
+        if next_profile is None or not is_quota_failure(result):
+            break
+        message = (
+            f"REVIEW hit a quota/rate limit with profile {profile.name!r}; "
+            f"falling back to profile {next_profile.name!r}"
+        )
+        print(f"[agent-runner] {message}", file=sys.stderr, flush=True)
+        record_event(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            job_id=result.job_id,
+            event_type="review.fallback",
+            message=message,
+            data={
+                "failedProfile": profile.name,
+                "fallbackProfile": next_profile.name,
+                "error": result.error,
+            },
+        )
     if result.status != "SUCCEEDED":
         _block_phase_after_job(
             connection,
@@ -441,6 +517,11 @@ def _run_review(
             "nonBlockingIssues": review["nonBlockingIssues"],
         },
     )
+    paused = _paused_result_if_needed(
+        connection, project_id, phase_number=phase["phase_number"]
+    )
+    if paused is not None:
+        return paused
     return _run_close_phase(
         connection,
         project_id=project_id,
@@ -541,21 +622,6 @@ def _run_close_phase(
     if config.auto_commit:
         try:
             commit_sha = _commit_phase_close(repo_root, phase)
-            if config.auto_merge:
-                merged_sha = _merge_phase_pr_after_close(repo_root, phase)
-                record_event(
-                    connection,
-                    project_id=project_id,
-                    plan_id=plan_id,
-                    phase_id=phase["id"],
-                    job_id=result.job_id,
-                    event_type="phase.merged",
-                    message=f"phase {phase['phase_number']} PR merged",
-                    data={
-                        "prUrl": phase["pr_url"],
-                        "mergedSha": merged_sha,
-                    },
-                )
         except JobError as exc:
             _block_phase_after_job(
                 connection,
@@ -564,15 +630,48 @@ def _run_close_phase(
                 phase_id=phase["id"],
                 job=result,
                 message=(
-                    f"CLOSE_PHASE publish/merge failed for phase "
+                    f"CLOSE_PHASE commit failed for phase "
                     f"{phase['phase_number']}: {exc}"
                 ),
             )
             return PhaseLoopResult(
-                f"phase {phase['phase_number']} BLOCKED after CLOSE_PHASE "
-                f"publish/merge: {exc}",
+                f"phase {phase['phase_number']} BLOCKED after CLOSE_PHASE commit: {exc}",
                 blocked=True,
             )
+
+    if config.merge_on_close:
+        try:
+            _git_push_current_branch(repo_root)
+            _merge_phase_pr(repo_root, config, phase)
+        except JobError as exc:
+            _block_phase_after_job(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase_id=phase["id"],
+                job=result,
+                message=(
+                    f"CLOSE_PHASE merge failed for phase "
+                    f"{phase['phase_number']}: {exc}"
+                ),
+            )
+            return PhaseLoopResult(
+                f"phase {phase['phase_number']} BLOCKED after CLOSE_PHASE merge: {exc}",
+                blocked=True,
+            )
+        record_event(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            job_id=result.job_id,
+            event_type="phase.merged",
+            message=(
+                f"merged phase {phase['phase_number']} PR {phase['pr_url']} "
+                f"({config.merge_strategy})"
+            ),
+            data={"prUrl": phase["pr_url"], "strategy": config.merge_strategy},
+        )
 
     update_phase_status(connection, phase["id"], "COMPLETE")
     record_event(
@@ -591,10 +690,21 @@ def _run_close_phase(
 
     next_phase = _next_pending_phase(connection, plan_id)
     if next_phase is not None:
+        paused = _paused_result_if_needed(
+            connection, project_id, phase_number=phase["phase_number"]
+        )
+        if paused is not None:
+            return paused
         if not config.auto_commit:
             return PhaseLoopResult(
                 f"phase {phase['phase_number']} complete; next phase "
                 f"{next_phase['phase_number']} is PENDING"
+            )
+        if not config.merge_on_close:
+            return PhaseLoopResult(
+                f"phase {phase['phase_number']} complete; merge PR "
+                f"{phase['pr_url']} before starting phase "
+                f"{next_phase['phase_number']} (or set mergeOnClose=true)"
             )
         fresh_plan = parse_plan_file(repo_root, config.plan_path)
         next_parsed_phase = _parsed_phase(fresh_plan, next_phase["phase_number"])
@@ -661,6 +771,7 @@ def _run_fix(
         )
 
     phase = update_phase_status(connection, phase["id"], "FIXING", increment_retry=True)
+    _write_pending_fix_prompt(Path(phase["log_dir"]), prompt)
     record_event(
         connection,
         project_id=project_id,
@@ -671,6 +782,11 @@ def _run_fix(
         message=f"{trigger} requested FIX for phase {phase['phase_number']}",
         data={"trigger": trigger, "retryCount": phase["retry_count"]},
     )
+    paused = _paused_result_if_needed(
+        connection, project_id, phase_number=phase["phase_number"]
+    )
+    if paused is not None:
+        return paused
 
     profile = _profile_for_role(config, "coder")
     fix_result = run_agent_job(
@@ -713,6 +829,11 @@ def _run_fix(
         message=f"FIX succeeded for phase {phase['phase_number']}; rerunning checks",
         data={"trigger": trigger},
     )
+    paused = _paused_result_if_needed(
+        connection, project_id, phase_number=phase["phase_number"]
+    )
+    if paused is not None:
+        return paused
     return _run_checks(
         connection,
         project_id=project_id,
@@ -745,22 +866,28 @@ def _resume_fix(
         (phase["id"],),
     ).fetchone()
     if prior_fix is None:
-        update_phase_status(connection, phase["id"], "BLOCKED")
-        return PhaseLoopResult(
-            f"phase {phase['phase_number']} BLOCKED: no FIX prompt is available",
-            blocked=True,
+        pending_prompt = _pending_fix_prompt_path(Path(phase["log_dir"]))
+        if not pending_prompt.exists():
+            update_phase_status(connection, phase["id"], "BLOCKED")
+            return PhaseLoopResult(
+                f"phase {phase['phase_number']} BLOCKED: no FIX prompt is available",
+                blocked=True,
+            )
+        prompt = pending_prompt.read_text(encoding="utf-8")
+        trigger = _latest_fix_trigger(connection, phase["id"]) or "review"
+        source_job = None
+    else:
+        prompt = Path(prior_fix["prompt_path"]).read_text(encoding="utf-8")
+        trigger = prior_fix["trigger"] or "review"
+        source_job = JobResult(
+            job_id=prior_fix["id"],
+            status=prior_fix["status"],
+            exit_code=prior_fix["exit_code"],
+            log_path=Path(prior_fix["log_path"]),
+            prompt_path=Path(prior_fix["prompt_path"]),
+            output_path=Path(prior_fix["output_path"]) if prior_fix["output_path"] else None,
+            error=prior_fix["error"],
         )
-    prompt = Path(prior_fix["prompt_path"]).read_text(encoding="utf-8")
-    trigger = prior_fix["trigger"] or "review"
-    source_job = JobResult(
-        job_id=prior_fix["id"],
-        status=prior_fix["status"],
-        exit_code=prior_fix["exit_code"],
-        log_path=Path(prior_fix["log_path"]),
-        prompt_path=Path(prior_fix["prompt_path"]),
-        output_path=Path(prior_fix["output_path"]) if prior_fix["output_path"] else None,
-        error=prior_fix["error"],
-    )
     return _run_fix_without_increment(
         connection,
         project_id=project_id,
@@ -786,7 +913,7 @@ def _run_fix_without_increment(
     repo_root: Path,
     trigger: str,
     prompt: str,
-    source_job: JobResult,
+    source_job: Optional[JobResult],
 ) -> PhaseLoopResult:
     profile = _profile_for_role(config, "coder")
     fix_result = run_agent_job(
@@ -826,8 +953,16 @@ def _run_fix_without_increment(
         job_id=fix_result.job_id,
         event_type="phase.checking",
         message=f"FIX resumed for phase {phase['phase_number']}; rerunning checks",
-        data={"trigger": trigger, "sourceJobId": source_job.job_id},
+        data={
+            "trigger": trigger,
+            "sourceJobId": None if source_job is None else source_job.job_id,
+        },
     )
+    paused = _paused_result_if_needed(
+        connection, project_id, phase_number=phase["phase_number"]
+    )
+    if paused is not None:
+        return paused
     return _run_checks(
         connection,
         project_id=project_id,
@@ -837,6 +972,60 @@ def _run_fix_without_increment(
         config=config,
         repo_root=repo_root,
     )
+
+
+def _paused_result_if_needed(
+    connection: sqlite3.Connection,
+    project_id: int,
+    *,
+    phase_number: Optional[int] = None,
+) -> Optional[PhaseLoopResult]:
+    project = get_project(connection, project_id)
+    if project["status"] != "PAUSED":
+        return None
+    if phase_number is None:
+        return PhaseLoopResult(
+            "project is PAUSED; run `agent-runner resume` then "
+            "`agent-runner run` to continue"
+        )
+    return PhaseLoopResult(
+        f"project paused at a job boundary after phase {phase_number}; run "
+        "`agent-runner resume` then `agent-runner run` to continue"
+    )
+
+
+def _pending_fix_prompt_path(log_dir: Path) -> Path:
+    return log_dir / "fix-prompt.md"
+
+
+def _write_pending_fix_prompt(log_dir: Path, prompt: str) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    _pending_fix_prompt_path(log_dir).write_text(prompt, encoding="utf-8")
+
+
+def _latest_fix_trigger(
+    connection: sqlite3.Connection, phase_id: int
+) -> Optional[str]:
+    row = connection.execute(
+        """
+        SELECT data_json
+        FROM events
+        WHERE phase_id = ? AND event_type = 'phase.fixing'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (phase_id,),
+    ).fetchone()
+    if row is None or not row["data_json"]:
+        return None
+    try:
+        data = json.loads(row["data_json"])
+    except json.JSONDecodeError:
+        return None
+    trigger = data.get("trigger")
+    if isinstance(trigger, str) and trigger in {"checks", "review"}:
+        return trigger
+    return None
 
 
 def _next_action_phase(
@@ -869,6 +1058,16 @@ def _profile_for_role(config: RunnerConfig, role: str):
         return config.agents[config.roles[role]]
     except KeyError as exc:
         raise JobError(f"missing configured role: {role}") from exc
+
+
+def _reviewer_profiles(config: RunnerConfig):
+    profiles = [_profile_for_role(config, "reviewer")]
+    seen = {profiles[0].name}
+    for name in config.role_fallbacks.get("reviewer", []):
+        if name not in seen:
+            profiles.append(config.agents[name])
+            seen.add(name)
+    return profiles
 
 
 def _ensure_clean_or_allowed(config: RunnerConfig, repo_root: Path) -> Optional[set[str]]:
@@ -966,6 +1165,193 @@ def _git_diff_staged(repo_root: Path) -> str:
     return result.stdout
 
 
+def _start_phase_branch(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    config: RunnerConfig,
+    repo_root: Path,
+) -> ParsedPhase:
+    _ensure_previous_phase_merged(connection, repo_root, plan_id=plan_id, phase=phase)
+
+    base = config.base_branch
+    _git_run(
+        repo_root,
+        ["fetch", "-q", "origin", base],
+        error_context=f"failed to fetch origin/{base}",
+    )
+    base_sha = _git_rev_parse(repo_root, "FETCH_HEAD")
+    target = _phase_branch_name(phase)
+    if _git_branch_exists(repo_root, target) and not _git_is_ancestor(
+        repo_root, target, "FETCH_HEAD"
+    ):
+        raise JobError(
+            f"branch {target!r} already exists with commits that are not on "
+            f"origin/{base}; delete or rename it before rerunning"
+        )
+    _git_run(
+        repo_root,
+        ["checkout", "-q", "-B", target, "FETCH_HEAD"],
+        error_context=f"failed to create branch {target} from origin/{base}",
+    )
+
+    fresh_plan = parse_plan_file(repo_root, config.plan_path)
+    parsed_phase = _parsed_phase(fresh_plan, phase["phase_number"])
+    if parsed_phase.content_hash != phase["content_hash"]:
+        raise JobError(
+            f"phase {phase['phase_number']} body on origin/{base} does not match "
+            "the registered phase; rerun the loop so the plan re-registers "
+            "before implementing"
+        )
+
+    message = (
+        f"created branch {target} from origin/{base} @ {base_sha[:12]} for "
+        f"phase {phase['phase_number']}"
+    )
+    print(f"[agent-runner] {message}", file=sys.stderr, flush=True)
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        event_type="phase.branch_created",
+        message=message,
+        data={"branch": target, "base": base, "baseSha": base_sha},
+    )
+    return parsed_phase
+
+
+def _ensure_previous_phase_merged(
+    connection: sqlite3.Connection,
+    repo_root: Path,
+    *,
+    plan_id: int,
+    phase: sqlite3.Row,
+) -> None:
+    previous = connection.execute(
+        """
+        SELECT * FROM phases
+        WHERE plan_id = ? AND phase_number < ? AND pr_url IS NOT NULL
+        ORDER BY phase_number DESC
+        LIMIT 1
+        """,
+        (plan_id, phase["phase_number"]),
+    ).fetchone()
+    if previous is None:
+        return
+    pr_url = previous["pr_url"]
+    payload = _gh_pr_view(
+        repo_root,
+        pr_url=pr_url,
+        failure_context=f"could not verify previous phase PR {pr_url}",
+    )
+    state = payload.get("state")
+    if state != "MERGED":
+        raise JobError(
+            f"previous phase {previous['phase_number']} PR {pr_url} is "
+            f"{state or 'in an unknown state'}, not MERGED; merge it before "
+            f"starting phase {phase['phase_number']}"
+        )
+
+
+def _merge_phase_pr(
+    repo_root: Path, config: RunnerConfig, phase: sqlite3.Row
+) -> None:
+    pr_url = phase["pr_url"]
+    if not pr_url:
+        raise JobError("phase has no stored PR URL to merge")
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "merge", pr_url, f"--{config.merge_strategy}"],
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise JobError(
+            "cannot merge phase PR: gh is not installed or not on PATH"
+        ) from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "gh pr merge failed"
+        raise JobError(f"gh pr merge failed for {pr_url} ({detail})")
+
+    payload = _gh_pr_view(
+        repo_root,
+        pr_url=pr_url,
+        failure_context=f"could not verify merge of {pr_url}",
+    )
+    state = payload.get("state")
+    if state != "MERGED":
+        raise JobError(
+            f"gh pr merge did not merge {pr_url}; PR state is "
+            f"{state or 'unknown'}"
+        )
+
+
+def _phase_branch_name(phase: sqlite3.Row) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", phase["title"].lower()).strip("-")[:40]
+    suffix = f"-{slug.rstrip('-')}" if slug else ""
+    return f"dev/phase-{phase['phase_number']:02d}{suffix}"
+
+
+def _git_push_current_branch(repo_root: Path) -> None:
+    _git_run(
+        repo_root,
+        ["push", "-q", "origin", "HEAD"],
+        error_context="failed to push the current branch to origin",
+    )
+
+
+def _git_run(
+    repo_root: Path, args: list[str], *, error_context: str
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "git failed"
+        raise JobError(f"{error_context}: {detail}")
+    return result
+
+
+def _git_rev_parse(repo_root: Path, ref: str) -> str:
+    result = _git_run(
+        repo_root,
+        ["rev-parse", ref],
+        error_context=f"git rev-parse {ref} failed",
+    )
+    return result.stdout.strip()
+
+
+def _git_branch_exists(repo_root: Path, branch: str) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.returncode == 0
+
+
+def _git_is_ancestor(repo_root: Path, branch: str, ref: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", branch, ref],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.returncode == 0
+
+
 def _verify_published_phase(repo_root: Path) -> PublishMetadata:
     dirty_paths = _git_dirty_paths(repo_root)
     if dirty_paths:
@@ -1035,55 +1421,6 @@ def _verify_stored_phase_pr(repo_root: Path, phase: sqlite3.Row) -> PublishMetad
         pr_url=pr_url,
         published_sha=phase["published_sha"],
     )
-
-
-def _merge_phase_pr_after_close(repo_root: Path, phase: sqlite3.Row) -> str:
-    if not _phase_has_publish_metadata(phase):
-        raise JobError("autoMerge requires stored phase PR metadata")
-
-    branch_name = phase["branch_name"]
-    pr_url = phase["pr_url"]
-    head_sha = _git_head_sha(repo_root)
-    _git_push_current_branch(repo_root, branch_name)
-
-    payload = _gh_pr_view(
-        repo_root,
-        pr_url=pr_url,
-        failure_context=f"could not verify phase PR before merge {pr_url}",
-        fields="url,headRefName,headRefOid,state,mergeable,isDraft",
-    )
-    _validate_pr_metadata(
-        payload,
-        pr_url=pr_url,
-        expected_branch=branch_name,
-        expected_sha=head_sha,
-        branch_error="phase PR branch changed before merge: {actual!r} is not {expected!r}",
-        sha_error=(
-            "phase PR head changed before merge: {actual_short} is not "
-            "{expected_short}"
-        ),
-    )
-
-    if payload.get("isDraft") is True:
-        raise JobError(f"phase PR is draft; cannot auto-merge {pr_url}")
-    mergeable = payload.get("mergeable")
-    if mergeable != "MERGEABLE":
-        raise JobError(
-            f"phase PR is not mergeable ({mergeable or 'unknown'}); "
-            f"cannot auto-merge {pr_url}"
-        )
-
-    result = subprocess.run(
-        ["gh", "pr", "merge", pr_url, "--merge"],
-        cwd=repo_root,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "gh pr merge failed"
-        raise JobError(f"auto-merge failed for {pr_url}: {detail}")
-    return head_sha
 
 
 def _verify_reviewed_head_for_close(repo_root: Path, phase: sqlite3.Row) -> None:
@@ -1190,16 +1527,12 @@ def _git_head_sha(repo_root: Path) -> str:
 
 
 def _gh_pr_view(
-    repo_root: Path,
-    *,
-    pr_url: Optional[str] = None,
-    failure_context: str,
-    fields: str = "url,headRefName,headRefOid,state",
+    repo_root: Path, *, pr_url: Optional[str] = None, failure_context: str
 ) -> dict[str, Any]:
     command = ["gh", "pr", "view"]
     if pr_url:
         command.append(pr_url)
-    command.extend(["--json", fields])
+    command.extend(["--json", "url,headRefName,headRefOid,state"])
     try:
         result = subprocess.run(
             command,
@@ -1530,10 +1863,8 @@ def _close_phase_prompt(
         "3. Handoff: write the handoff file with these markdown sections: "
         "Completed Work, Decisions, Files Changed, Checks Run, Open Risks, "
         "Next-Phase Context.\n"
-        "4. Do not start future phase work. Do not merge PRs yourself; the "
-        "runner handles configured autoMerge after validating closer output. "
-        "Do not force-push, delete branches, or delete files outside this "
-        "repository.\n\n"
+        "4. Do not start future phase work. Do not merge PRs, force-push, "
+        "delete branches, or delete files outside this repository.\n\n"
         "Phase body:\n"
         f"{parsed_phase.content}\n\n"
         "Check output:\n"
@@ -1642,19 +1973,6 @@ def _git_commit(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-
-
-def _git_push_current_branch(repo_root: Path, branch_name: str) -> None:
-    result = subprocess.run(
-        ["git", "push", "-u", "origin", branch_name],
-        cwd=repo_root,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "git push failed"
-        raise JobError(f"failed to push phase branch before auto-merge: {detail}")
 
 
 def _git_identity_missing(output: str) -> bool:

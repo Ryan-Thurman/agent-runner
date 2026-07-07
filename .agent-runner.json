@@ -22,16 +22,27 @@
       "writeFlags": ["--sandbox", "workspace-write"],
       "readOnlyFlags": ["--sandbox", "read-only"],
       "outputCapture": "last-message-file"
+    },
+    "antigravity": {
+      "command": "agy",
+      "promptArgs": ["-p", "--print-timeout", "40m", "--model", "Gemini 3.1 Pro (High)"],
+      "writeFlags": ["--dangerously-skip-permissions"],
+      "readOnlyFlags": ["--sandbox"],
+      "outputCapture": "stdout"
     }
   },
   "roles": {
     "coder": "codex",
     "reviewer": "codex"
   },
+  "roleFallbacks": {
+    "reviewer": ["antigravity"]
+  },
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
   "autoCommit": true,
-  "autoMerge": true,
   "openPrWhenComplete": false,
-  "allowDirty": false
+  "allowDirty": false,
+  "mergeOnClose": true,
+  "mergeStrategy": "squash"
 }

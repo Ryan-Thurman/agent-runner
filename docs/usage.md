@@ -1,8 +1,8 @@
 # Using agent-runner
 
-This guide describes the runner as it exists after Phase 7. It is ready for
-dogfooding the implementation, check, review, retry-limited fix, and close-phase
-loop. Pause/resume and rich log tailing are still future phases.
+This guide describes the runner as it exists after Phase 8. It is ready for
+dogfooding the implementation, check, review, retry-limited fix, close-phase,
+pause/resume, crash recovery, and log-tailing loop.
 
 ## Current Loop
 
@@ -26,6 +26,8 @@ loop. Pause/resume and rich log tailing are still future phases.
 - `CLOSING`: run the closer profile with write flags, validate the plan
   write-back and handoff, optionally commit, and mark the phase `COMPLETE`.
 - `BLOCKED`: exit non-zero.
+- A `PAUSED` project does not start another job. Run `agent-runner resume`,
+  then `agent-runner run`, to continue from the current phase status.
 
 The automated loop is now:
 
@@ -33,7 +35,8 @@ The automated loop is now:
 IMPLEMENT -> RUN_CHECKS -> REVIEW -> FIX/RUN_CHECKS/REVIEW -> CLOSE_PHASE
 ```
 
-`CLOSE_PHASE` is automated. Later operational commands remain manual.
+`CLOSE_PHASE` is automated. Operator pause and resume are project-level state
+flips and never interrupt a running agent process.
 
 ## Installation
 
@@ -111,11 +114,16 @@ Minimum config shape:
     "coder": "codex",
     "reviewer": "claude"
   },
+  "roleFallbacks": {
+    "reviewer": ["codex"]
+  },
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
   "autoCommit": true,
-  "autoMerge": false,
-  "allowDirty": false
+  "allowDirty": false,
+  "baseBranch": "main",
+  "mergeOnClose": true,
+  "mergeStrategy": "squash"
 }
 ```
 
@@ -126,20 +134,35 @@ Current notes:
   PR before the job exits. `roles.reviewer` is used for read-only review.
 - `promptPrefix` is optional. When set, the runner prepends it to every prompt
   sent to that agent profile.
+- `roleFallbacks` is optional and maps a role to an ordered list of agent
+  profiles. When a REVIEW job fails with a quota/rate-limit error (429, "usage
+  limit", "quota exceeded", and similar), the runner reruns the review with the
+  next profile and records a `review.fallback` event. Any other review failure
+  blocks the phase without falling back. Only the reviewer role falls back
+  today; other roles are accepted but warned about. The sample config includes
+  an `antigravity` profile (the `agy` CLI) suitable as a reviewer fallback on a
+  separate quota pool.
 - `checks` run as shell commands from the repo root, in order. The first failure
   stops the check job.
 - `timeoutMinutes` applies per agent/check process.
 - `autoCommit=true` requires the GitHub CLI (`gh`) on `PATH`; after checks pass,
   the runner verifies `gh pr view` for the current branch before opening the
   reviewer.
-- `autoMerge=true` is opt-in and only applies after a reviewer has passed the
-  phase and `CLOSE_PHASE` has succeeded. The runner pushes the current branch,
-  verifies the PR is open, non-draft, mergeable, and still at local `HEAD`, then
-  runs `gh pr merge <pr-url> --merge`.
 - `allowDirty=false` is the safest dogfood setting. A dirty worktree blocks
   before an IMPLEMENT job starts.
 - `allowDirty=true` warns and continues; after IMPLEMENT, the runner stages only
   paths that were not already dirty before the job.
+- `mergeOnClose=true` (requires `autoCommit`) makes the loop fully autonomous:
+  after the reviewer passes the PR and CLOSE_PHASE lands the doc/plan write-back,
+  the runner pushes the close commit and merges the phase PR with
+  `mergeStrategy` (`squash` by default). Before the next phase's IMPLEMENT, the
+  runner verifies the previous phase's PR is MERGED, fetches
+  `origin/<baseBranch>`, and starts the phase on a fresh
+  `dev/phase-NN-<title>` branch cut from it — the coder never starts on a
+  stale base or a reused branch. A pre-existing phase branch with commits not
+  on the base blocks the phase instead of being clobbered.
+- `mergeOnClose=false` keeps a human in the loop: after CLOSE_PHASE the runner
+  stops and asks you to merge the phase PR before it will start the next phase.
 - Review output must be strict JSON with `status`, `summary`, `blockingIssues`,
   `nonBlockingIssues`, and `recommendedFixPrompt`. Invalid review JSON blocks
   the phase and leaves the raw output in `review.log`.
@@ -194,7 +217,7 @@ If `allowDirty=false`, this must be clean. Then run:
 python3 -m agent_runner run
 ```
 
-Expected Phase 7 success flow:
+Expected success flow:
 
 ```text
 [agent-runner] acquired lock for <project-slug>
@@ -213,11 +236,22 @@ the closure commit. With `autoCommit=false`, the runner marks the phase complete
 but stops before starting the next pending phase so local staged work can be
 handled deliberately.
 
-With `autoMerge=true`, the runner pushes the phase branch after `CLOSE_PHASE`
-and merges the stored PR only after confirming that GitHub still reports the PR
-as open, non-draft, mergeable, on the stored branch, and at the current local
-`HEAD`. A stale, draft, closed, or non-mergeable PR blocks the phase rather than
-silently completing it.
+To pause at the next job boundary while a run is active:
+
+```sh
+python3 -m agent_runner pause
+```
+
+The active agent or check job is allowed to finish. The runner then exits before
+starting the next job and prints the resume command. Continue with:
+
+```sh
+python3 -m agent_runner resume
+python3 -m agent_runner run
+```
+
+Running while paused is non-destructive; it explains that the project is paused
+and exits without launching a job.
 
 After a published review:
 
@@ -273,10 +307,12 @@ When a job is active, `status` shows the running job id, type, phase, start
 time, and log path. `run` also prints job start lines as soon as it launches a
 job, including the role/profile, log path, and child PID.
 
-`logs` currently prints the project log root:
+`logs` prints the latest registered phase log directory and tails the newest
+`.log` file:
 
 ```sh
 python3 -m agent_runner logs
+python3 -m agent_runner logs -n 80
 ```
 
 Phase logs are under:
@@ -313,6 +349,10 @@ marks them failed, and resets the phase to the corresponding in-progress state.
 For an interrupted IMPLEMENT, rerunning skips the initial dirty gate so leftover
 agent changes do not block crash recovery.
 
+Job rows store the spawned child PID. When startup recovery reaps an orphaned
+`RUNNING` job, it also attempts to terminate that job's process group before
+re-enqueueing the phase from SQLite state.
+
 ## Plan Changes
 
 On every `run`, the plan is parsed and compared with the registered phase
@@ -331,10 +371,10 @@ canonical phase body.
 
 ## Safety Rules
 
-The runner currently does not force-push, delete branches, delete files outside
-the repo, modify global git config, or interrupt running agent processes.
-Merging is runner-owned and opt-in via `autoMerge=true`; agents are still told
-not to merge PRs themselves.
+The runner does not force-push, delete branches, delete files outside the repo,
+modify global git config, or interrupt running agent processes for pause/resume.
+It merges only the reviewed phase PR, only when `mergeOnClose=true`, and only
+after CLOSE_PHASE validation passes; with `mergeOnClose=false` it never merges.
 
 Before a normal IMPLEMENT job starts, the default dirty gate requires a clean
 worktree. With `autoCommit=true`, the coder/fixer must leave committed and

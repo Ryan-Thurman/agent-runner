@@ -1,4 +1,5 @@
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -11,11 +12,23 @@ from typing import Callable, Optional
 from .config import AgentProfile
 from .errors import JobError
 from .lock import utc_now_iso
-from .storage import create_job, get_job
+from .storage import create_job, get_job, update_job_pid
 
 
 WRITE_ROLES = {"coder", "closer"}
 READ_ONLY_ROLES = {"reviewer"}
+
+# Vendor CLIs word these differently (codex, claude, gemini/antigravity), so
+# match the common quota/rate-limit phrasings rather than any one CLI's text.
+QUOTA_ERROR_PATTERN = re.compile(
+    r"quota|rate.?limit|usage.?limit|too many requests|resource.?exhausted"
+    r"|insufficient_quota|out of credits|credit balance|\b429\b",
+    re.IGNORECASE,
+)
+
+# How much of the log tail to scan for quota signatures. Retried jobs append
+# to the same log, so a bounded tail keeps the newest attempt's output in view.
+_QUOTA_SCAN_TAIL_CHARS = 8000
 
 
 @dataclass(frozen=True)
@@ -87,7 +100,9 @@ def run_agent_job(
             shell=False,
             log_path=log_path,
             log_header="$ " + " ".join(argv) + "\n",
-            on_spawn=lambda pid: _print_job_spawned(job["id"], job_type, pid),
+            on_spawn=lambda pid: _record_job_spawn(
+                connection, job["id"], job_type, pid
+            ),
         )
         if profile.output_capture in {"stdout", "structured-stdout"}:
             output_path.write_text(stdout, encoding="utf-8")
@@ -120,6 +135,18 @@ def run_agent_job(
         output_path=output_path,
         error=row["error"],
     )
+
+
+def is_quota_failure(result: JobResult) -> bool:
+    if result.status == "SUCCEEDED":
+        return False
+    if result.error and QUOTA_ERROR_PATTERN.search(result.error):
+        return True
+    try:
+        log_text = result.log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return QUOTA_ERROR_PATTERN.search(log_text[-_QUOTA_SCAN_TAIL_CHARS:]) is not None
 
 
 def run_checks_job(
@@ -169,8 +196,8 @@ def run_checks_job(
                 shell=True,
                 log_path=log_path,
                 log_header=f"$ {command}\n",
-                on_spawn=lambda pid: _print_job_spawned(
-                    job["id"], "RUN_CHECKS", pid
+                on_spawn=lambda pid: _record_job_spawn(
+                    connection, job["id"], "RUN_CHECKS", pid
                 ),
             )
             if process_error is not None or exit_code != 0:
@@ -342,6 +369,13 @@ def _print_job_spawned(job_id: int, job_type: str, pid: int) -> None:
         file=sys.stderr,
         flush=True,
     )
+
+
+def _record_job_spawn(
+    connection: sqlite3.Connection, job_id: int, job_type: str, pid: int
+) -> None:
+    update_job_pid(connection, job_id, pid)
+    _print_job_spawned(job_id, job_type, pid)
 
 
 def _pump_stream(stream, chunks: list[str], log_file, lock: threading.Lock) -> None:

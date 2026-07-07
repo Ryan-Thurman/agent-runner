@@ -80,6 +80,8 @@ def write_config(
     checks: list[str],
     max_retries: int = 3,
     auto_commit: bool = False,
+    reviewer_args: Optional[list[str]] = None,
+    reviewer_fallback: bool = False,
 ) -> None:
     data = json.loads(strip_json_comments(SAMPLE_CONFIG))
     data["agents"] = {
@@ -92,6 +94,17 @@ def write_config(
         }
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
+    if reviewer_args is not None:
+        data["agents"]["special-reviewer"] = {
+            "command": sys.executable,
+            "promptArgs": [str(agent_script), *reviewer_args],
+            "writeFlags": [],
+            "readOnlyFlags": [],
+            "outputCapture": "stdout",
+        }
+        data["roles"]["reviewer"] = "special-reviewer"
+    if reviewer_fallback:
+        data["roleFallbacks"] = {"reviewer": ["fake"]}
     data["checks"] = checks
     data["maxRetriesPerPhase"] = max_retries
     data["autoCommit"] = auto_commit
@@ -120,6 +133,12 @@ if (
 ):
     review_number = len(list(trace_dir.glob("review-*.md"))) + 1
     (trace_dir / f"review-{review_number}.md").write_text(prompt, encoding="utf-8")
+    if "--quota-fail" in sys.argv:
+        print("codex quota exceeded: 429 Too Many Requests", file=sys.stderr)
+        raise SystemExit(1)
+    if "--hard-fail" in sys.argv:
+        print("reviewer crashed for unrelated reasons", file=sys.stderr)
+        raise SystemExit(1)
     if mode == "GARBAGE":
         print("not json from reviewer")
         raise SystemExit(0)
@@ -284,6 +303,13 @@ def jobs(home: Path, phase_id: int):
     with connect_db(home) as db:
         return db.execute(
             "SELECT * FROM jobs WHERE phase_id = ? ORDER BY id", (phase_id,)
+        ).fetchall()
+
+
+def events(home: Path, phase_id: int):
+    with connect_db(home) as db:
+        return db.execute(
+            "SELECT * FROM events WHERE phase_id = ? ORDER BY id", (phase_id,)
         ).fetchall()
 
 
@@ -741,6 +767,82 @@ class Phase6LoopTests(unittest.TestCase):
             review_log = Path(phase["log_dir"]) / "review.log"
             self.assertIn("not json from reviewer", review_log.read_text(encoding="utf-8"))
             self.assertFalse((Path(phase["log_dir"]) / "review.json").exists())
+
+    def test_review_quota_failure_falls_back_to_fallback_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                checks=[],
+                reviewer_args=["--quota-fail"],
+                reviewer_fallback=True,
+            )
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("falling back to profile 'fake'", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            review_jobs = [
+                job for job in jobs(home, phase["id"]) if job["type"] == "REVIEW"
+            ]
+            self.assertEqual(
+                [job["status"] for job in review_jobs], ["FAILED", "SUCCEEDED"]
+            )
+            fallback_events = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "review.fallback"
+            ]
+            self.assertEqual(len(fallback_events), 1)
+            self.assertIn("quota/rate limit", fallback_events[0]["message"])
+
+    def test_review_non_quota_failure_does_not_fall_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                checks=[],
+                reviewer_args=["--hard-fail"],
+                reviewer_fallback=True,
+            )
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
+
+            self.assertEqual(result.returncode, 1)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            review_jobs = [
+                job for job in jobs(home, phase["id"]) if job["type"] == "REVIEW"
+            ]
+            self.assertEqual([job["status"] for job in review_jobs], ["FAILED"])
+            fallback_events = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "review.fallback"
+            ]
+            self.assertEqual(fallback_events, [])
 
 
 if __name__ == "__main__":

@@ -136,7 +136,6 @@ class Phase1CliTests(unittest.TestCase):
             config = load_config(repo)
             self.assertEqual(config.roles["coder"], "claude")
             self.assertEqual(config.agents["claude"].prompt_prefix, "")
-            self.assertFalse(config.auto_merge)
 
             second = run_cli(repo, home, "init")
 
@@ -231,6 +230,45 @@ class Phase1CliTests(unittest.TestCase):
             (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
 
             with self.assertRaisesRegex(ConfigError, "promptPrefix"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["roleFallbacks"] = {"reviewer": ["missing-agent"]}
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "unknown agent profile"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["roleFallbacks"] = {"unknown-role": ["antigravity"]}
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "configured role"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["roleFallbacks"] = {"reviewer": ["antigravity"]}
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            config = load_config(repo)
+            self.assertEqual(config.role_fallbacks, {"reviewer": ["antigravity"]})
+            self.assertEqual(config.base_branch, "main")
+            self.assertFalse(config.merge_on_close)
+            self.assertEqual(config.merge_strategy, "squash")
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["mergeStrategy"] = "octopus"
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "mergeStrategy"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["mergeOnClose"] = True
+            data["autoCommit"] = False
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "mergeOnClose requires autoCommit"):
                 load_config(repo)
 
     def test_empty_checks_are_accepted_with_warning(self):

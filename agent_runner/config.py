@@ -20,6 +20,8 @@ REQUIRED_AGENT_FIELDS = {
 
 OUTPUT_CAPTURE_MODES = {"stdout", "last-message-file", "structured-stdout"}
 
+MERGE_STRATEGIES = {"merge", "squash", "rebase"}
+
 
 @dataclass(frozen=True)
 class AgentProfile:
@@ -38,13 +40,16 @@ class RunnerConfig:
     data: dict[str, Any]
     agents: dict[str, AgentProfile]
     roles: dict[str, str]
+    role_fallbacks: dict[str, list[str]]
     plan_path: str
     checks: list[str]
     max_retries_per_phase: int
     timeout_minutes: int
     auto_commit: bool
-    auto_merge: bool
     allow_dirty: bool
+    base_branch: str
+    merge_on_close: bool
+    merge_strategy: str
     warnings: list[str]
 
 
@@ -147,24 +152,41 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
         if required_role not in normalized_roles:
             raise ConfigError(f"invalid roles: missing required role {required_role!r}")
 
+    role_fallbacks = _validate_role_fallbacks(
+        data, agents=agents, roles=normalized_roles, warnings=warnings
+    )
+
     max_retries = _required_int(data, "maxRetriesPerPhase", minimum=0)
     timeout_minutes = _required_int(data, "timeoutMinutes", minimum=1)
     auto_commit = _required_bool(data, "autoCommit")
-    auto_merge = _optional_bool(data, "autoMerge", default=False)
     allow_dirty = _required_bool(data, "allowDirty")
+    base_branch = _optional_string(data, "baseBranch", default="main")
+    merge_on_close = _optional_bool(data, "mergeOnClose", default=False)
+    merge_strategy = _optional_string(data, "mergeStrategy", default="squash")
+    if merge_strategy not in MERGE_STRATEGIES:
+        allowed = ", ".join(sorted(MERGE_STRATEGIES))
+        raise ConfigError(f"invalid mergeStrategy: expected one of {allowed}")
+    if merge_on_close and not auto_commit:
+        raise ConfigError(
+            "invalid config: mergeOnClose requires autoCommit=true (the runner "
+            "merges the reviewed phase PR, which only exists in the PR flow)"
+        )
 
     return RunnerConfig(
         path=path,
         data=data,
         agents=agents,
         roles=normalized_roles,
+        role_fallbacks=role_fallbacks,
         plan_path=plan_path,
         checks=checks,
         max_retries_per_phase=max_retries,
         timeout_minutes=timeout_minutes,
         auto_commit=auto_commit,
-        auto_merge=auto_merge,
         allow_dirty=allow_dirty,
+        base_branch=base_branch,
+        merge_on_close=merge_on_close,
+        merge_strategy=merge_strategy,
         warnings=warnings,
     )
 
@@ -216,6 +238,42 @@ def _validate_agent_profile(name: str, profile: dict[str, Any]) -> AgentProfile:
     )
 
 
+def _validate_role_fallbacks(
+    data: dict[str, Any],
+    *,
+    agents: dict[str, AgentProfile],
+    roles: dict[str, str],
+    warnings: list[str],
+) -> dict[str, list[str]]:
+    value = data.get("roleFallbacks")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("invalid roleFallbacks: expected an object")
+
+    role_fallbacks: dict[str, list[str]] = {}
+    for role, profile_names in value.items():
+        if not isinstance(role, str) or role not in roles:
+            raise ConfigError(
+                f"invalid roleFallbacks.{role}: must reference a configured role"
+            )
+        if not isinstance(profile_names, list):
+            raise ConfigError(f"invalid roleFallbacks.{role}: expected a list")
+        names = _string_list(profile_names, f"roleFallbacks.{role}")
+        for name in names:
+            if name not in agents:
+                raise ConfigError(
+                    f"invalid roleFallbacks.{role}: unknown agent profile {name!r}"
+                )
+        if role != "reviewer" and names:
+            warnings.append(
+                f"roleFallbacks.{role} is configured but only the reviewer role "
+                "falls back on quota failures today"
+            )
+        role_fallbacks[role] = names
+    return role_fallbacks
+
+
 def _required_dict(data: dict[str, Any], key: str) -> dict[str, Any]:
     value = data.get(key)
     if not isinstance(value, dict):
@@ -259,6 +317,13 @@ def _required_bool(data: dict[str, Any], key: str) -> bool:
     return value
 
 
+def _optional_string(data: dict[str, Any], key: str, *, default: str) -> str:
+    value = data.get(key, default)
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"invalid config: field {key!r} must be a non-empty string")
+    return value
+
+
 def _optional_bool(data: dict[str, Any], key: str, *, default: bool) -> bool:
     value = data.get(key, default)
     if not isinstance(value, bool):
@@ -292,6 +357,13 @@ SAMPLE_CONFIG = """{
       "writeFlags": ["--sandbox", "workspace-write"],
       "readOnlyFlags": ["--sandbox", "read-only"],
       "outputCapture": "last-message-file"
+    },
+    "antigravity": {
+      "command": "agy",
+      "promptArgs": ["-p", "--print-timeout", "40m"],
+      "writeFlags": ["--dangerously-skip-permissions"],
+      "readOnlyFlags": ["--sandbox"],
+      "outputCapture": "stdout"
     }
   },
 
@@ -300,10 +372,24 @@ SAMPLE_CONFIG = """{
     "reviewer": "codex"
   },
 
+  // Optional. When a role's agent fails on a quota/rate limit, the runner
+  // retries the job with these profiles in order. Only the reviewer role
+  // falls back today.
+  // "roleFallbacks": { "reviewer": ["antigravity"] },
+
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
   "autoCommit": true,
-  "autoMerge": false,
-  "allowDirty": false
+  "allowDirty": false,
+
+  // Branch the runner treats as the integration base for phase branches.
+  "baseBranch": "main",
+
+  // With mergeOnClose=true (requires autoCommit), the runner merges the
+  // reviewed phase PR after CLOSE_PHASE, then starts the next phase on a new
+  // branch cut from the latest origin/<baseBranch>. With false, the runner
+  // stops after each phase and waits for a human to merge.
+  "mergeOnClose": false,
+  "mergeStrategy": "squash"
 }
 """
