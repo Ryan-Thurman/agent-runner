@@ -143,6 +143,18 @@ if (
     "Review the staged phase work independently" in prompt
     or "Review the published phase PR independently" in prompt
 ):
+    review_attempt = len(list(trace_dir.glob("review-*.md"))) + 1
+    (trace_dir / f"review-{review_attempt}.md").write_text(prompt, encoding="utf-8")
+    if os.environ.get("REVIEW_BLOCK_ONCE") and not (trace_dir / "review-blocked").exists():
+        (trace_dir / "review-blocked").write_text("blocked\n", encoding="utf-8")
+        print(json.dumps({
+            "status": "BLOCKED",
+            "summary": "published review needs auto-fix",
+            "blockingIssues": ["fixed.txt is missing from the published diff"],
+            "nonBlockingIssues": [],
+            "recommendedFixPrompt": "Create fixed.txt and publish the PR update."
+        }))
+        raise SystemExit(0)
     print(json.dumps({
         "status": "PASS",
         "summary": "accepted",
@@ -178,6 +190,18 @@ if "Close the accepted phase" in prompt:
     raise SystemExit(0)
 
 Path("generated.txt").write_text("created by implement\n", encoding="utf-8")
+if "Publish requirements before you finish" in prompt:
+    subprocess.run(["git", "add", "-A"], check=True)
+    subprocess.run([
+        "git",
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=Test User",
+        "commit",
+        "-qm",
+        "implement phase",
+    ], check=True)
 print("fake implement completed")
 raise SystemExit(0)
 """.lstrip(),
@@ -290,6 +314,9 @@ class AutofixLoopTests(unittest.TestCase):
             self.assertIn("retries exhausted", autofix_prompt)
             self.assertIn("Newest phase log tail", autofix_prompt)
             self.assertIn("Never invoke `autorun`, `agent-runner`", autofix_prompt)
+            review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
+            self.assertIn("fixed.txt", review_prompt)
+            self.assertIn("fixed by auto-fix", review_prompt)
             phase_events = events(home, phase["id"])
             autofix_events = [
                 event for event in phase_events if event["event_type"] == "phase.autofix"
@@ -349,6 +376,62 @@ class AutofixLoopTests(unittest.TestCase):
                 text=True,
             )
             self.assertEqual(status, "")
+
+    def test_autofix_refreshes_published_metadata_before_review_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "autofix_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_plan(repo)
+            write_autofix_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_config(repo, script, auto_fix_attempts=2, auto_commit=True)
+            config_path = repo / ".agent-runner.json"
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            data["checks"] = [
+                f"{shlex.quote(sys.executable)} -c "
+                "\"from pathlib import Path; assert Path('generated.txt').exists()\""
+            ]
+            config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-review-autofix"],
+                cwd=repo,
+                check=True,
+            )
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "REVIEW_BLOCK_ONCE": "1",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("stored phase PR head changed", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            phase_jobs = jobs(home, phase["id"])
+            self.assertEqual([job["type"] for job in phase_jobs].count("REVIEW"), 2)
+            self.assertEqual([job["type"] for job in phase_jobs].count("AUTOFIX"), 1)
+            second_review = (trace / "review-2.md").read_text(encoding="utf-8")
+            self.assertIn(f"Published SHA: {phase['published_sha']}", second_review)
+            published_files = subprocess.check_output(
+                ["git", "show", "--format=", "--name-only", phase["published_sha"]],
+                cwd=repo,
+                text=True,
+            )
+            self.assertIn("fixed.txt", published_files)
 
     def test_autofix_attempt_cap_leaves_phase_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:

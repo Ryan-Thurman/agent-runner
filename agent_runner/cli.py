@@ -23,7 +23,10 @@ from .phase_loop import (
     PhaseLoopResult,
     RESTART_COUNT_ENV,
     extract_pr_number,
+    _git_add_all,
     _publish_instructions,
+    _record_phase_published,
+    _verify_published_phase,
     restart_count,
     run_phase_loop,
 )
@@ -41,6 +44,7 @@ from .storage import (
     record_event,
     reap_orphaned_jobs,
     rows_to_dicts,
+    update_phase_publish_metadata,
     update_phase_status,
     update_project_status,
 )
@@ -316,6 +320,15 @@ def _run_autofix_loop(
         if fix_result.status != "SUCCEEDED":
             return result
 
+        phase = _prepare_successful_autofix_resume(
+            db,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=phase,
+            job_id=fix_result.job_id,
+            config=config,
+            repo_root=repo_root,
+        )
         target = _unblock_phase(
             db,
             project_id=project_id,
@@ -350,6 +363,43 @@ def _run_autofix_loop(
             repo_root=repo_root,
         )
     return result
+
+
+def _prepare_successful_autofix_resume(
+    db,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase,
+    job_id: int,
+    config,
+    repo_root: Path,
+):
+    if not config.auto_commit:
+        _git_add_all(repo_root)
+        return phase
+
+    if phase["blocked_from"] != "REVIEWING":
+        return phase
+
+    metadata = _verify_published_phase(repo_root)
+    phase = update_phase_publish_metadata(
+        db,
+        phase["id"],
+        publish_mode="pr",
+        branch_name=metadata.branch_name,
+        pr_url=metadata.pr_url,
+        published_sha=metadata.published_sha,
+    )
+    _record_phase_published(
+        db,
+        project_id=project_id,
+        plan_id=plan_id,
+        job_id=job_id,
+        phase=phase,
+        metadata=metadata,
+    )
+    return phase
 
 
 def _blocked_phase_for_plan(db, plan_id: int):
