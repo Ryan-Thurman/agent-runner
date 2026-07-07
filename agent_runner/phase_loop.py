@@ -1511,8 +1511,10 @@ def _merge_phase_pr(
         fields="url,state",
     )
     if payload.get("state") == "MERGED":
+        pr_number = extract_pr_number(pr_url)
+        pr_label = f"PR #{pr_number}" if pr_number is not None else pr_url
         print(
-            f"[agent-runner] phase {format_pr_url(pr_url)} already merged; "
+            f"[agent-runner] phase {pr_label} already merged; "
             "skipping merge",
             file=sys.stderr,
             flush=True,

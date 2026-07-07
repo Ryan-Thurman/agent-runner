@@ -797,7 +797,10 @@ class Phase7CloseTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("already merged; skipping merge", result.stderr)
+            self.assertIn(
+                "[agent-runner] phase PR #1 already merged; skipping merge",
+                result.stderr,
+            )
             self.assertIn("plan complete", result.stderr)
             rows = phase_rows(home, repo)
             self.assertEqual(rows[0]["status"], "COMPLETE")
