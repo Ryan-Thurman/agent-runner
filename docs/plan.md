@@ -172,7 +172,7 @@ Acceptance Criteria:
 
 ## Phase 7: CLOSE_PHASE — the full circle
 Status: COMPLETE
-Evidence: closure commit pending; checks: python3 -m unittest discover -s tests -v
+Evidence: 6a1e6ae/e3e0f1c/c8f4685; checks: python3 -m compileall -q .; python3 -m unittest discover -s tests -v (76 passed)
 
 On PASS, launch the **closer** (coder profile, write flags) with the closure prompt:
 (1) doc gate — if the phase changed behavior, an API, a flag/config, the data model, or
