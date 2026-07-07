@@ -1262,6 +1262,8 @@ def _merge_phase_pr(
     pr_url = phase["pr_url"]
     if not pr_url:
         raise JobError("phase has no stored PR URL to merge")
+
+    _verify_pr_ready_to_merge(repo_root, phase, pr_url=pr_url)
     try:
         result = subprocess.run(
             ["gh", "pr", "merge", pr_url, f"--{config.merge_strategy}"],
@@ -1288,6 +1290,53 @@ def _merge_phase_pr(
         raise JobError(
             f"gh pr merge did not merge {pr_url}; PR state is "
             f"{state or 'unknown'}"
+        )
+
+
+def _verify_pr_ready_to_merge(
+    repo_root: Path, phase: sqlite3.Row, *, pr_url: str
+) -> None:
+    payload = _gh_pr_view(
+        repo_root,
+        pr_url=pr_url,
+        failure_context=f"could not verify phase PR before merge {pr_url}",
+        fields="url,headRefName,headRefOid,state,mergeable,isDraft",
+    )
+
+    state = payload.get("state")
+    if isinstance(state, str) and state and state != "OPEN":
+        raise JobError(f"phase PR is {state}; cannot merge {pr_url}")
+    if payload.get("isDraft") is True:
+        raise JobError(f"phase PR is a draft; cannot merge {pr_url}")
+
+    head_ref_name = payload.get("headRefName")
+    expected_branch = phase["branch_name"]
+    if (
+        isinstance(head_ref_name, str)
+        and head_ref_name
+        and expected_branch
+        and head_ref_name != expected_branch
+    ):
+        raise JobError(
+            f"phase PR branch changed before merge: {head_ref_name!r} is not "
+            f"{expected_branch!r}"
+        )
+
+    head_ref_oid = payload.get("headRefOid")
+    local_sha = _git_head_sha(repo_root)
+    if isinstance(head_ref_oid, str) and head_ref_oid and head_ref_oid != local_sha:
+        raise JobError(
+            f"phase PR head {head_ref_oid[:12]} does not match the pushed close "
+            f"commit {local_sha[:12]}; refusing to merge {pr_url}"
+        )
+
+    # gh reports UNKNOWN while GitHub recomputes mergeability after a push;
+    # only a definitive conflict blocks here, and the post-merge MERGED check
+    # still catches anything gh lets through.
+    if payload.get("mergeable") == "CONFLICTING":
+        raise JobError(
+            f"phase PR has merge conflicts with the base branch; cannot merge "
+            f"{pr_url}"
         )
 
 
@@ -1527,12 +1576,16 @@ def _git_head_sha(repo_root: Path) -> str:
 
 
 def _gh_pr_view(
-    repo_root: Path, *, pr_url: Optional[str] = None, failure_context: str
+    repo_root: Path,
+    *,
+    pr_url: Optional[str] = None,
+    failure_context: str,
+    fields: str = "url,headRefName,headRefOid,state",
 ) -> dict[str, Any]:
     command = ["gh", "pr", "view"]
     if pr_url:
         command.append(pr_url)
-    command.extend(["--json", "url,headRefName,headRefOid,state"])
+    command.extend(["--json", fields])
     try:
         result = subprocess.run(
             command,

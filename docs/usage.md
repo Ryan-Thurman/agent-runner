@@ -155,7 +155,11 @@ Current notes:
 - `mergeOnClose=true` (requires `autoCommit`) makes the loop fully autonomous:
   after the reviewer passes the PR and CLOSE_PHASE lands the doc/plan write-back,
   the runner pushes the close commit and merges the phase PR with
-  `mergeStrategy` (`squash` by default). Before the next phase's IMPLEMENT, the
+  `mergeStrategy` (`squash` by default). Before merging, it re-verifies the PR
+  against GitHub: still open, not a draft, on the stored phase branch, at the
+  pushed close commit, and without reported merge conflicts — a stale or
+  drifted PR blocks the phase instead of merging. Before the next phase's
+  IMPLEMENT, the
   runner verifies the previous phase's PR is MERGED, fetches
   `origin/<baseBranch>`, and starts the phase on a fresh
   `dev/phase-NN-<title>` branch cut from it — the coder never starts on a
