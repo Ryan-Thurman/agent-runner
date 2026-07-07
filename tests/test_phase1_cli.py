@@ -104,6 +104,7 @@ else:
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
     data["roleFallbacks"] = {}
+    data.pop("reviewTriage", None)
     data["autoFixAttempts"] = 0
     data["autoCommit"] = False
     data["mergeOnClose"] = False
@@ -161,6 +162,9 @@ class Phase1CliTests(unittest.TestCase):
             self.assertEqual(config.roles["fixer"], "claude-opus")
             self.assertEqual(config.auto_fix_attempts, 2)
             self.assertEqual(config.agents["claude-opus"].prompt_prefix, "")
+            self.assertIsNotNone(config.review_triage)
+            self.assertEqual(config.review_triage.simple, "claude-sonnet")
+            self.assertEqual(config.review_triage.complex, "claude-opus")
             self.assertEqual(config.checks, PLACEHOLDER_CHECKS)
             self.assertEqual(config.warnings, [])
             self.assertIn(
@@ -393,6 +397,17 @@ class Phase1CliTests(unittest.TestCase):
             (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
 
             with self.assertRaisesRegex(ConfigError, "unknown agent profile"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            self.assertEqual(
+                data["reviewTriage"],
+                {"simple": "claude-sonnet", "complex": "claude-opus"},
+            )
+            data["reviewTriage"]["simple"] = "missing-agent"
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "reviewTriage.simple"):
                 load_config(repo)
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))

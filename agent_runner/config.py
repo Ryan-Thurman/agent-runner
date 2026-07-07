@@ -44,12 +44,19 @@ class AgentProfile:
 
 
 @dataclass(frozen=True)
+class ReviewTriageConfig:
+    simple: str
+    complex: str
+
+
+@dataclass(frozen=True)
 class RunnerConfig:
     path: Path
     data: dict[str, Any]
     agents: dict[str, AgentProfile]
     roles: dict[str, str]
     role_fallbacks: dict[str, list[str]]
+    review_triage: ReviewTriageConfig | None
     plan_path: str
     checks: list[str]
     max_retries_per_phase: int
@@ -165,6 +172,7 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
     role_fallbacks = _validate_role_fallbacks(
         data, agents=agents, roles=normalized_roles, warnings=warnings
     )
+    review_triage = _validate_review_triage(data, agents=agents)
 
     max_retries = _required_int(data, "maxRetriesPerPhase", minimum=0)
     auto_fix_attempts = _optional_int(data, "autoFixAttempts", default=0, minimum=0)
@@ -193,6 +201,7 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
         agents=agents,
         roles=normalized_roles,
         role_fallbacks=role_fallbacks,
+        review_triage=review_triage,
         plan_path=plan_path,
         checks=checks,
         max_retries_per_phase=max_retries,
@@ -316,6 +325,29 @@ def _validate_role_fallbacks(
     return role_fallbacks
 
 
+def _validate_review_triage(
+    data: dict[str, Any], *, agents: dict[str, AgentProfile]
+) -> ReviewTriageConfig | None:
+    value = data.get("reviewTriage")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError("invalid reviewTriage: expected an object")
+
+    simple = value.get("simple")
+    complex_profile = value.get("complex")
+    if not isinstance(simple, str) or not simple:
+        raise ConfigError("invalid reviewTriage.simple: expected an agent profile name")
+    if not isinstance(complex_profile, str) or not complex_profile:
+        raise ConfigError("invalid reviewTriage.complex: expected an agent profile name")
+    for tier, name in (("simple", simple), ("complex", complex_profile)):
+        if name not in agents:
+            raise ConfigError(
+                f"invalid reviewTriage.{tier}: unknown agent profile {name!r}"
+            )
+    return ReviewTriageConfig(simple=simple, complex=complex_profile)
+
+
 def _required_dict(data: dict[str, Any], key: str) -> dict[str, Any]:
     value = data.get(key)
     if not isinstance(value, dict):
@@ -435,6 +467,10 @@ SAMPLE_CONFIG_TEMPLATE = """{{
   // When a role's agent fails on a quota/rate limit, the runner retries coder
   // IMPLEMENT/FIX and reviewer REVIEW jobs with these profiles in order.
   "roleFallbacks": {{ "reviewer": ["antigravity"], "coder": ["claude-sonnet"] }},
+
+  // Route simple reviews to Sonnet and behavioral reviews to Opus; both models
+  // are explicitly pinned in the profiles above.
+  "reviewTriage": {{ "simple": "claude-sonnet", "complex": "claude-opus" }},
 
   "maxRetriesPerPhase": 3,
   // If a phase blocks, run up to this many one-shot fixer jobs in the same run.

@@ -12,7 +12,15 @@ from .lock import utc_now_iso
 
 DB_FILENAME = "runner.sqlite"
 
-JOB_TYPES = {"IMPLEMENT", "RUN_CHECKS", "REVIEW", "FIX", "CLOSE_PHASE", "AUTOFIX"}
+JOB_TYPES = {
+    "IMPLEMENT",
+    "RUN_CHECKS",
+    "REVIEW",
+    "FIX",
+    "CLOSE_PHASE",
+    "AUTOFIX",
+    "TRIAGE",
+}
 JOB_STATUSES = {"PENDING", "RUNNING", "SUCCEEDED", "FAILED"}
 PHASE_STATUSES = {
     "PENDING",
@@ -33,6 +41,7 @@ ORPHAN_PHASE_STATUS = {
     "FIX": "FIXING",
     "CLOSE_PHASE": "CLOSING",
     "AUTOFIX": "BLOCKED",
+    "TRIAGE": "REVIEWING",
 }
 
 

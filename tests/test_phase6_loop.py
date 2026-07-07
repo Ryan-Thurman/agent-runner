@@ -84,6 +84,8 @@ def write_config(
     coder_fallback: bool = False,
     reviewer_args: Optional[list[str]] = None,
     reviewer_fallback: bool = False,
+    review_triage: bool = False,
+    triage_args: Optional[list[str]] = None,
 ) -> None:
     data = json.loads(strip_json_comments(SAMPLE_CONFIG))
     data["agents"] = {
@@ -97,6 +99,7 @@ def write_config(
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
     data["roleFallbacks"] = {}
+    data.pop("reviewTriage", None)
     data["autoFixAttempts"] = 0
     if coder_args is not None:
         data["agents"]["special-coder"] = {
@@ -116,6 +119,31 @@ def write_config(
             "outputCapture": "stdout",
         }
         data["roles"]["reviewer"] = "special-reviewer"
+    if review_triage:
+        data["agents"]["simple-reviewer"] = {
+            "command": sys.executable,
+            "promptArgs": [
+                str(agent_script),
+                "--review-profile",
+                "simple",
+                *(triage_args or []),
+            ],
+            "writeFlags": [],
+            "readOnlyFlags": [],
+            "outputCapture": "stdout",
+        }
+        data["agents"]["complex-reviewer"] = {
+            "command": sys.executable,
+            "promptArgs": [str(agent_script), "--review-profile", "complex"],
+            "writeFlags": [],
+            "readOnlyFlags": [],
+            "outputCapture": "stdout",
+        }
+        data["reviewTriage"] = {
+            "simple": "simple-reviewer",
+            "complex": "complex-reviewer",
+        }
+        data["roles"]["reviewer"] = "complex-reviewer"
     role_fallbacks = {}
     if coder_fallback:
         role_fallbacks["coder"] = ["fake"]
@@ -146,12 +174,32 @@ mode = os.environ.get("AGENT_MODE", "PASS")
 trace_dir = Path(os.environ["TRACE_DIR"])
 trace_dir.mkdir(parents=True, exist_ok=True)
 
+if "Classify this phase review into one reviewer tier" in prompt:
+    (trace_dir / f"triage-{len(list(trace_dir.glob('triage-*.md'))) + 1}.md").write_text(
+        prompt,
+        encoding="utf-8",
+    )
+    if "--triage-fail" in sys.argv:
+        print("triage timeout or crash", file=sys.stderr)
+        raise SystemExit(1)
+    if "--triage-garbage" in sys.argv:
+        print("not json from triage")
+        raise SystemExit(0)
+    print(json.dumps({"tier": os.environ.get("TRIAGE_TIER", "simple")}))
+    raise SystemExit(0)
+
 if (
     "Review the staged phase work independently" in prompt
     or "Review the published phase PR independently" in prompt
 ):
     review_number = len(list(trace_dir.glob("review-*.md"))) + 1
     (trace_dir / f"review-{review_number}.md").write_text(prompt, encoding="utf-8")
+    if "--review-profile" in sys.argv:
+        profile = sys.argv[sys.argv.index("--review-profile") + 1]
+        (trace_dir / f"review-profile-{review_number}.txt").write_text(
+            profile,
+            encoding="utf-8",
+        )
     if "--quota-fail" in sys.argv:
         print("codex quota exceeded: 429 Too Many Requests", file=sys.stderr)
         raise SystemExit(1)
@@ -318,7 +366,10 @@ if args[:2] == ["pr", "view"]:
     raise SystemExit(0)
 
 if args[:2] == ["pr", "diff"]:
-    subprocess.run(["git", "show", "--format=", "--patch", "HEAD"], check=True)
+    if "--stat" in args:
+        subprocess.run(["git", "show", "--format=", "--stat", "HEAD"], check=True)
+    else:
+        subprocess.run(["git", "show", "--format=", "--patch", "HEAD"], check=True)
     raise SystemExit(0)
 
 print(f"unsupported gh args: {args}", file=sys.stderr)
@@ -394,6 +445,149 @@ def seed_reviewing_published_phase(repo: Path, home: Path) -> str:
 
 
 class Phase6LoopTests(unittest.TestCase):
+    def test_review_triage_simple_routes_review_to_simple_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[], review_triage=True)
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "TRIAGE_TIER": "simple"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "review triage: phase 6 tier=simple; reviewing with profile simple-reviewer",
+                result.stderr,
+            )
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            phase_jobs = jobs(home, phase["id"])
+            self.assertEqual(
+                [job["type"] for job in phase_jobs],
+                ["IMPLEMENT", "RUN_CHECKS", "TRIAGE", "REVIEW", "CLOSE_PHASE"],
+            )
+            self.assertEqual(
+                (trace / "review-profile-1.txt").read_text(encoding="utf-8"),
+                "simple",
+            )
+            triage_events = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "review.triage"
+            ]
+            self.assertEqual(len(triage_events), 1)
+            event_data = json.loads(triage_events[0]["data_json"])
+            self.assertEqual(event_data["tier"], "simple")
+            self.assertEqual(event_data["profile"], "simple-reviewer")
+
+    def test_review_triage_complex_routes_review_to_complex_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[], review_triage=True)
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "TRIAGE_TIER": "complex"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "review triage: phase 6 tier=complex; reviewing with profile complex-reviewer",
+                result.stderr,
+            )
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            self.assertEqual(
+                (trace / "review-profile-1.txt").read_text(encoding="utf-8"),
+                "complex",
+            )
+
+    def test_review_triage_garbage_routes_to_complex_and_phase_completes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                checks=[],
+                review_triage=True,
+                triage_args=["--triage-garbage"],
+            )
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "review triage: phase 6 tier=complex; reviewing with profile complex-reviewer",
+                result.stderr,
+            )
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            self.assertEqual(
+                (trace / "review-profile-1.txt").read_text(encoding="utf-8"),
+                "complex",
+            )
+            triage_events = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "review.triage"
+            ]
+            event_data = json.loads(triage_events[0]["data_json"])
+            self.assertEqual(event_data["tier"], "complex")
+            self.assertIn("invalid triage JSON", event_data["reason"])
+
+    def test_review_without_triage_does_not_spawn_triage_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[])
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            self.assertNotIn("TRIAGE", [job["type"] for job in jobs(home, phase["id"])])
+
     def test_review_pass_advances_to_closing_without_coder_output_in_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

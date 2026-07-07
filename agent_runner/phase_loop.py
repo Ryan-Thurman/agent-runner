@@ -58,6 +58,14 @@ class PublishMetadata:
     published_sha: str
 
 
+@dataclass(frozen=True)
+class ReviewTriageResult:
+    tier: str
+    profile_name: str
+    job_id: Optional[int]
+    reason: Optional[str] = None
+
+
 def extract_pr_number(pr_url: Optional[str]) -> Optional[str]:
     if not pr_url:
         return None
@@ -487,8 +495,17 @@ def _run_review(
                 message=str(exc),
             )
 
-    profiles = _profiles_for_role(config, "reviewer")
     log_dir = Path(phase["log_dir"])
+    profiles = _profiles_for_review(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=phase,
+        parsed_phase=parsed_phase,
+        config=config,
+        repo_root=repo_root,
+        log_dir=log_dir,
+    )
     review_prompt = _review_prompt(
         repo_root,
         parsed_phase,
@@ -1261,6 +1278,189 @@ def _profiles_for_role(config: RunnerConfig, role: str) -> list[AgentProfile]:
     return profiles
 
 
+def _profiles_for_review(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    parsed_phase: ParsedPhase,
+    config: RunnerConfig,
+    repo_root: Path,
+    log_dir: Path,
+) -> list[AgentProfile]:
+    if config.review_triage is None:
+        return _profiles_for_role(config, "reviewer")
+
+    triage = _run_review_triage(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=phase,
+        parsed_phase=parsed_phase,
+        config=config,
+        repo_root=repo_root,
+        log_dir=log_dir,
+    )
+    return _review_profiles_from_primary(config, triage.profile_name)
+
+
+def _review_profiles_from_primary(
+    config: RunnerConfig, primary_profile_name: str
+) -> list[AgentProfile]:
+    profiles = [config.agents[primary_profile_name]]
+    seen = {primary_profile_name}
+    for name in config.role_fallbacks.get("reviewer", []):
+        if name not in seen:
+            profiles.append(config.agents[name])
+            seen.add(name)
+    return profiles
+
+
+def _run_review_triage(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    parsed_phase: ParsedPhase,
+    config: RunnerConfig,
+    repo_root: Path,
+    log_dir: Path,
+) -> ReviewTriageResult:
+    assert config.review_triage is not None
+    triage: ReviewTriageResult
+    try:
+        prompt = _review_triage_prompt(
+            repo_root,
+            parsed_phase,
+            phase=phase,
+            use_published_diff=config.auto_commit,
+        )
+    except JobError as exc:
+        triage = ReviewTriageResult(
+            tier="complex",
+            profile_name=config.review_triage.complex,
+            job_id=None,
+            reason=f"could not build triage prompt: {exc}",
+        )
+        _record_review_triage(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=phase,
+            triage=triage,
+        )
+        return triage
+
+    simple_profile = config.agents[config.review_triage.simple]
+    result = run_agent_job(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        job_type="TRIAGE",
+        role="triage",
+        profile=simple_profile,
+        prompt=prompt,
+        repo_root=repo_root,
+        log_dir=log_dir,
+        timeout_seconds=config.timeout_minutes * 60,
+    )
+    triage = _interpret_review_triage(config, result)
+    _record_review_triage(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=phase,
+        triage=triage,
+    )
+    return triage
+
+
+def _record_review_triage(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    triage: ReviewTriageResult,
+) -> None:
+    message = (
+        f"review triage: phase {phase['phase_number']} tier={triage.tier}; "
+        f"reviewing with profile {triage.profile_name}"
+    )
+    print(f"[agent-runner] {message}", file=sys.stderr, flush=True)
+    event_data: dict[str, Any] = {
+        "tier": triage.tier,
+        "profile": triage.profile_name,
+        "triageJobId": triage.job_id,
+    }
+    if triage.reason is not None:
+        event_data["reason"] = triage.reason
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        job_id=triage.job_id,
+        event_type="review.triage",
+        message=message,
+        data=event_data,
+    )
+
+
+def _interpret_review_triage(
+    config: RunnerConfig, result: JobResult
+) -> ReviewTriageResult:
+    assert config.review_triage is not None
+    complex_profile = config.review_triage.complex
+    if result.status != "SUCCEEDED":
+        return ReviewTriageResult(
+            tier="complex",
+            profile_name=complex_profile,
+            job_id=result.job_id,
+            reason=result.error or "triage job failed",
+        )
+
+    raw_output = _review_capture_output(result).strip()
+    try:
+        payload = json.loads(raw_output)
+    except json.JSONDecodeError as exc:
+        return ReviewTriageResult(
+            tier="complex",
+            profile_name=complex_profile,
+            job_id=result.job_id,
+            reason=f"invalid triage JSON: {exc}",
+        )
+    if not isinstance(payload, dict):
+        return ReviewTriageResult(
+            tier="complex",
+            profile_name=complex_profile,
+            job_id=result.job_id,
+            reason="triage JSON must be an object",
+        )
+    tier = payload.get("tier")
+    if tier == "simple":
+        return ReviewTriageResult(
+            tier="simple",
+            profile_name=config.review_triage.simple,
+            job_id=result.job_id,
+        )
+    if tier == "complex":
+        return ReviewTriageResult(
+            tier="complex",
+            profile_name=complex_profile,
+            job_id=result.job_id,
+        )
+    return ReviewTriageResult(
+        tier="complex",
+        profile_name=complex_profile,
+        job_id=result.job_id,
+        reason=f"unexpected triage tier: {tier!r}",
+    )
+
+
 def _run_agent_job_with_fallbacks(
     connection: sqlite3.Connection,
     *,
@@ -1412,6 +1612,19 @@ def _git_diff_staged(repo_root: Path) -> str:
     )
     if result.returncode != 0:
         raise JobError(result.stderr.strip() or "git diff --staged failed")
+    return result.stdout
+
+
+def _git_diff_staged_stat(repo_root: Path) -> str:
+    result = subprocess.run(
+        ["git", "diff", "--staged", "--stat"],
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        raise JobError(result.stderr.strip() or "git diff --staged --stat failed")
     return result.stdout
 
 
@@ -1950,6 +2163,48 @@ def _published_phase_diff(repo_root: Path, phase: sqlite3.Row) -> str:
     return _git_diff_staged(repo_root)
 
 
+def _published_phase_diff_stat(repo_root: Path, phase: sqlite3.Row) -> str:
+    pr_url = phase["pr_url"]
+    if pr_url:
+        try:
+            result = subprocess.run(
+                ["gh", "pr", "diff", pr_url, "--stat"],
+                cwd=repo_root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            result = None
+        if result is not None and result.returncode == 0 and result.stdout:
+            return result.stdout
+
+    for base_ref in ("origin/main", "main", "origin/master", "master", "HEAD~1"):
+        result = subprocess.run(
+            ["git", "merge-base", "HEAD", base_ref],
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            continue
+        merge_base = result.stdout.strip()
+        diff = subprocess.run(
+            ["git", "diff", "--stat", f"{merge_base}..HEAD"],
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if diff.returncode != 0:
+            continue
+        if diff.stdout:
+            return diff.stdout
+
+    return _git_diff_staged_stat(repo_root)
+
+
 def _phase_has_publish_metadata(phase: sqlite3.Row) -> bool:
     return bool(phase["branch_name"] and phase["pr_url"] and phase["published_sha"])
 
@@ -2204,6 +2459,37 @@ def _review_prompt(
         "Check output:\n"
         "```text\n"
         f"{_checks_log_text(log_dir)}\n"
+        "```"
+    )
+
+
+def _review_triage_prompt(
+    repo_root: Path,
+    parsed_phase: ParsedPhase,
+    *,
+    phase: sqlite3.Row,
+    use_published_diff: bool,
+) -> str:
+    if use_published_diff:
+        diff_label = "published PR diff stat"
+        diff_stat = _published_phase_diff_stat(repo_root, phase)
+    else:
+        diff_label = "git diff --staged --stat"
+        diff_stat = _git_diff_staged_stat(repo_root)
+
+    return (
+        "Classify this phase review into one reviewer tier. Do not edit files.\n\n"
+        'Return strict JSON only: {"tier": "simple"} or {"tier": "complex"}.\n'
+        "Guidance: docs, comments, renames, config text, or small mechanical "
+        "changes with no behavior change are simple; anything that changes "
+        "runtime behavior, logic, error handling, concurrency, security, or "
+        "data handling is complex.\n\n"
+        f"Phase {parsed_phase.phase_number}: {parsed_phase.title}\n\n"
+        "Phase body:\n"
+        f"{parsed_phase.content}\n\n"
+        f"{diff_label}:\n"
+        "```text\n"
+        f"{diff_stat}\n"
         "```"
     )
 
