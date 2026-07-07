@@ -25,7 +25,10 @@ pause/resume, crash recovery, and log-tailing loop.
 - `FIXING`: resume the last available fix prompt, then rerun checks.
 - `CLOSING`: run the closer profile with write flags, validate the plan
   write-back and handoff, optionally commit, and mark the phase `COMPLETE`.
-- `BLOCKED`: exit non-zero.
+- `MERGING` (only with `mergeOnClose=true`): the close commit landed; push and
+  merge the phase PR without re-running the closer.
+- `BLOCKED`: exit non-zero. `agent-runner unblock` restores the status the
+  phase was in when it blocked so `run` can retry it.
 - A `PAUSED` project does not start another job. Run `agent-runner resume`,
   then `agent-runner run`, to continue from the current phase status.
 
@@ -158,7 +161,9 @@ Current notes:
   `mergeStrategy` (`squash` by default). Before merging, it re-verifies the PR
   against GitHub: still open, not a draft, on the stored phase branch, at the
   pushed close commit, and without reported merge conflicts — a stale or
-  drifted PR blocks the phase instead of merging. Before the next phase's
+  drifted PR blocks the phase instead of merging. Because GitHub's API can
+  briefly report the pre-push head right after a push, a PR-head mismatch is
+  retried up to 5 times, 30 seconds apart, before blocking. Before the next phase's
   IMPLEMENT, the
   runner verifies the previous phase's PR is MERGED, fetches
   `origin/<baseBranch>`, and starts the phase on a fresh
@@ -204,6 +209,7 @@ Useful statuses while dogfooding:
 - `REVIEWING`: ready to run the reviewer, or retry review after checks pass.
 - `FIXING`: ready to resume a fix prompt after interruption.
 - `CLOSING`: ready to run or resume `CLOSE_PHASE`.
+- `MERGING`: close commit landed; ready to retry the phase PR merge.
 - `BLOCKED`: implementation failed or the phase needs human intervention.
 - `COMPLETE`: done; the loop skips it.
 
@@ -297,7 +303,18 @@ phase-body hash drift marks the phase `BLOCKED` instead of silently completing i
 
 When a phase reaches `BLOCKED`, use `python3 -m agent_runner status` and the
 latest events to see why. IMPLEMENT failures are recorded as events and in the
-job log.
+job log. Once the cause is addressed, unblock the phase and rerun:
+
+```sh
+python3 -m agent_runner unblock
+python3 -m agent_runner run
+```
+
+`unblock` restores the status the phase had when it blocked (recorded as
+`blocked_from`) and takes `--phase N` to pick a phase and `--to STATUS` to
+override the restored status — useful for phases blocked before `blocked_from`
+existed. A phase blocked because retries ran out will block again on resume
+unless you fix the underlying findings or raise `maxRetriesPerPhase`.
 
 ## Logs and State
 

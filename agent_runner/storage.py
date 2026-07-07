@@ -20,6 +20,7 @@ PHASE_STATUSES = {
     "REVIEWING",
     "FIXING",
     "CLOSING",
+    "MERGING",
     "COMPLETE",
     "BLOCKED",
 }
@@ -143,6 +144,7 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
         """
     )
     _ensure_column(connection, "jobs", "pid", "INTEGER")
+    _ensure_column(connection, "phases", "blocked_from", "TEXT")
     connection.commit()
 
 
@@ -352,26 +354,39 @@ def update_phase_status(
     if status not in PHASE_STATUSES:
         raise ValueError(f"invalid phase status: {status}")
     now = utc_now_iso()
+    # blocked_from remembers the status a phase was in when it became BLOCKED
+    # so `agent-runner unblock` can restore it; it is cleared on any other
+    # transition and preserved if a BLOCKED phase is re-marked BLOCKED.
     if increment_retry:
         connection.execute(
             """
             UPDATE phases
-            SET status = ?,
+            SET blocked_from = CASE
+                    WHEN ? = 'BLOCKED' AND status = 'BLOCKED' THEN blocked_from
+                    WHEN ? = 'BLOCKED' THEN status
+                    ELSE NULL
+                END,
+                status = ?,
                 updated_at = ?,
                 retry_count = retry_count + 1
             WHERE id = ?
             """,
-            (status, now, phase_id),
+            (status, status, status, now, phase_id),
         )
     else:
         connection.execute(
             """
             UPDATE phases
-            SET status = ?,
+            SET blocked_from = CASE
+                    WHEN ? = 'BLOCKED' AND status = 'BLOCKED' THEN blocked_from
+                    WHEN ? = 'BLOCKED' THEN status
+                    ELSE NULL
+                END,
+                status = ?,
                 updated_at = ?
             WHERE id = ?
             """,
-            (status, now, phase_id),
+            (status, status, status, now, phase_id),
         )
     connection.commit()
     return get_phase(connection, phase_id)

@@ -221,6 +221,20 @@ if args[:2] == ["pr", "view"]:
     state = os.environ.get("GH_PR_STATE", "OPEN")
     if state_dir and merge_marker(pr_url).exists():
         state = "MERGED"
+    # Simulate GitHub API propagation lag: view calls 2..N+1 report the sha
+    # seen at the first view call instead of the live branch head.
+    stale_views = int(os.environ.get("GH_STALE_OID_VIEWS", "0"))
+    if stale_views and state_dir:
+        sd = Path(state_dir)
+        sd.mkdir(parents=True, exist_ok=True)
+        counter = sd / "view-count"
+        count = (int(counter.read_text()) if counter.exists() else 0) + 1
+        counter.write_text(str(count))
+        first_sha_file = sd / "first-view-sha"
+        if count == 1:
+            first_sha_file.write_text(sha)
+        elif count <= 1 + stale_views:
+            sha = first_sha_file.read_text().strip()
     print(json.dumps({
         "url": pr_url,
         "headRefName": branch,
@@ -623,6 +637,114 @@ class Phase7CloseTests(unittest.TestCase):
         self.assertIn("merge conflicts with the base branch", result.stderr)
         self.assertEqual(rows[0]["status"], "BLOCKED")
         self.assertNotIn("phase.merged", event_types)
+
+    def test_stale_pr_head_retries_then_merges(self):
+        # The first merge-preflight views see the pre-close sha (GitHub API
+        # lag); the retry loop should absorb it and still merge.
+        result, rows, event_types = self._run_merge_preflight_case(
+            {
+                "GH_STALE_OID_VIEWS": "2",
+                "AGENT_RUNNER_MERGE_RETRY_SECONDS": "0",
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("retrying in 0s", result.stderr)
+        self.assertEqual(rows[0]["status"], "COMPLETE")
+        self.assertIn("phase.merged", event_types)
+
+    def test_stale_pr_head_blocks_after_retries_exhausted_then_unblocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            gh_state = root / "gh-state"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, phase_count=1, status="CLOSING")
+            write_config(repo, script, auto_commit=True, merge_on_close=True)
+            commit_all(repo)
+            add_origin_remote(repo, root)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            seed_closing_published_phase(repo, home)
+            base_env = {
+                "TRACE_DIR": str(trace),
+                "GH_STATE_DIR": str(gh_state),
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "AGENT_RUNNER_MERGE_RETRY_SECONDS": "0",
+            }
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={**base_env, "GH_STALE_OID_VIEWS": "10"},
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("after 5 attempts", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "BLOCKED")
+            self.assertEqual(rows[0]["blocked_from"], "MERGING")
+
+            unblock = run_cli(repo, home, "unblock", extra_env=base_env)
+            self.assertEqual(unblock.returncode, 0, unblock.stderr)
+            self.assertIn("unblocked to MERGING", unblock.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "MERGING")
+            self.assertIsNone(rows[0]["blocked_from"])
+
+            # The stale window has passed; resuming should merge without
+            # re-running the closer.
+            resume = run_cli(repo, home, "run", extra_env=base_env)
+
+            self.assertEqual(resume.returncode, 0, resume.stderr)
+            self.assertIn("resuming merge", resume.stderr)
+            self.assertIn("plan complete", resume.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "COMPLETE")
+            with connect_db(home) as db:
+                close_jobs = db.execute(
+                    "SELECT COUNT(*) AS n FROM jobs WHERE type = 'CLOSE_PHASE'"
+                ).fetchone()["n"]
+                event_types = [
+                    row["event_type"]
+                    for row in db.execute(
+                        "SELECT event_type FROM events ORDER BY id"
+                    ).fetchall()
+                ]
+            self.assertEqual(close_jobs, 1)
+            self.assertIn("phase.unblocked", event_types)
+            self.assertIn("phase.merged", event_types)
+
+    def test_unblock_without_blocked_phase_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_plan(repo, phase_count=1, status="CLOSING")
+            write_config(repo, script)
+            commit_all(repo)
+            seed_closing_published_phase(repo, home)
+
+            result = run_cli(repo, home, "unblock")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("no BLOCKED phase", result.stderr)
 
     def test_close_without_merge_on_close_stops_before_next_phase(self):
         with tempfile.TemporaryDirectory() as tmp:
