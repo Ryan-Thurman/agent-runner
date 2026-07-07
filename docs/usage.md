@@ -43,6 +43,7 @@ flips and never interrupt a running agent process.
 From this repository, run the CLI directly:
 
 ```sh
+python3 -m agent_runner --version
 python3 -m agent_runner status
 python3 -m agent_runner run
 ```
@@ -50,6 +51,7 @@ python3 -m agent_runner run
 The executable shim also works from this checkout:
 
 ```sh
+./agent-runner --version
 ./agent-runner status
 ./agent-runner run
 ```

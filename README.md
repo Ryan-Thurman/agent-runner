@@ -18,6 +18,7 @@ write flags to coder/closer jobs and read-only flags to reviewer jobs.
 Run from this checkout:
 
 ```sh
+python3 -m agent_runner --version
 python3 -m agent_runner status
 python3 -m agent_runner run
 ```
@@ -69,6 +70,7 @@ from phase body hashes so closeout can update the plan without superseding it.
 
 ## Commands
 
+- `--version`: print the installed `agent-runner` package version and exit.
 - `run`: register or resume the plan, reap orphaned `RUNNING` jobs, and run the
   next job derived from SQLite phase status.
 - `status`: print human status to stderr and JSON state to stdout.

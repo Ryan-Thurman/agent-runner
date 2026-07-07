@@ -118,6 +118,18 @@ def _strip_sample_comments(text: str) -> str:
 
 
 class Phase1CliTests(unittest.TestCase):
+    def test_version_flag_prints_package_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp) / "cwd"
+            home = Path(tmp) / "home"
+            cwd.mkdir()
+
+            result = run_cli(cwd, home, "--version")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "agent-runner 0.1.0\n")
+            self.assertEqual(result.stderr, "")
+
     def test_init_creates_home_layout_and_refuses_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
