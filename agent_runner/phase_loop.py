@@ -25,8 +25,10 @@ from .storage import (
 )
 
 
+REVIEW_FINDING_BUCKETS = ("blocking", "shouldFix", "nitpick")
 REVIEW_RESOLVED_INSTRUCTION = (
-    "Verify these blocking issues are resolved; only new Blocking findings may block."
+    "Verify all prior requested updates are resolved; then report any remaining "
+    "or new requested updates grouped by finding bucket."
 )
 REVIEW_FIX_ATTEMPT_LIMIT = 1
 
@@ -829,6 +831,8 @@ def _run_review(
         )
 
     status = review["status"]
+    findings = review["findings"]
+    requested_updates = _review_requested_updates(findings)
     blocking_issues = review["blockingIssues"]
     if status == "BLOCKED":
         update_phase_status(connection, phase["id"], "BLOCKED")
@@ -840,14 +844,18 @@ def _run_review(
             job_id=result.job_id,
             event_type="phase.blocked",
             message=f"review blocked phase {phase['phase_number']}",
-            data={"summary": review["summary"], "blockingIssues": blocking_issues},
+            data={
+                "summary": review["summary"],
+                "findings": findings,
+                "blockingIssues": blocking_issues,
+            },
         )
         return PhaseLoopResult(
             f"phase {phase['phase_number']} BLOCKED by reviewer: {review['summary']}",
             blocked=True,
         )
 
-    if blocking_issues:
+    if requested_updates:
         review_fix_attempts = _review_fix_attempt_count(connection, phase["id"])
         if review_fix_attempts >= REVIEW_FIX_ATTEMPT_LIMIT:
             return _block_review_fix_limit_exhausted(
@@ -855,7 +863,7 @@ def _run_review(
                 project_id=project_id,
                 plan_id=plan_id,
                 phase=phase,
-                blocker_summary=_review_blocker_summary(blocking_issues),
+                blocker_summary=_review_finding_summary(findings),
                 source_job=result,
                 review_fix_attempts=review_fix_attempts,
             )
@@ -869,9 +877,11 @@ def _run_review(
             repo_root=repo_root,
             trigger="review",
             prompt=_review_fix_prompt(
-                parsed_phase, blocking_issues, require_publish=config.auto_commit
+                parsed_phase,
+                review,
+                require_publish=config.auto_commit,
             ),
-            blocker_summary=_review_blocker_summary(blocking_issues),
+            blocker_summary=_review_finding_summary(findings),
             source_job=result,
         )
 
@@ -886,6 +896,7 @@ def _run_review(
         message=f"review passed for phase {phase['phase_number']}; moved to CLOSING",
         data={
             "summary": review["summary"],
+            "findings": review["findings"],
             "nonBlockingIssues": review["nonBlockingIssues"],
         },
     )
@@ -2829,6 +2840,11 @@ def _review_prompt(
         "{\n"
         '  "status": "PASS | CHANGES_REQUESTED | BLOCKED",\n'
         '  "summary": "string",\n'
+        '  "findings": {\n'
+        '    "blocking": [],\n'
+        '    "shouldFix": [],\n'
+        '    "nitpick": []\n'
+        "  },\n"
         '  "blockingIssues": [],\n'
         '  "nonBlockingIssues": [],\n'
         '  "recommendedFixPrompt": "string"\n'
@@ -2844,12 +2860,16 @@ def _review_prompt(
         "- Each issue should identify severity, affected file/line when "
         "applicable, evidence from the diff or checks, and the concrete required "
         "change.\n"
-        "- Return PASS only when there are no blocking issues.\n\n"
-        "Only Blocking findings belong in blockingIssues. Should Fix and Nice to "
-        "Have findings belong in nonBlockingIssues and are not gating.\n\n"
+        "- Group every requested update in findings by bucket: blocking for "
+        "must-fix correctness or safety issues, shouldFix for expected phase "
+        "cleanup, and nitpick for small requested polish.\n"
+        "- Return PASS only when every findings bucket is empty.\n"
+        "- Return CHANGES_REQUESTED when any findings bucket has entries.\n"
+        "- For migration compatibility, also mirror blocking findings to "
+        "blockingIssues and shouldFix/nitpick findings to nonBlockingIssues.\n\n"
         "Make one comprehensive pass over the phase, diff, and check output. "
-        "For the first review, list every blocking change you can identify in "
-        "blockingIssues instead of saving issues for later rounds.\n\n"
+        "For the first review, list every requested update you can identify "
+        "instead of saving issues for later rounds.\n\n"
         f"{previous_review}"
         "Phase body:\n"
         f"{parsed_phase.content}\n\n"
@@ -2919,25 +2939,36 @@ def _checks_fix_prompt(
 
 
 def _review_fix_prompt(
-    phase: ParsedPhase, blocking_issues: list[Any], *, require_publish: bool
+    phase: ParsedPhase, review: dict[str, Any], *, require_publish: bool
 ) -> str:
     publish = _publish_instructions(require_publish, update_existing=True)
+    recommended_fix_prompt = review["recommendedFixPrompt"].strip()
+    recommendation = ""
+    if recommended_fix_prompt:
+        recommendation = (
+            "\nReviewer recommended fix prompt:\n"
+            "```text\n"
+            f"{recommended_fix_prompt}\n"
+            "```\n"
+        )
     return (
-        "Fix only the listed review blocking issues for this phase.\n\n"
+        "Fix only the listed review requested updates for this phase.\n\n"
         f"Phase {phase.phase_number}: {phase.title}\n\n"
         "Rules:\n"
-        "- Fix only the listed blocking issues below.\n"
-        "- Do not fix non-blocking review notes unless required by a listed blocker.\n"
+        "- Fix only the requested updates listed below.\n"
+        "- Address every listed bucket in this pass; the runner allows only one "
+        "review-triggered FIX and one re-review before blocking.\n"
         "- Do not start future phases.\n"
         "- Avoid unrelated refactors.\n"
         "- Add or update tests when behavior changes.\n\n"
         f"{publish}"
         "Phase body:\n"
         f"{phase.content}\n\n"
-        "Blocking issues:\n"
+        "Requested updates by bucket:\n"
         "```json\n"
-        f"{json.dumps(blocking_issues, indent=2, sort_keys=True)}\n"
+        f"{json.dumps(review['findings'], indent=2, sort_keys=True)}\n"
         "```"
+        f"{recommendation}"
     )
 
 
@@ -3144,8 +3175,15 @@ def _checks_blocker_summary(checks: JobResult) -> str:
     return "checks failed"
 
 
-def _review_blocker_summary(blocking_issues: list[Any]) -> str:
-    return _single_line(json.dumps(blocking_issues, sort_keys=True), limit=240)
+def _review_requested_updates(findings: dict[str, list[Any]]) -> list[Any]:
+    updates = []
+    for issues in findings.values():
+        updates.extend(issues)
+    return updates
+
+
+def _review_finding_summary(findings: dict[str, list[Any]]) -> str:
+    return _single_line(json.dumps(findings, sort_keys=True), limit=240)
 
 
 def _single_line(text: str, *, limit: int) -> str:
@@ -3219,25 +3257,74 @@ def _validate_review_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(summary, str):
         raise JobError("review JSON summary must be a string")
 
-    blocking_issues = payload.get("blockingIssues")
-    if not isinstance(blocking_issues, list):
-        raise JobError("review JSON blockingIssues must be a list")
-
-    non_blocking_issues = payload.get("nonBlockingIssues")
-    if not isinstance(non_blocking_issues, list):
-        raise JobError("review JSON nonBlockingIssues must be a list")
-
     recommended_fix_prompt = payload.get("recommendedFixPrompt")
     if not isinstance(recommended_fix_prompt, str):
         raise JobError("review JSON recommendedFixPrompt must be a string")
 
+    findings = _normalize_review_findings(payload)
+    requested_updates = _review_requested_updates(findings)
+    if status == "PASS" and requested_updates:
+        status = "CHANGES_REQUESTED"
+    if status == "CHANGES_REQUESTED" and not requested_updates:
+        raise JobError("review JSON CHANGES_REQUESTED requires at least one finding")
+
+    blocking_issues = list(findings.get("blocking", []))
+    non_blocking_issues = []
+    for bucket, issues in findings.items():
+        if bucket != "blocking":
+            non_blocking_issues.extend(issues)
+
     return {
         "status": status,
         "summary": summary,
+        "findings": findings,
         "blockingIssues": blocking_issues,
         "nonBlockingIssues": non_blocking_issues,
         "recommendedFixPrompt": recommended_fix_prompt,
     }
+
+
+def _normalize_review_findings(payload: dict[str, Any]) -> dict[str, list[Any]]:
+    findings = {bucket: [] for bucket in REVIEW_FINDING_BUCKETS}
+    saw_findings = False
+
+    raw_findings = payload.get("findings")
+    if raw_findings is not None:
+        saw_findings = True
+        if not isinstance(raw_findings, dict):
+            raise JobError("review JSON findings must be an object")
+        for bucket, issues in raw_findings.items():
+            if not isinstance(bucket, str):
+                raise JobError("review JSON findings bucket names must be strings")
+            if not isinstance(issues, list):
+                raise JobError(f"review JSON findings.{bucket} must be a list")
+            findings.setdefault(bucket, [])
+            findings[bucket].extend(issues)
+
+    if "blockingIssues" in payload:
+        saw_findings = True
+        blocking_issues = payload["blockingIssues"]
+        if not isinstance(blocking_issues, list):
+            raise JobError("review JSON blockingIssues must be a list")
+        _extend_unique(findings["blocking"], blocking_issues)
+    elif not saw_findings:
+        raise JobError("review JSON findings or legacy blockingIssues must be present")
+
+    if "nonBlockingIssues" in payload:
+        non_blocking_issues = payload["nonBlockingIssues"]
+        if not isinstance(non_blocking_issues, list):
+            raise JobError("review JSON nonBlockingIssues must be a list")
+        _extend_unique(findings["shouldFix"], non_blocking_issues)
+    elif raw_findings is None:
+        raise JobError("review JSON findings or legacy nonBlockingIssues must be present")
+
+    return findings
+
+
+def _extend_unique(target: list[Any], values: list[Any]) -> None:
+    for value in values:
+        if value not in target:
+            target.append(value)
 
 
 def _toolbelt_installed(repo_root: Path) -> bool:
