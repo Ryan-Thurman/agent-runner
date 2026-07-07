@@ -559,6 +559,19 @@ def _run_review(
             blocked=True,
         )
 
+    if config.auto_commit:
+        _post_review_to_github(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=phase,
+            parsed_phase=parsed_phase,
+            review=review,
+            source_job=result,
+            repo_root=repo_root,
+            log_dir=log_dir,
+        )
+
     status = review["status"]
     blocking_issues = review["blockingIssues"]
     if status == "BLOCKED":
