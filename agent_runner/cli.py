@@ -19,7 +19,12 @@ from .errors import AgentRunnerError, ConfigError, GitRepoError, LockError
 from .git import find_git_root
 from .lock import ProjectLock, SignalLockRelease, pid_is_alive, reset_project_lock
 from .paths import ensure_runner_layout
-from .phase_loop import RESTART_COUNT_ENV, restart_count, run_phase_loop
+from .phase_loop import (
+    RESTART_COUNT_ENV,
+    extract_pr_number,
+    restart_count,
+    run_phase_loop,
+)
 from .plan import parse_plan_file, register_or_resume_plan
 from .storage import (
     PHASE_STATUSES,
@@ -494,9 +499,15 @@ def _tail_lines(path: Path, line_count: int) -> list[str]:
 
 def _format_publish_state(phase: dict) -> str:
     details = []
-    for key in ("publish_mode", "branch_name", "pr_url", "published_sha"):
+    for key in ("publish_mode", "branch_name", "published_sha"):
         if phase.get(key):
             details.append(f"{key}={phase[key]}")
+    if phase.get("pr_url"):
+        pr_number = extract_pr_number(phase["pr_url"])
+        if pr_number is None:
+            details.append(f"pr={phase['pr_url']}")
+        else:
+            details.append(f"pr=#{pr_number} ({phase['pr_url']})")
     return f" ({', '.join(details)})" if details else ""
 
 

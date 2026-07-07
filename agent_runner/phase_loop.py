@@ -57,6 +57,22 @@ class PublishMetadata:
     published_sha: str
 
 
+def extract_pr_number(pr_url: Optional[str]) -> Optional[str]:
+    if not pr_url:
+        return None
+    match = re.search(r"/pull/([0-9]+)/?$", pr_url)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def format_pr_url(pr_url: str) -> str:
+    pr_number = extract_pr_number(pr_url)
+    if pr_number is None:
+        return pr_url
+    return f"PR #{pr_number} ({pr_url})"
+
+
 def runner_is_self_hosted(repo_root: Path) -> bool:
     package_dir = Path(__file__).resolve().parent
     try:
@@ -183,6 +199,49 @@ def run_phase_loop(
         )
 
     raise JobError(f"unsupported phase status: {status}")
+
+
+def _record_phase_published(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    metadata: PublishMetadata,
+    job_id: Optional[int],
+) -> None:
+    pr_number = extract_pr_number(metadata.pr_url)
+    if pr_number is not None:
+        print(
+            f"[agent-runner] phase {phase['phase_number']} PR #{pr_number} opened: "
+            f"{metadata.pr_url}",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print(
+            f"[agent-runner] phase {phase['phase_number']} PR opened: "
+            f"{metadata.pr_url}",
+            file=sys.stderr,
+            flush=True,
+        )
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        job_id=job_id,
+        event_type="phase.published",
+        message=(
+            f"phase {phase['phase_number']} published to "
+            f"{format_pr_url(metadata.pr_url)}"
+        ),
+        data={
+            "branchName": metadata.branch_name,
+            "prUrl": metadata.pr_url,
+            "publishedSha": metadata.published_sha,
+        },
+    )
 
 
 def _run_implement(
@@ -335,22 +394,13 @@ def _run_checks(
                 pr_url=metadata.pr_url,
                 published_sha=metadata.published_sha,
             )
-            record_event(
+            _record_phase_published(
                 connection,
                 project_id=project_id,
                 plan_id=plan_id,
-                phase_id=phase["id"],
                 job_id=result.job_id,
-                event_type="phase.published",
-                message=(
-                    f"phase {phase['phase_number']} published to PR "
-                    f"{metadata.pr_url}"
-                ),
-                data={
-                    "branchName": metadata.branch_name,
-                    "prUrl": metadata.pr_url,
-                    "publishedSha": metadata.published_sha,
-                },
+                phase=phase,
+                metadata=metadata,
             )
         update_phase_status(connection, phase["id"], "REVIEWING")
         record_event(
@@ -418,21 +468,13 @@ def _run_review(
                     pr_url=metadata.pr_url,
                     published_sha=metadata.published_sha,
                 )
-                record_event(
+                _record_phase_published(
                     connection,
                     project_id=project_id,
                     plan_id=plan_id,
-                    phase_id=phase["id"],
-                    event_type="phase.published",
-                    message=(
-                        f"phase {phase['phase_number']} published to PR "
-                        f"{metadata.pr_url}"
-                    ),
-                    data={
-                        "branchName": metadata.branch_name,
-                        "prUrl": metadata.pr_url,
-                        "publishedSha": metadata.published_sha,
-                    },
+                    job_id=None,
+                    phase=phase,
+                    metadata=metadata,
                 )
         except JobError as exc:
             return _block_phase_after_publish_failure(
@@ -720,7 +762,7 @@ def _resume_merge(
         )
     print(
         f"[agent-runner] resuming merge for phase {phase['phase_number']} "
-        f"PR {phase['pr_url']}",
+        f"{format_pr_url(phase['pr_url'])}",
         file=sys.stderr,
         flush=True,
     )
@@ -750,7 +792,7 @@ def _finalize_close_phase(
     if config.merge_on_close:
         try:
             _git_push_current_branch(repo_root)
-            _merge_phase_pr(repo_root, config, phase)
+            merged_now = _merge_phase_pr(repo_root, config, phase)
         except JobError as exc:
             update_phase_status(connection, phase["id"], "BLOCKED")
             record_event(
@@ -770,6 +812,17 @@ def _finalize_close_phase(
                 f"phase {phase['phase_number']} BLOCKED after CLOSE_PHASE merge: {exc}",
                 blocked=True,
             )
+        if merged_now:
+            pr_number = extract_pr_number(phase["pr_url"])
+            pr_ref = (
+                f"PR #{pr_number}" if pr_number is not None else phase["pr_url"]
+            )
+            print(
+                f"[agent-runner] phase {phase['phase_number']} {pr_ref} merged "
+                f"({config.merge_strategy})",
+                file=sys.stderr,
+                flush=True,
+            )
         record_event(
             connection,
             project_id=project_id,
@@ -778,7 +831,8 @@ def _finalize_close_phase(
             job_id=job_id,
             event_type="phase.merged",
             message=(
-                f"merged phase {phase['phase_number']} PR {phase['pr_url']} "
+                f"merged phase {phase['phase_number']} "
+                f"{format_pr_url(phase['pr_url'])} "
                 f"({config.merge_strategy})"
             ),
             data={"prUrl": phase["pr_url"], "strategy": config.merge_strategy},
@@ -813,8 +867,8 @@ def _finalize_close_phase(
             )
         if not config.merge_on_close:
             return PhaseLoopResult(
-                f"phase {phase['phase_number']} complete; merge PR "
-                f"{phase['pr_url']} before starting phase "
+                f"phase {phase['phase_number']} complete; merge "
+                f"{format_pr_url(phase['pr_url'])} before starting phase "
                 f"{next_phase['phase_number']} (or set mergeOnClose=true)"
             )
         if _should_self_restart(repo_root):
@@ -1442,7 +1496,7 @@ def _ensure_previous_phase_merged(
 
 def _merge_phase_pr(
     repo_root: Path, config: RunnerConfig, phase: sqlite3.Row
-) -> None:
+) -> bool:
     pr_url = phase["pr_url"]
     if not pr_url:
         raise JobError("phase has no stored PR URL to merge")
@@ -1457,12 +1511,15 @@ def _merge_phase_pr(
         fields="url,state",
     )
     if payload.get("state") == "MERGED":
+        pr_number = extract_pr_number(pr_url)
+        pr_label = f"PR #{pr_number}" if pr_number is not None else pr_url
         print(
-            f"[agent-runner] phase PR {pr_url} is already merged; skipping merge",
+            f"[agent-runner] phase {pr_label} already merged; "
+            "skipping merge",
             file=sys.stderr,
             flush=True,
         )
-        return
+        return False
 
     _verify_pr_ready_to_merge(repo_root, phase, pr_url=pr_url)
     try:
@@ -1492,6 +1549,7 @@ def _merge_phase_pr(
             f"gh pr merge did not merge {pr_url}; PR state is "
             f"{state or 'unknown'}"
         )
+    return True
 
 
 def _merge_verify_retry_seconds() -> float:

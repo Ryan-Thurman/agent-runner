@@ -354,6 +354,7 @@ class Phase2StorageTests(unittest.TestCase):
                     retry_count=1,
                     publish_mode="work-branch",
                     branch_name="phase-2-sqlite-state",
+                    pr_url="https://github.com/example/project/pull/12",
                     published_sha="abc123",
                 )
                 record_event(
@@ -371,6 +372,10 @@ class Phase2StorageTests(unittest.TestCase):
             self.assertNotIn("running jobs:", result.stderr)
             self.assertIn("phase 2: REVIEWING retries=1", result.stderr)
             self.assertIn("branch_name=phase-2-sqlite-state", result.stderr)
+            self.assertIn(
+                "pr=#12 (https://github.com/example/project/pull/12)",
+                result.stderr,
+            )
             payload = json.loads(result.stdout)
             self.assertEqual(payload["runningJobs"], [])
             self.assertEqual(payload["plans"][0]["path"], "docs/plan.md")
