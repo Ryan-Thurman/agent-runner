@@ -462,6 +462,18 @@ def _run_close_phase(
     config: RunnerConfig,
     repo_root: Path,
 ) -> PhaseLoopResult:
+    if config.auto_commit:
+        try:
+            _verify_reviewed_head_for_close(repo_root, phase)
+        except JobError as exc:
+            return _block_phase_before_close(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase=phase,
+                message=str(exc),
+            )
+
     profile = _profile_for_role(config, "coder")
     log_dir = Path(phase["log_dir"])
     result = run_agent_job(
@@ -1009,6 +1021,33 @@ def _verify_stored_phase_pr(repo_root: Path, phase: sqlite3.Row) -> PublishMetad
     )
 
 
+def _verify_reviewed_head_for_close(repo_root: Path, phase: sqlite3.Row) -> None:
+    if not _phase_has_publish_metadata(phase):
+        raise JobError(
+            "stored phase PR metadata is missing; rerun review after publishing "
+            "the branch before closing"
+        )
+
+    dirty_paths = _git_dirty_paths(repo_root)
+    if dirty_paths:
+        paths = ", ".join(sorted(dirty_paths)[:5])
+        suffix = "" if len(dirty_paths) <= 5 else ", ..."
+        raise JobError(
+            "reviewed phase cannot close while the worktree has unreviewed "
+            f"changes: {paths}{suffix}"
+        )
+
+    metadata = _verify_stored_phase_pr(repo_root, phase)
+    current_sha = _git_head_sha(repo_root)
+    if current_sha != metadata.published_sha:
+        raise JobError(
+            "current HEAD "
+            f"{current_sha[:12]} does not match reviewed published SHA "
+            f"{metadata.published_sha[:12]}; rerun review after publishing the "
+            "latest commit before closing"
+        )
+
+
 def _validate_pr_metadata(
     payload: dict[str, Any],
     *,
@@ -1175,6 +1214,29 @@ def _block_phase_after_publish_failure(
     )
     return PhaseLoopResult(
         f"phase {phase['phase_number']} BLOCKED before REVIEW: {message}",
+        blocked=True,
+    )
+
+
+def _block_phase_before_close(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    message: str,
+) -> PhaseLoopResult:
+    update_phase_status(connection, phase["id"], "BLOCKED")
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        event_type="phase.blocked",
+        message=f"close preflight failed for phase {phase['phase_number']}: {message}",
+    )
+    return PhaseLoopResult(
+        f"phase {phase['phase_number']} BLOCKED before CLOSE_PHASE: {message}",
         blocked=True,
     )
 

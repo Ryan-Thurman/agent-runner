@@ -10,7 +10,13 @@ from typing import Optional
 
 from agent_runner.config import SAMPLE_CONFIG, project_slug, strip_json_comments
 from agent_runner.plan import parse_plan_file
-from agent_runner.storage import connect_db
+from agent_runner.storage import (
+    connect_db,
+    create_phase,
+    create_plan,
+    get_or_create_project,
+    phase_log_dir,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -173,6 +179,7 @@ def write_fake_gh(path: Path) -> None:
     path.write_text(
         r"""#!/usr/bin/env python3
 import json
+import os
 import subprocess
 import sys
 
@@ -181,13 +188,18 @@ branch = subprocess.check_output(
     ["git", "branch", "--show-current"], text=True
 ).strip()
 sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+branch = os.environ.get("GH_HEAD_REF_NAME", branch)
+sha = os.environ.get("GH_HEAD_REF_OID", sha)
 
 if args[:2] == ["pr", "view"]:
+    pr_url = "https://example.test/pull/1"
+    if len(args) > 2 and not args[2].startswith("--"):
+        pr_url = args[2]
     print(json.dumps({
-        "url": "https://example.test/pull/1",
+        "url": pr_url,
         "headRefName": branch,
         "headRefOid": sha,
-        "state": "OPEN",
+        "state": os.environ.get("GH_PR_STATE", "OPEN"),
     }))
     raise SystemExit(0)
 
@@ -201,6 +213,43 @@ raise SystemExit(2)
         encoding="utf-8",
     )
     path.chmod(0o755)
+
+
+def seed_closing_published_phase(repo: Path, home: Path) -> str:
+    published_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+    ).strip()
+    parsed_plan = parse_plan_file(repo, "docs/plan.md")
+    parsed_phase = parsed_plan.phases[0]
+
+    with connect_db(home) as db:
+        project = get_or_create_project(db, slug=project_slug(repo), repo_path=repo)
+        plan = create_plan(
+            db,
+            project_id=project["id"],
+            path=parsed_plan.path,
+            content_hash=parsed_plan.content_hash,
+        )
+        create_phase(
+            db,
+            project_id=project["id"],
+            plan_id=plan["id"],
+            phase_number=parsed_phase.phase_number,
+            title=parsed_phase.title,
+            content_hash=parsed_phase.content_hash,
+            status="CLOSING",
+            publish_mode="pr",
+            branch_name="dev/test-phase",
+            pr_url="https://example.test/pull/1",
+            published_sha=published_sha,
+            log_dir=phase_log_dir(
+                home / "logs",
+                project_slug=project_slug(repo),
+                plan_path=parsed_plan.path,
+                phase_number=parsed_phase.phase_number,
+            ),
+        )
+    return published_sha
 
 
 def phase_rows(home: Path, repo: Path):
@@ -370,15 +419,32 @@ class Phase7CloseTests(unittest.TestCase):
             repo = root / "repo"
             home = root / "home"
             trace = root / "trace"
+            bin_dir = root / "bin"
             script = root / "phase7_agent.py"
             repo.mkdir()
+            bin_dir.mkdir()
             git_init(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
             write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
             write_plan(repo, phase_count=2, status="CLOSING")
             write_config(repo, script, auto_commit=True)
             commit_all(repo)
+            seed_closing_published_phase(repo, home)
 
-            result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
 
             self.assertEqual(result.returncode, 1)
             self.assertIn("BLOCKED after IMPLEMENT failure", result.stderr)
@@ -394,8 +460,58 @@ class Phase7CloseTests(unittest.TestCase):
                     JOIN phases ON phases.id = jobs.phase_id
                     ORDER BY jobs.id
                     """
-                ).fetchall()
+            ).fetchall()
             self.assertIn((2, "IMPLEMENT"), [(row["phase_number"], row["type"]) for row in jobs])
+
+    def test_auto_commit_blocks_close_when_head_moved_after_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="CLOSING")
+            write_config(repo, script, auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            published_sha = seed_closing_published_phase(repo, home)
+            (repo / "unreviewed.txt").write_text("unreviewed\n", encoding="utf-8")
+            commit_all(repo, "unreviewed change")
+            head_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_HEAD_REF_OID": published_sha,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("BLOCKED before CLOSE_PHASE", result.stderr)
+            self.assertIn(head_sha[:12], result.stderr)
+            self.assertIn(published_sha[:12], result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "BLOCKED")
+            self.assertFalse((trace / "close-argv.json").exists())
+            with connect_db(home) as db:
+                jobs = db.execute("SELECT type FROM jobs ORDER BY id").fetchall()
+            self.assertEqual([job["type"] for job in jobs], [])
 
 
 if __name__ == "__main__":
