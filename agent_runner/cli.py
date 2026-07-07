@@ -7,7 +7,14 @@ from pathlib import Path
 from typing import Optional
 
 from . import __version__
-from .config import CONFIG_FILENAME, SAMPLE_CONFIG, load_config, project_slug
+from .config import (
+    CONFIG_FILENAME,
+    PLACEHOLDER_CHECKS,
+    detect_default_checks,
+    load_config,
+    project_slug,
+    sample_config_for_checks,
+)
 from .errors import AgentRunnerError, ConfigError, GitRepoError, LockError
 from .git import find_git_root
 from .lock import ProjectLock, SignalLockRelease, pid_is_alive, reset_project_lock
@@ -111,9 +118,22 @@ def cmd_init(args: argparse.Namespace) -> int:
     config_path = repo_root / CONFIG_FILENAME
     if config_path.exists():
         raise ConfigError(f"{CONFIG_FILENAME} already exists at {config_path}")
-    config_path.write_text(SAMPLE_CONFIG, encoding="utf-8")
+    checks = detect_default_checks(repo_root)
+    config_path.write_text(sample_config_for_checks(checks), encoding="utf-8")
     print(f"[agent-runner] initialized runner home: {home}", file=sys.stderr)
     print(f"[agent-runner] wrote sample config: {config_path}", file=sys.stderr)
+    if checks == PLACEHOLDER_CHECKS:
+        print(
+            "[agent-runner] checks must be replaced before the first run; "
+            "the generated entry is a failing placeholder",
+            file=sys.stderr,
+        )
+    print(
+        "[agent-runner] next: review planPath/checks in .agent-runner.json",
+        file=sys.stderr,
+    )
+    print("[agent-runner] next: write docs/plan.md", file=sys.stderr)
+    print("[agent-runner] next: run `autorun run`", file=sys.stderr)
     return 0
 
 

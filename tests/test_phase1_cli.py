@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Optional
 from unittest import mock
 
-from agent_runner.config import SAMPLE_CONFIG, load_config, project_slug
+from agent_runner.config import (
+    DEFAULT_CHECKS,
+    NODE_CHECKS,
+    PLACEHOLDER_CHECKS,
+    SAMPLE_CONFIG,
+    load_config,
+    project_slug,
+)
 from agent_runner.errors import ConfigError, GitRepoError, LockError
 from agent_runner.git import find_git_root
 from agent_runner.lock import ProjectLock
@@ -96,7 +103,9 @@ else:
         }
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
+    data["roleFallbacks"] = {}
     data["autoCommit"] = False
+    data["mergeOnClose"] = False
     if overrides:
         data.update(overrides)
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -146,13 +155,145 @@ class Phase1CliTests(unittest.TestCase):
             self.assertTrue(config_path.exists())
             self.assertIn("// Path to the markdown plan", config_path.read_text())
             config = load_config(repo)
-            self.assertEqual(config.roles["coder"], "claude")
-            self.assertEqual(config.agents["claude"].prompt_prefix, "")
+            self.assertEqual(config.roles["coder"], "codex")
+            self.assertEqual(config.roles["reviewer"], "claude-opus")
+            self.assertEqual(config.agents["claude-opus"].prompt_prefix, "")
+            self.assertEqual(config.checks, PLACEHOLDER_CHECKS)
+            self.assertEqual(config.warnings, [])
+            self.assertIn(
+                "checks must be replaced before the first run",
+                result.stderr,
+            )
+            self.assertIn(
+                "next: review planPath/checks in .agent-runner.json",
+                result.stderr,
+            )
+            self.assertIn("next: write docs/plan.md", result.stderr)
+            self.assertIn("next: run `autorun run`", result.stderr)
 
             second = run_cli(repo, home, "init")
 
             self.assertNotEqual(second.returncode, 0)
             self.assertIn("already exists", second.stderr)
+
+    def test_autorun_symlink_works_from_another_git_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target_repo = Path(tmp) / "target"
+            home = Path(tmp) / "home"
+            bin_dir = Path(tmp) / "bin"
+            target_repo.mkdir()
+            bin_dir.mkdir()
+            git_init(target_repo)
+            symlink = bin_dir / "autorun"
+            symlink.symlink_to(ROOT / "autorun")
+            env = os.environ.copy()
+            env["AGENT_RUNNER_HOME"] = str(home)
+
+            result = subprocess.run(
+                [str(symlink), "status"],
+                cwd=target_repo,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("[agent-runner] project:", result.stderr)
+            self.assertIn("no plan registered yet", result.stderr)
+
+    def test_init_detects_python_package_and_loads_without_warnings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            repo.mkdir()
+            git_init(repo)
+            (repo / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+
+            result = run_cli(repo, home, "init")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = load_config(repo)
+            self.assertEqual(config.checks, DEFAULT_CHECKS)
+            self.assertEqual(config.warnings, [])
+            self.assertNotIn("placeholder", result.stderr)
+
+    def test_init_detects_package_json_and_loads_without_warnings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            repo.mkdir()
+            git_init(repo)
+            (repo / "package.json").write_text('{"scripts":{"test":"node --test"}}\n')
+
+            result = run_cli(repo, home, "init")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = load_config(repo)
+            self.assertEqual(config.checks, NODE_CHECKS)
+            self.assertEqual(config.warnings, [])
+
+    def test_init_detects_tests_directory_with_python_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            tests_dir = repo / "tests"
+            tests_dir.mkdir(parents=True)
+            git_init(repo)
+            (tests_dir / "test_demo.py").write_text("def test_placeholder():\n    pass\n")
+
+            result = run_cli(repo, home, "init")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = load_config(repo)
+            self.assertEqual(config.checks, DEFAULT_CHECKS)
+            self.assertEqual(config.warnings, [])
+
+    def test_init_placeholder_check_loads_and_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            home = Path(tmp) / "home"
+            repo.mkdir()
+            git_init(repo)
+            env = os.environ.copy()
+            env["AGENT_RUNNER_HOME"] = str(home)
+
+            result = subprocess.run(
+                [str(ROOT / "autorun"), "init"],
+                cwd=repo,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = load_config(repo)
+            self.assertEqual(config.checks, PLACEHOLDER_CHECKS)
+            self.assertEqual(config.warnings, [])
+            check = subprocess.run(
+                config.checks[0],
+                cwd=repo,
+                shell=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(check.returncode, 0)
+            self.assertIn("replace the placeholder checks entry", check.stderr)
+
+    def test_generated_claude_profiles_pin_models(self):
+        data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+
+        claude_profiles = [
+            profile
+            for profile in data["agents"].values()
+            if profile["command"] == "claude"
+        ]
+
+        self.assertTrue(claude_profiles)
+        for profile in claude_profiles:
+            self.assertIn("--model", profile["promptArgs"])
 
     def test_run_outside_git_and_missing_config_fail_clearly(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,14 +372,14 @@ class Phase1CliTests(unittest.TestCase):
                 load_config(repo)
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
-            del data["agents"]["claude"]["readOnlyFlags"]
+            del data["agents"]["claude-opus"]["readOnlyFlags"]
             (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
 
             with self.assertRaisesRegex(ConfigError, "missing required field"):
                 load_config(repo)
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
-            data["agents"]["claude"]["promptPrefix"] = ["not", "a", "string"]
+            data["agents"]["claude-opus"]["promptPrefix"] = ["not", "a", "string"]
             (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
 
             with self.assertRaisesRegex(ConfigError, "promptPrefix"):
@@ -266,7 +407,7 @@ class Phase1CliTests(unittest.TestCase):
             self.assertEqual(config.role_fallbacks, {"reviewer": ["antigravity"]})
             self.assertEqual(config.warnings, [])
             self.assertEqual(config.base_branch, "main")
-            self.assertFalse(config.merge_on_close)
+            self.assertTrue(config.merge_on_close)
             self.assertEqual(config.merge_strategy, "squash")
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
@@ -278,7 +419,7 @@ class Phase1CliTests(unittest.TestCase):
             self.assertEqual(config.warnings, [])
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
-            data["roles"]["planner"] = "claude"
+            data["roles"]["planner"] = "claude-opus"
             data["roleFallbacks"] = {"planner": ["antigravity"]}
             (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
 

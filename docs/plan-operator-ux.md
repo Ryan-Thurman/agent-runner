@@ -82,7 +82,8 @@ Acceptance Criteria:
   pass.
 
 ## Phase 2: autorun shim usable from any repo, with a ready default init config
-Status: PENDING
+Status: COMPLETE
+Evidence: c21275b; review PASS; python3 -m compileall -q .; python3 -m unittest discover -s tests -v
 
 Add a short `autorun` entry point that works from any repository and make
 `init` write a config that runs with minimal editing.

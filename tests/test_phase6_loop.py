@@ -96,6 +96,7 @@ def write_config(
         }
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
+    data["roleFallbacks"] = {}
     if coder_args is not None:
         data["agents"]["special-coder"] = {
             "command": sys.executable,
@@ -124,6 +125,7 @@ def write_config(
     data["checks"] = checks
     data["maxRetriesPerPhase"] = max_retries
     data["autoCommit"] = auto_commit
+    data["mergeOnClose"] = False
     data["timeoutMinutes"] = 1
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 

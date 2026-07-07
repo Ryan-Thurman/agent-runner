@@ -90,6 +90,7 @@ def write_config(
         }
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
+    data["roleFallbacks"] = {}
     data["checks"] = [
         f"{shlex.quote(sys.executable)} -c "
         "\"from pathlib import Path; assert Path('generated.txt').exists()\""

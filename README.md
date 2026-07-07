@@ -30,23 +30,39 @@ The executable shim works too:
 ./agent-runner run
 ```
 
-For another repo, put this checkout on `PYTHONPATH` or put the `agent-runner`
-shim on `PATH`, then run commands from inside the target git worktree.
+For a global command that works from any target git worktree, symlink the
+short shim onto your `PATH`:
+
+```sh
+ln -s /path/to/agent-runner/autorun ~/bin/autorun
+autorun --version
+```
+
+The long-form shim can be installed the same way if you prefer the old command:
+
+```sh
+ln -s /path/to/agent-runner/agent-runner ~/bin/agent-runner
+```
+
+Both shims resolve their real checkout path before importing the package, so a
+symlinked `autorun` or `agent-runner` works from inside any repo.
 
 ## Configure
 
 Initialize a target repo:
 
 ```sh
-python3 -m agent_runner init
+autorun init
 ```
+
+From the runner checkout, `python3 -m agent_runner init` is equivalent.
 
 Minimum `.agent-runner.json` shape:
 
 ```json
 {
   "planPath": "docs/plan.md",
-  "checks": ["python3 -m unittest discover -s tests -v"],
+  "checks": ["python3 -m unittest discover -s tests"],
   "agents": {
     "codex": {
       "command": "codex",
@@ -54,13 +70,40 @@ Minimum `.agent-runner.json` shape:
       "writeFlags": ["--sandbox", "workspace-write"],
       "readOnlyFlags": ["--sandbox", "read-only"],
       "outputCapture": "last-message-file"
+    },
+    "antigravity": {
+      "command": "agy",
+      "promptArgs": ["-p", "--print-timeout", "40m"],
+      "writeFlags": ["--dangerously-skip-permissions"],
+      "readOnlyFlags": ["--sandbox"],
+      "outputCapture": "stdout"
+    },
+    "claude-opus": {
+      "command": "claude",
+      "promptArgs": ["--model", "claude-opus-4-8", "-p"],
+      "writeFlags": ["--permission-mode", "acceptEdits"],
+      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "promptPrefix": "",
+      "outputCapture": "stdout"
+    },
+    "claude-sonnet": {
+      "command": "claude",
+      "promptArgs": ["--model", "claude-sonnet-5", "-p"],
+      "writeFlags": ["--permission-mode", "acceptEdits"],
+      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "promptPrefix": "",
+      "outputCapture": "stdout"
     }
   },
-  "roles": { "coder": "codex", "reviewer": "codex" },
+  "roles": { "coder": "codex", "reviewer": "claude-opus" },
+  "roleFallbacks": { "reviewer": ["antigravity"], "coder": ["claude-sonnet"] },
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
-  "autoCommit": false,
-  "allowDirty": false
+  "autoCommit": true,
+  "allowDirty": false,
+  "baseBranch": "main",
+  "mergeOnClose": true,
+  "mergeStrategy": "squash"
 }
 ```
 

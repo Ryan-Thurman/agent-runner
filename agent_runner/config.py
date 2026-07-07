@@ -9,6 +9,15 @@ from .errors import ConfigError
 
 
 CONFIG_FILENAME = ".agent-runner.json"
+DEFAULT_CHECKS = [
+    "python3 -m compileall -q .",
+    "python3 -m unittest discover -s tests",
+]
+NODE_CHECKS = ["npm test"]
+PLACEHOLDER_CHECKS = [
+    "sh -c 'echo \"agent-runner: replace the placeholder checks entry in "
+    ".agent-runner.json with your project'\\''s real check command\" >&2; exit 1'"
+]
 
 REQUIRED_AGENT_FIELDS = {
     "command": str,
@@ -199,6 +208,32 @@ def project_slug(repo_root: Path) -> str:
     return f"{name_slug or 'project'}-{path_hash}"
 
 
+def detect_default_checks(repo_root: Path) -> list[str]:
+    if (repo_root / "pyproject.toml").exists() or (repo_root / "setup.py").exists():
+        return list(DEFAULT_CHECKS)
+    if (repo_root / "tests").is_dir() and _repo_has_python_files(repo_root):
+        return list(DEFAULT_CHECKS)
+    if (repo_root / "package.json").exists():
+        return list(NODE_CHECKS)
+    return list(PLACEHOLDER_CHECKS)
+
+
+def sample_config_for_checks(checks: list[str]) -> str:
+    return SAMPLE_CONFIG_TEMPLATE.format(checks=_format_checks(checks))
+
+
+def _repo_has_python_files(repo_root: Path) -> bool:
+    for path in repo_root.rglob("*.py"):
+        if ".git" not in path.relative_to(repo_root).parts:
+            return True
+    return False
+
+
+def _format_checks(checks: list[str]) -> str:
+    encoded = json.dumps(checks, indent=4)
+    return "\n".join(f"  {line}" for line in encoded.splitlines())
+
+
 def _validate_agent_profile(name: str, profile: dict[str, Any]) -> AgentProfile:
     for field, expected_type in REQUIRED_AGENT_FIELDS.items():
         if field not in profile:
@@ -331,51 +366,56 @@ def _optional_bool(data: dict[str, Any], key: str, *, default: bool) -> bool:
     return value
 
 
-SAMPLE_CONFIG = """{
+SAMPLE_CONFIG_TEMPLATE = """{{
   // Path to the markdown plan parsed by later phases.
   "planPath": "docs/plan.md",
 
-  // Project checks run after implementation/fix jobs. Empty is allowed but warned.
-  "checks": [
-    "python3 -m compileall -q .",
-    "python3 -m unittest discover -s tests -v"
-  ],
+  // Project checks detected by init; review these before the first run.
+  "checks": {checks},
 
   // Agent profiles are vendor-specific; roles below are vendor-swappable.
-  "agents": {
-    "claude": {
-      "command": "claude",
-      "promptArgs": ["-p"],
-      "writeFlags": ["--permission-mode", "acceptEdits"],
-      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
-      "promptPrefix": "",
-      "outputCapture": "stdout"
-    },
-    "codex": {
+  "agents": {{
+    "codex": {{
       "command": "codex",
       "promptArgs": ["exec"],
       "writeFlags": ["--sandbox", "workspace-write"],
       "readOnlyFlags": ["--sandbox", "read-only"],
       "outputCapture": "last-message-file"
-    },
-    "antigravity": {
+    }},
+    "antigravity": {{
       "command": "agy",
       "promptArgs": ["-p", "--print-timeout", "40m"],
       "writeFlags": ["--dangerously-skip-permissions"],
       "readOnlyFlags": ["--sandbox"],
       "outputCapture": "stdout"
-    }
-  },
+    }},
+    "claude-opus": {{
+      "command": "claude",
+      "promptArgs": ["--model", "claude-opus-4-8", "-p"],
+      "writeFlags": ["--permission-mode", "acceptEdits"],
+      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "promptPrefix": "",
+      "outputCapture": "stdout"
+    }},
+    "claude-sonnet": {{
+      "command": "claude",
+      "promptArgs": ["--model", "claude-sonnet-5", "-p"],
+      "writeFlags": ["--permission-mode", "acceptEdits"],
+      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "promptPrefix": "",
+      "outputCapture": "stdout"
+    }}
+  }},
 
-  "roles": {
-    "coder": "claude",
-    "reviewer": "codex"
-  },
+  "roles": {{
+    "coder": "codex",
+    // Reviews are pinned to Opus/Sonnet deliberately; do not use the claude CLI default.
+    "reviewer": "claude-opus"
+  }},
 
-  // Optional. When a role's agent fails on a quota/rate limit, the runner
-  // retries coder IMPLEMENT/FIX and reviewer REVIEW jobs with these profiles
-  // in order.
-  // "roleFallbacks": { "coder": ["codex"], "reviewer": ["antigravity"] },
+  // When a role's agent fails on a quota/rate limit, the runner retries coder
+  // IMPLEMENT/FIX and reviewer REVIEW jobs with these profiles in order.
+  "roleFallbacks": {{ "reviewer": ["antigravity"], "coder": ["claude-sonnet"] }},
 
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
@@ -387,9 +427,12 @@ SAMPLE_CONFIG = """{
 
   // With mergeOnClose=true (requires autoCommit), the runner merges the
   // reviewed phase PR after CLOSE_PHASE, then starts the next phase on a new
-  // branch cut from the latest origin/<baseBranch>. With false, the runner
-  // stops after each phase and waits for a human to merge.
-  "mergeOnClose": false,
+  // branch cut from the latest origin/<baseBranch>. Set false to stop after
+  // each phase and wait for a human to merge.
+  "mergeOnClose": true,
   "mergeStrategy": "squash"
-}
+}}
 """
+
+
+SAMPLE_CONFIG = sample_config_for_checks(DEFAULT_CHECKS)
