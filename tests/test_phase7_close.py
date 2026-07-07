@@ -265,7 +265,9 @@ def add_origin_remote(repo: Path, root: Path) -> Path:
     return origin
 
 
-def seed_closing_published_phase(repo: Path, home: Path) -> str:
+def seed_closing_published_phase(
+    repo: Path, home: Path, *, status: str = "CLOSING"
+) -> str:
     published_sha = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=repo, text=True
     ).strip()
@@ -287,7 +289,7 @@ def seed_closing_published_phase(repo: Path, home: Path) -> str:
             phase_number=parsed_phase.phase_number,
             title=parsed_phase.title,
             content_hash=parsed_phase.content_hash,
-            status="CLOSING",
+            status=status,
             publish_mode="pr",
             branch_name="dev/test-phase",
             pr_url="https://example.test/pull/1",
@@ -726,6 +728,59 @@ class Phase7CloseTests(unittest.TestCase):
             self.assertEqual(close_jobs, 1)
             self.assertIn("phase.unblocked", event_types)
             self.assertIn("phase.merged", event_types)
+
+    def test_already_merged_pr_completes_on_merging_resume(self):
+        # An operator can merge the phase PR by hand while the phase is
+        # blocked; resuming from MERGING should accept that and complete
+        # without invoking gh pr merge.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            gh_state = root / "gh-state"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, phase_count=1, status="COMPLETE")
+            write_config(repo, script, auto_commit=True, merge_on_close=True)
+            commit_all(repo)
+            add_origin_remote(repo, root)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            seed_closing_published_phase(repo, home, status="MERGING")
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_STATE_DIR": str(gh_state),
+                    "GH_PR_STATE": "MERGED",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("already merged; skipping merge", result.stderr)
+            self.assertIn("plan complete", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "COMPLETE")
+            # gh pr merge writes a marker file; it must not have run.
+            self.assertFalse(list(gh_state.glob("merged-*")) if gh_state.exists() else [])
+            with connect_db(home) as db:
+                close_jobs = db.execute(
+                    "SELECT COUNT(*) AS n FROM jobs WHERE type = 'CLOSE_PHASE'"
+                ).fetchone()["n"]
+            self.assertEqual(close_jobs, 0)
 
     def test_unblock_without_blocked_phase_is_a_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
