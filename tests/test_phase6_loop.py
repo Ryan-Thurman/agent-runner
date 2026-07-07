@@ -190,6 +190,24 @@ if (
             "recommendedFixPrompt": "Create the marker"
         }))
         raise SystemExit(0)
+    if mode == "REVIEW_DRIP_FEED":
+        if not Path("fix-marker.txt").exists():
+            print(json.dumps({
+                "status": "CHANGES_REQUESTED",
+                "summary": "fix marker is missing",
+                "blockingIssues": ["Create fix-marker.txt"],
+                "nonBlockingIssues": [],
+                "recommendedFixPrompt": "Create the marker"
+            }))
+            raise SystemExit(0)
+        print(json.dumps({
+            "status": "CHANGES_REQUESTED",
+            "summary": "second review found a new blocker",
+            "blockingIssues": ["Create second-marker.txt"],
+            "nonBlockingIssues": [],
+            "recommendedFixPrompt": "Create the second marker"
+        }))
+        raise SystemExit(0)
     print(json.dumps({
         "status": "PASS",
         "summary": "accepted",
@@ -704,6 +722,38 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertIn("Create fix-marker.txt", second_prompt)
             self.assertIn("Create fix-marker.txt", fix_prompt)
             self.assertNotIn("Should Fix: tidy wording", fix_prompt)
+
+    def test_review_fix_limit_blocks_after_one_rereview_without_second_fix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[], max_retries=3)
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "AGENT_MODE": "REVIEW_DRIP_FEED"},
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("review fix limit exhausted", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            self.assertEqual(phase["retry_count"], 1)
+            phase_jobs = jobs(home, phase["id"])
+            self.assertEqual([job["type"] for job in phase_jobs].count("REVIEW"), 2)
+            self.assertEqual([job["type"] for job in phase_jobs].count("FIX"), 1)
+            first_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
+            self.assertIn("Make one comprehensive pass", first_prompt)
 
     def test_review_blocked_stops_without_fix(self):
         with tempfile.TemporaryDirectory() as tmp:

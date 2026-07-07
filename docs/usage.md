@@ -395,6 +395,9 @@ python3 -m agent_runner run
 override the restored status — useful for phases blocked before `blocked_from`
 existed. A phase blocked because retries ran out will block again on resume
 unless you fix the underlying findings or raise `maxRetriesPerPhase`.
+Review-driven fixes are stricter than check-driven fixes: the runner allows one
+review-triggered FIX, then one re-review. If that re-review still reports
+blocking issues, the phase blocks instead of starting another PR review cycle.
 
 When auto-fix is enabled, `run` tries the configured `fixer` before returning
 the blocked result, but only for resumable blocks with `blocked_from` recorded.

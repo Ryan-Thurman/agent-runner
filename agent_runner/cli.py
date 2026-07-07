@@ -379,9 +379,6 @@ def _prepare_successful_autofix_resume(
         _git_add_all(repo_root)
         return phase
 
-    if phase["blocked_from"] != "REVIEWING":
-        return phase
-
     metadata = _verify_published_phase(repo_root)
     phase = update_phase_publish_metadata(
         db,
