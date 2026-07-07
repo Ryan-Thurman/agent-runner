@@ -1358,6 +1358,23 @@ def _merge_phase_pr(
     if not pr_url:
         raise JobError("phase has no stored PR URL to merge")
 
+    # A PR merged out-of-band (e.g. by an operator recovering a blocked
+    # phase) counts as success; only an unmerged PR goes through the
+    # ready-to-merge preflight and gh pr merge.
+    payload = _gh_pr_view(
+        repo_root,
+        pr_url=pr_url,
+        failure_context=f"could not check phase PR state before merge {pr_url}",
+        fields="url,state",
+    )
+    if payload.get("state") == "MERGED":
+        print(
+            f"[agent-runner] phase PR {pr_url} is already merged; skipping merge",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+
     _verify_pr_ready_to_merge(repo_root, phase, pr_url=pr_url)
     try:
         result = subprocess.run(

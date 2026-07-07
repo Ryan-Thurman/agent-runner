@@ -26,7 +26,8 @@ pause/resume, crash recovery, and log-tailing loop.
 - `CLOSING`: run the closer profile with write flags, validate the plan
   write-back and handoff, optionally commit, and mark the phase `COMPLETE`.
 - `MERGING` (only with `mergeOnClose=true`): the close commit landed; push and
-  merge the phase PR without re-running the closer.
+  merge the phase PR without re-running the closer. A phase PR that was already
+  merged out-of-band (e.g. by an operator) counts as success.
 - `BLOCKED`: exit non-zero. `agent-runner unblock` restores the status the
   phase was in when it blocked so `run` can retry it.
 - A `PAUSED` project does not start another job. Run `agent-runner resume`,
