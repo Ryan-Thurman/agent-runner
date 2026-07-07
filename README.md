@@ -77,6 +77,8 @@ from phase body hashes so closeout can update the plan without superseding it.
 - `pause`: mark the project `PAUSED`; active jobs finish, then the loop stops at
   the next job boundary.
 - `resume`: mark the project `ACTIVE` so the next `run` continues.
+- `unblock [--phase N] [--to STATUS]`: reset a `BLOCKED` phase to the status it
+  had when it blocked so `run` can retry it.
 - `logs [-n N]`: print the latest phase log directory and tail the newest log.
 - `reset-lock`: clear a stale project lock when no runner is active.
 

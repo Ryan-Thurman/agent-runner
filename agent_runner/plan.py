@@ -20,6 +20,7 @@ PROTECTED_CHANGE_STATUSES = {
     "REVIEWING",
     "FIXING",
     "CLOSING",
+    "MERGING",
     "COMPLETE",
     "BLOCKED",
 }

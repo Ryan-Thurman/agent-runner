@@ -15,6 +15,7 @@ from .paths import ensure_runner_layout
 from .phase_loop import run_phase_loop
 from .plan import parse_plan_file, register_or_resume_plan
 from .storage import (
+    PHASE_STATUSES,
     connect_db,
     get_or_create_project,
     list_phases_for_plan,
@@ -24,6 +25,7 @@ from .storage import (
     record_event,
     reap_orphaned_jobs,
     rows_to_dicts,
+    update_phase_status,
     update_project_status,
 )
 
@@ -66,6 +68,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     resume_parser = subcommands.add_parser("resume", help="resume a paused project")
     resume_parser.set_defaults(func=cmd_resume)
+
+    unblock_parser = subcommands.add_parser(
+        "unblock", help="reset a BLOCKED phase so run can retry it"
+    )
+    unblock_parser.add_argument(
+        "--phase",
+        type=int,
+        default=None,
+        help="phase number to unblock (default: the first BLOCKED phase)",
+    )
+    unblock_parser.add_argument(
+        "--to",
+        default=None,
+        metavar="STATUS",
+        help=(
+            "status to restore (default: the status recorded when the phase "
+            "blocked)"
+        ),
+    )
+    unblock_parser.set_defaults(func=cmd_unblock)
 
     logs_parser = subcommands.add_parser("logs", help="show latest phase logs")
     logs_parser.add_argument(
@@ -296,6 +318,73 @@ def cmd_resume(args: argparse.Namespace) -> int:
             message="resume requested",
         )
     print("[agent-runner] project resumed", file=sys.stderr)
+    return 0
+
+
+def cmd_unblock(args: argparse.Namespace) -> int:
+    repo_root = find_git_root()
+    config = load_config(repo_root)
+    home = ensure_runner_layout()
+    slug = project_slug(repo_root)
+    with connect_db(home) as db:
+        project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+        plans = list_plans_for_project(db, project["id"])
+        plan = next((p for p in plans if p["path"] == config.plan_path), None)
+        if plan is None:
+            raise AgentRunnerError(
+                f"no registered plan at {config.plan_path}; run `agent-runner run` "
+                "to register it first"
+            )
+        phases = list_phases_for_plan(db, plan["id"])
+        if args.phase is not None:
+            phase = next(
+                (p for p in phases if p["phase_number"] == args.phase), None
+            )
+            if phase is None:
+                raise AgentRunnerError(
+                    f"plan {config.plan_path} has no phase {args.phase}"
+                )
+        else:
+            phase = next((p for p in phases if p["status"] == "BLOCKED"), None)
+            if phase is None:
+                print(
+                    f"[agent-runner] no BLOCKED phase in {config.plan_path}",
+                    file=sys.stderr,
+                )
+                return 0
+        if phase["status"] != "BLOCKED":
+            raise AgentRunnerError(
+                f"phase {phase['phase_number']} is {phase['status']}, not BLOCKED"
+            )
+
+        target = args.to or phase["blocked_from"]
+        if not target:
+            raise AgentRunnerError(
+                f"phase {phase['phase_number']} has no recorded pre-block status; "
+                "rerun with --to STATUS (e.g. --to MERGING)"
+            )
+        target = target.upper()
+        resumable = sorted(PHASE_STATUSES - {"BLOCKED", "COMPLETE"})
+        if target not in resumable:
+            raise AgentRunnerError(
+                f"cannot unblock to {target}; choose one of {', '.join(resumable)}"
+            )
+
+        update_phase_status(db, phase["id"], target)
+        record_event(
+            db,
+            project_id=project["id"],
+            plan_id=plan["id"],
+            phase_id=phase["id"],
+            event_type="phase.unblocked",
+            message=f"phase {phase['phase_number']} unblocked to {target}",
+            data={"to": target, "blockedFrom": phase["blocked_from"]},
+        )
+    print(
+        f"[agent-runner] phase {phase['phase_number']} unblocked to {target}; "
+        "run `agent-runner run` to continue",
+        file=sys.stderr,
+    )
     return 0
 
 

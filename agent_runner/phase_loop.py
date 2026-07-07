@@ -1,8 +1,10 @@
 import json
+import os
 import re
 import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -26,6 +28,11 @@ from .storage import (
 REVIEW_RESOLVED_INSTRUCTION = (
     "Verify these blocking issues are resolved; only new Blocking findings may block."
 )
+
+# The GitHub API is eventually consistent after a push, so the merge preflight
+# retries a PR-head mismatch before blocking the phase.
+MERGE_VERIFY_ATTEMPTS = 5
+MERGE_VERIFY_RETRY_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,15 @@ def run_phase_loop(
         return PhaseLoopResult(
             f"phase {phase_number} is BLOCKED; inspect status before rerunning",
             blocked=True,
+        )
+    if status == "MERGING":
+        return _resume_merge(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=phase,
+            config=config,
+            repo_root=repo_root,
         )
     if status == "CLOSING":
         return _run_close_phase(
@@ -640,20 +656,99 @@ def _run_close_phase(
             )
 
     if config.merge_on_close:
+        # The closer's work is durable once committed; MERGING marks that only
+        # the push/merge remains so a merge failure can be retried without
+        # re-running the closer (whose preflight would reject the moved HEAD).
+        update_phase_status(connection, phase["id"], "MERGING")
+
+    return _finalize_close_phase(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=phase,
+        config=config,
+        repo_root=repo_root,
+        commit_sha=commit_sha,
+        job_id=result.job_id,
+    )
+
+
+def _resume_merge(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    config: RunnerConfig,
+    repo_root: Path,
+) -> PhaseLoopResult:
+    try:
+        if not _phase_has_publish_metadata(phase):
+            raise JobError(
+                "phase is MERGING but has no stored publish metadata"
+            )
+        current_branch = _git_current_branch(repo_root)
+        if current_branch != phase["branch_name"]:
+            raise JobError(
+                f"current branch {current_branch!r} does not match phase branch "
+                f"{phase['branch_name']!r}; check out the phase branch before "
+                "resuming the merge"
+            )
+    except JobError as exc:
+        return _block_phase_before_close(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=phase,
+            message=str(exc),
+        )
+    print(
+        f"[agent-runner] resuming merge for phase {phase['phase_number']} "
+        f"PR {phase['pr_url']}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return _finalize_close_phase(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=phase,
+        config=config,
+        repo_root=repo_root,
+        commit_sha=_git_head_sha(repo_root),
+        job_id=None,
+    )
+
+
+def _finalize_close_phase(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    config: RunnerConfig,
+    repo_root: Path,
+    commit_sha: Optional[str],
+    job_id: Optional[int],
+) -> PhaseLoopResult:
+    if config.merge_on_close:
         try:
             _git_push_current_branch(repo_root)
             _merge_phase_pr(repo_root, config, phase)
         except JobError as exc:
-            _block_phase_after_job(
+            update_phase_status(connection, phase["id"], "BLOCKED")
+            record_event(
                 connection,
                 project_id=project_id,
                 plan_id=plan_id,
                 phase_id=phase["id"],
-                job=result,
+                job_id=job_id,
+                event_type="phase.blocked",
                 message=(
                     f"CLOSE_PHASE merge failed for phase "
                     f"{phase['phase_number']}: {exc}"
                 ),
+                data={"prUrl": phase["pr_url"]},
             )
             return PhaseLoopResult(
                 f"phase {phase['phase_number']} BLOCKED after CLOSE_PHASE merge: {exc}",
@@ -664,7 +759,7 @@ def _run_close_phase(
             project_id=project_id,
             plan_id=plan_id,
             phase_id=phase["id"],
-            job_id=result.job_id,
+            job_id=job_id,
             event_type="phase.merged",
             message=(
                 f"merged phase {phase['phase_number']} PR {phase['pr_url']} "
@@ -679,7 +774,7 @@ def _run_close_phase(
         project_id=project_id,
         plan_id=plan_id,
         phase_id=phase["id"],
-        job_id=result.job_id,
+        job_id=job_id,
         event_type="phase.complete",
         message=f"phase {phase['phase_number']} complete",
         data={
@@ -737,7 +832,7 @@ def _run_close_phase(
         project_id=project_id,
         plan_id=plan_id,
         phase_id=phase["id"],
-        job_id=result.job_id,
+        job_id=job_id,
         event_type="plan.complete",
         message=f"plan {config.plan_path} complete",
         data={"commitSha": commit_sha},
@@ -1037,7 +1132,7 @@ def _next_action_phase(
         WHERE plan_id = ?
           AND status IN (
               'PENDING', 'IMPLEMENTING', 'CHECKING', 'FIXING',
-              'REVIEWING', 'CLOSING', 'BLOCKED'
+              'REVIEWING', 'CLOSING', 'MERGING', 'BLOCKED'
           )
         ORDER BY phase_number
         LIMIT 1
@@ -1293,51 +1388,78 @@ def _merge_phase_pr(
         )
 
 
+def _merge_verify_retry_seconds() -> float:
+    raw = os.environ.get("AGENT_RUNNER_MERGE_RETRY_SECONDS")
+    if raw is None:
+        return MERGE_VERIFY_RETRY_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return MERGE_VERIFY_RETRY_SECONDS
+
+
 def _verify_pr_ready_to_merge(
     repo_root: Path, phase: sqlite3.Row, *, pr_url: str
 ) -> None:
-    payload = _gh_pr_view(
-        repo_root,
-        pr_url=pr_url,
-        failure_context=f"could not verify phase PR before merge {pr_url}",
-        fields="url,headRefName,headRefOid,state,mergeable,isDraft",
-    )
-
-    state = payload.get("state")
-    if isinstance(state, str) and state and state != "OPEN":
-        raise JobError(f"phase PR is {state}; cannot merge {pr_url}")
-    if payload.get("isDraft") is True:
-        raise JobError(f"phase PR is a draft; cannot merge {pr_url}")
-
-    head_ref_name = payload.get("headRefName")
-    expected_branch = phase["branch_name"]
-    if (
-        isinstance(head_ref_name, str)
-        and head_ref_name
-        and expected_branch
-        and head_ref_name != expected_branch
-    ):
-        raise JobError(
-            f"phase PR branch changed before merge: {head_ref_name!r} is not "
-            f"{expected_branch!r}"
+    retry_seconds = _merge_verify_retry_seconds()
+    for attempt in range(1, MERGE_VERIFY_ATTEMPTS + 1):
+        payload = _gh_pr_view(
+            repo_root,
+            pr_url=pr_url,
+            failure_context=f"could not verify phase PR before merge {pr_url}",
+            fields="url,headRefName,headRefOid,state,mergeable,isDraft",
         )
 
-    head_ref_oid = payload.get("headRefOid")
-    local_sha = _git_head_sha(repo_root)
-    if isinstance(head_ref_oid, str) and head_ref_oid and head_ref_oid != local_sha:
-        raise JobError(
-            f"phase PR head {head_ref_oid[:12]} does not match the pushed close "
-            f"commit {local_sha[:12]}; refusing to merge {pr_url}"
-        )
+        state = payload.get("state")
+        if isinstance(state, str) and state and state != "OPEN":
+            raise JobError(f"phase PR is {state}; cannot merge {pr_url}")
+        if payload.get("isDraft") is True:
+            raise JobError(f"phase PR is a draft; cannot merge {pr_url}")
 
-    # gh reports UNKNOWN while GitHub recomputes mergeability after a push;
-    # only a definitive conflict blocks here, and the post-merge MERGED check
-    # still catches anything gh lets through.
-    if payload.get("mergeable") == "CONFLICTING":
-        raise JobError(
-            f"phase PR has merge conflicts with the base branch; cannot merge "
-            f"{pr_url}"
-        )
+        head_ref_name = payload.get("headRefName")
+        expected_branch = phase["branch_name"]
+        if (
+            isinstance(head_ref_name, str)
+            and head_ref_name
+            and expected_branch
+            and head_ref_name != expected_branch
+        ):
+            raise JobError(
+                f"phase PR branch changed before merge: {head_ref_name!r} is not "
+                f"{expected_branch!r}"
+            )
+
+        # gh can briefly report the pre-push head right after a push while
+        # GitHub's API catches up, so a mismatch is retried before blocking.
+        head_ref_oid = payload.get("headRefOid")
+        local_sha = _git_head_sha(repo_root)
+        if isinstance(head_ref_oid, str) and head_ref_oid and head_ref_oid != local_sha:
+            if attempt < MERGE_VERIFY_ATTEMPTS:
+                print(
+                    f"[agent-runner] phase PR head {head_ref_oid[:12]} does not "
+                    f"match the pushed close commit {local_sha[:12]} yet; "
+                    f"retrying in {retry_seconds:g}s "
+                    f"(attempt {attempt}/{MERGE_VERIFY_ATTEMPTS})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(retry_seconds)
+                continue
+            raise JobError(
+                f"phase PR head {head_ref_oid[:12]} does not match the pushed "
+                f"close commit {local_sha[:12]} after {MERGE_VERIFY_ATTEMPTS} "
+                f"attempts; refusing to merge {pr_url}"
+            )
+
+        # gh reports UNKNOWN while GitHub recomputes mergeability after a push;
+        # only a definitive conflict blocks here, and the post-merge MERGED check
+        # still catches anything gh lets through.
+        if payload.get("mergeable") == "CONFLICTING":
+            raise JobError(
+                f"phase PR has merge conflicts with the base branch; cannot merge "
+                f"{pr_url}"
+            )
+        return
 
 
 def _phase_branch_name(phase: sqlite3.Row) -> str:
