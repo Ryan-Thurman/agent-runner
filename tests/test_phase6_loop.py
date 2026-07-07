@@ -386,6 +386,21 @@ sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 branch = os.environ.get("GH_HEAD_REF_NAME", branch)
 sha = os.environ.get("GH_HEAD_REF_OID", sha)
 
+def write_post(kind, pr_url, action, body_file):
+    if os.environ.get("GH_POST_FAIL") == "1":
+        print("simulated gh post failure", file=sys.stderr)
+        raise SystemExit(1)
+    state_dir = os.environ.get("GH_STATE_DIR")
+    if state_dir:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, f"github-{kind}.json"), "w", encoding="utf-8") as fh:
+            json.dump({"kind": kind, "prUrl": pr_url, "action": action}, fh)
+        with open(body_file, encoding="utf-8") as fh:
+            body = fh.read()
+        with open(os.path.join(state_dir, f"github-{kind}-body.md"), "w", encoding="utf-8") as fh:
+            fh.write(body)
+    raise SystemExit(0)
+
 if args[:2] == ["pr", "view"]:
     pr_url = "https://example.test/pull/1"
     if len(args) > 2 and not args[2].startswith("--"):
@@ -420,6 +435,15 @@ if args[:2] == ["pr", "diff"]:
     else:
         subprocess.run(["git", "show", "--format=", "--patch", "HEAD"], check=True)
     raise SystemExit(0)
+
+if args[:2] == ["pr", "review"]:
+    action = "--approve" if "--approve" in args else "--request-changes"
+    body_file = args[args.index("--body-file") + 1]
+    write_post("review", args[2], action, body_file)
+
+if args[:2] == ["pr", "comment"]:
+    body_file = args[args.index("--body-file") + 1]
+    write_post("comment", args[2], "comment", body_file)
 
 print(f"unsupported gh args: {args}", file=sys.stderr)
 raise SystemExit(2)
@@ -816,6 +840,219 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertIn("published PR diff", review_prompt)
             self.assertIn("generated.txt", review_prompt)
             self.assertNotIn("fake coder completed", review_prompt)
+
+    def test_published_pr_pass_posts_approval_review_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            gh_state = root / "gh-state"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="REVIEWING")
+            write_config(repo, script, checks=[], auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            published_sha = seed_reviewing_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_STATE_DIR": str(gh_state),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(phase_row(home, repo)["status"], "COMPLETE")
+            post = json.loads((gh_state / "github-review.json").read_text())
+            self.assertEqual(post["action"], "--approve")
+            self.assertEqual(post["prUrl"], "https://example.test/pull/1")
+            body = (gh_state / "github-review-body.md").read_text(encoding="utf-8")
+            self.assertIn("# Phase 6 Review: PASS", body)
+            self.assertIn("summary", body.lower())
+            self.assertIn("accepted", body)
+            self.assertIn("### blocking", body)
+            self.assertIn("### shouldFix", body)
+            self.assertIn("### nitpick", body)
+            self.assertIn("plan=docs/plan.md", body)
+            self.assertIn("phase=6", body)
+            self.assertIn(f"reviewed_sha={published_sha}", body)
+            self.assertRegex(body, r"review_job=\d+")
+
+    def test_published_pr_requested_updates_posts_request_changes_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            gh_state = root / "gh-state"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="REVIEWING")
+            write_config(repo, script, checks=[], max_retries=0, auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            published_sha = seed_reviewing_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "AGENT_MODE": "BUCKETED_REVIEW_FIX",
+                    "GH_STATE_DIR": str(gh_state),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(phase_row(home, repo)["status"], "BLOCKED")
+            post = json.loads((gh_state / "github-review.json").read_text())
+            self.assertEqual(post["action"], "--request-changes")
+            self.assertFalse((gh_state / "github-comment.json").exists())
+            body = (gh_state / "github-review-body.md").read_text(encoding="utf-8")
+            self.assertIn("# Phase 6 Review: CHANGES_REQUESTED", body)
+            self.assertIn("### blocking", body)
+            self.assertIn("Create fix-marker.txt", body)
+            self.assertIn("### shouldFix", body)
+            self.assertIn("Tidy the generated text", body)
+            self.assertIn("### nitpick", body)
+            self.assertIn("Use a shorter marker comment", body)
+            self.assertIn("Create the marker and address all buckets.", body)
+            self.assertIn("plan=docs/plan.md", body)
+            self.assertIn("phase=6", body)
+            self.assertIn(f"reviewed_sha={published_sha}", body)
+            self.assertRegex(body, r"review_job=\d+")
+
+    def test_published_pr_blocked_posts_comment_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            gh_state = root / "gh-state"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="REVIEWING")
+            write_config(repo, script, checks=[], auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            published_sha = seed_reviewing_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "AGENT_MODE": "BLOCKED",
+                    "GH_STATE_DIR": str(gh_state),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(phase_row(home, repo)["status"], "BLOCKED")
+            post = json.loads((gh_state / "github-comment.json").read_text())
+            self.assertEqual(post["action"], "comment")
+            self.assertEqual(post["prUrl"], "https://example.test/pull/1")
+            self.assertFalse((gh_state / "github-review.json").exists())
+            body = (gh_state / "github-comment-body.md").read_text(encoding="utf-8")
+            self.assertIn("# Phase 6 Review: BLOCKED", body)
+            self.assertIn("reviewer cannot proceed", body)
+            self.assertIn("external blocker", body)
+            self.assertIn("non-gating note", body)
+            self.assertIn("### nitpick", body)
+            self.assertIn("plan=docs/plan.md", body)
+            self.assertIn("phase=6", body)
+            self.assertIn(f"reviewed_sha={published_sha}", body)
+            self.assertRegex(body, r"review_job=\d+")
+
+    def test_github_post_failure_records_event_without_changing_review_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            gh_state = root / "gh-state"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="REVIEWING")
+            write_config(repo, script, checks=[], auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            seed_reviewing_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_POST_FAIL": "1",
+                    "GH_STATE_DIR": str(gh_state),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            self.assertFalse((gh_state / "github-review.json").exists())
+            github_events = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "review.github_post_failed"
+            ]
+            self.assertEqual(len(github_events), 1)
+            event_data = json.loads(github_events[0]["data_json"])
+            self.assertIn("simulated gh post failure", event_data["error"])
+            review = json.loads(
+                (Path(phase["log_dir"]) / "review.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(review["status"], "PASS")
 
     def test_auto_commit_blocks_unpublished_work_before_review(self):
         with tempfile.TemporaryDirectory() as tmp:
