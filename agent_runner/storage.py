@@ -209,6 +209,45 @@ def get_plan(connection: sqlite3.Connection, plan_id: int) -> sqlite3.Row:
     return row
 
 
+def update_plan_status(
+    connection: sqlite3.Connection, plan_id: int, status: str
+) -> sqlite3.Row:
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE plans
+        SET status = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (status, now, plan_id),
+    )
+    connection.commit()
+    return get_plan(connection, plan_id)
+
+
+def update_project_status(
+    connection: sqlite3.Connection, project_id: int, status: str
+) -> sqlite3.Row:
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE projects
+        SET status = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (status, now, project_id),
+    )
+    connection.commit()
+    row = connection.execute(
+        "SELECT * FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"project is not registered: {project_id}")
+    return row
+
+
 def list_plans_for_project(
     connection: sqlite3.Connection, project_id: int
 ) -> list[sqlite3.Row]:

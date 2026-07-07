@@ -43,9 +43,11 @@ def write_config(repo: Path, overrides: Optional[dict] = None) -> None:
     data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
     agent_script = repo / "fake_agent.py"
     agent_script.write_text(
-        """
+        r"""
 import json
+import re
 import sys
+from pathlib import Path
 
 prompt = sys.argv[-1]
 if "Review the staged phase work independently" in prompt:
@@ -56,6 +58,29 @@ if "Review the staged phase work independently" in prompt:
         "nonBlockingIssues": [],
         "recommendedFixPrompt": ""
     }))
+elif "Close the accepted phase" in prompt:
+    phase_number = int(re.search(r"Phase (\d+):", prompt).group(1))
+    plan = Path("docs/plan.md")
+    text = plan.read_text(encoding="utf-8")
+    text = re.sub(
+        rf"(## Phase {phase_number}: [^\n]+\n)(?:Status: [A-Z_]+\n)?",
+        rf"\1Status: COMPLETE\nEvidence: commit pending; checks passed\n",
+        text,
+        count=1,
+    )
+    plan.write_text(text, encoding="utf-8")
+    handoff = Path(f".acc/phases/docs-plan.md/phase-{phase_number:02d}-handoff.md")
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text(
+        "## Completed Work\nDone.\n\n"
+        "## Decisions\nNone.\n\n"
+        "## Files Changed\ndocs/plan.md\n\n"
+        "## Checks Run\nConfigured checks passed.\n\n"
+        "## Open Risks\nNone.\n\n"
+        "## Next-Phase Context\nContinue.\n",
+        encoding="utf-8",
+    )
+    print("fake closer completed")
 else:
     print("fake agent completed")
 """.lstrip(),

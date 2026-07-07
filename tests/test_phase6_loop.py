@@ -104,6 +104,7 @@ def write_phase6_agent(path: Path) -> None:
         r"""
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -168,6 +169,31 @@ if "Fix only" in prompt:
             "fix phase",
         ], check=True)
     print("fake fixer completed")
+    raise SystemExit(0)
+
+if "Close the accepted phase" in prompt:
+    phase_number = int(re.search(r"Phase (\d+):", prompt).group(1))
+    plan = Path("docs/plan.md")
+    text = plan.read_text(encoding="utf-8")
+    text = re.sub(
+        rf"(## Phase {phase_number}: [^\n]+\n)(?:Status: [A-Z_]+\n)?",
+        rf"\1Status: COMPLETE\nEvidence: commit pending; checks passed\n",
+        text,
+        count=1,
+    )
+    plan.write_text(text, encoding="utf-8")
+    handoff = Path(f".acc/phases/docs-plan.md/phase-{phase_number:02d}-handoff.md")
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text(
+        "## Completed Work\nDone.\n\n"
+        "## Decisions\nNone.\n\n"
+        "## Files Changed\ndocs/plan.md\n\n"
+        "## Checks Run\nConfigured checks passed.\n\n"
+        "## Open Risks\nNone.\n\n"
+        "## Next-Phase Context\nContinue.\n",
+        encoding="utf-8",
+    )
+    print("fake closer completed")
     raise SystemExit(0)
 
 Path("generated.txt").write_text("created\n", encoding="utf-8")
@@ -312,9 +338,9 @@ class Phase6LoopTests(unittest.TestCase):
             result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("review passed", result.stderr)
+            self.assertIn("plan complete", result.stderr)
             phase = phase_row(home, repo)
-            self.assertEqual(phase["status"], "CLOSING")
+            self.assertEqual(phase["status"], "COMPLETE")
             self.assertEqual(phase["retry_count"], 0)
             review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("git diff --staged", review_prompt)
@@ -358,16 +384,13 @@ class Phase6LoopTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("review passed", result.stderr)
+            self.assertIn("plan complete", result.stderr)
             phase = phase_row(home, repo)
-            head_sha = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
-            ).strip()
-            self.assertEqual(phase["status"], "CLOSING")
+            self.assertEqual(phase["status"], "COMPLETE")
             self.assertEqual(phase["publish_mode"], "pr")
             self.assertEqual(phase["branch_name"], "dev/test-phase")
             self.assertEqual(phase["pr_url"], "https://example.test/pull/1")
-            self.assertEqual(phase["published_sha"], head_sha)
+            self.assertEqual(len(phase["published_sha"]), 40)
             review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("Review the published phase PR independently", review_prompt)
             self.assertIn("Published PR: https://example.test/pull/1", review_prompt)
@@ -562,7 +585,7 @@ class Phase6LoopTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             phase = phase_row(home, repo)
-            self.assertEqual(phase["status"], "CLOSING")
+            self.assertEqual(phase["status"], "COMPLETE")
             self.assertEqual(phase["retry_count"], 1)
             phase_jobs = jobs(home, phase["id"])
             self.assertEqual(
@@ -574,6 +597,7 @@ class Phase6LoopTests(unittest.TestCase):
                     ("FIX", "review"),
                     ("RUN_CHECKS", None),
                     ("REVIEW", None),
+                    ("CLOSE_PHASE", None),
                 ],
             )
             first_prompt = (trace / "review-1.md").read_text(encoding="utf-8")

@@ -7,14 +7,17 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import RunnerConfig
-from .errors import JobError
+from .errors import AgentRunnerError, JobError
 from .jobs import JobResult, run_agent_job, run_checks_job
-from .plan import ParsedPhase, ParsedPlan
+from .plan import ParsedPhase, ParsedPlan, parse_plan_file
 from .storage import (
     get_phase,
     record_event,
+    slug_for_path,
     update_phase_publish_metadata,
     update_phase_status,
+    update_plan_status,
+    update_project_status,
 )
 
 
@@ -59,8 +62,14 @@ def run_phase_loop(
             blocked=True,
         )
     if status == "CLOSING":
-        return PhaseLoopResult(
-            f"phase {phase_number} is {status}; later phases handle the next step"
+        return _run_close_phase(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=phase,
+            parsed_phase=parsed_phase,
+            config=config,
+            repo_root=repo_root,
         )
     if status == "FIXING":
         return _resume_fix(
@@ -365,7 +374,7 @@ def _run_review(
 
     try:
         review = _extract_review_json(result, log_dir)
-    except JobError as exc:
+    except AgentRunnerError as exc:
         update_phase_status(connection, phase["id"], "BLOCKED")
         record_event(
             connection,
@@ -432,9 +441,170 @@ def _run_review(
             "nonBlockingIssues": review["nonBlockingIssues"],
         },
     )
-    return PhaseLoopResult(
-        f"phase {phase['phase_number']} review passed; moved to CLOSING"
+    return _run_close_phase(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=get_phase(connection, phase["id"]),
+        parsed_phase=parsed_phase,
+        config=config,
+        repo_root=repo_root,
     )
+
+
+def _run_close_phase(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    parsed_phase: ParsedPhase,
+    config: RunnerConfig,
+    repo_root: Path,
+) -> PhaseLoopResult:
+    profile = _profile_for_role(config, "coder")
+    log_dir = Path(phase["log_dir"])
+    result = run_agent_job(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        job_type="CLOSE_PHASE",
+        role="closer",
+        profile=profile,
+        prompt=_close_phase_prompt(
+            config=config,
+            phase=phase,
+            parsed_phase=parsed_phase,
+            log_dir=log_dir,
+        ),
+        repo_root=repo_root,
+        log_dir=log_dir,
+        timeout_seconds=config.timeout_minutes * 60,
+    )
+    if result.status != "SUCCEEDED":
+        _block_phase_after_job(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            job=result,
+            message=(
+                f"CLOSE_PHASE failed for phase {phase['phase_number']}: "
+                f"{result.error}"
+            ),
+        )
+        return PhaseLoopResult(
+            f"phase {phase['phase_number']} BLOCKED after CLOSE_PHASE failure",
+            blocked=True,
+        )
+
+    try:
+        fresh_plan = parse_plan_file(repo_root, config.plan_path)
+        fresh_phase = _parsed_phase(fresh_plan, phase["phase_number"])
+        _validate_close_phase_outputs(
+            repo_root=repo_root,
+            plan_path=config.plan_path,
+            phase=phase,
+            fresh_phase=fresh_phase,
+        )
+    except JobError as exc:
+        _block_phase_after_job(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            job=result,
+            message=(
+                f"CLOSE_PHASE validation failed for phase "
+                f"{phase['phase_number']}: {exc}"
+            ),
+        )
+        return PhaseLoopResult(
+            f"phase {phase['phase_number']} BLOCKED after CLOSE_PHASE validation: {exc}",
+            blocked=True,
+        )
+
+    commit_sha = None
+    if config.auto_commit:
+        try:
+            commit_sha = _commit_phase_close(repo_root, phase)
+        except JobError as exc:
+            _block_phase_after_job(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase_id=phase["id"],
+                job=result,
+                message=(
+                    f"CLOSE_PHASE commit failed for phase "
+                    f"{phase['phase_number']}: {exc}"
+                ),
+            )
+            return PhaseLoopResult(
+                f"phase {phase['phase_number']} BLOCKED after CLOSE_PHASE commit: {exc}",
+                blocked=True,
+            )
+
+    update_phase_status(connection, phase["id"], "COMPLETE")
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        job_id=result.job_id,
+        event_type="phase.complete",
+        message=f"phase {phase['phase_number']} complete",
+        data={
+            "commitSha": commit_sha,
+            "handoffPath": _handoff_path(config.plan_path, phase),
+        },
+    )
+
+    next_phase = _next_pending_phase(connection, plan_id)
+    if next_phase is not None:
+        if not config.auto_commit:
+            return PhaseLoopResult(
+                f"phase {phase['phase_number']} complete; next phase "
+                f"{next_phase['phase_number']} is PENDING"
+            )
+        fresh_plan = parse_plan_file(repo_root, config.plan_path)
+        next_parsed_phase = _parsed_phase(fresh_plan, next_phase["phase_number"])
+        record_event(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=next_phase["id"],
+            event_type="phase.auto_advance",
+            message=(
+                f"phase {phase['phase_number']} complete; starting phase "
+                f"{next_phase['phase_number']}"
+            ),
+        )
+        return _run_implement(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=next_phase,
+            parsed_phase=next_parsed_phase,
+            config=config,
+            repo_root=repo_root,
+            preexisting_dirty_paths=None,
+        )
+
+    update_plan_status(connection, plan_id, "COMPLETE")
+    update_project_status(connection, project_id, "COMPLETE")
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        job_id=result.job_id,
+        event_type="plan.complete",
+        message=f"plan {config.plan_path} complete",
+        data={"commitSha": commit_sha},
+    )
+    return PhaseLoopResult(f"phase {phase['phase_number']} complete; plan complete")
 
 
 def _run_fix(
@@ -1198,6 +1368,174 @@ def _review_fix_prompt(
         f"{json.dumps(blocking_issues, indent=2, sort_keys=True)}\n"
         "```"
     )
+
+
+def _close_phase_prompt(
+    *, config: RunnerConfig, phase: sqlite3.Row, parsed_phase: ParsedPhase, log_dir: Path
+) -> str:
+    handoff_path = _handoff_path(config.plan_path, phase)
+    return (
+        "Close the accepted phase. This is a write-capable closer job.\n\n"
+        f"Phase {parsed_phase.phase_number}: {parsed_phase.title}\n"
+        f"Plan file: {config.plan_path}\n"
+        f"Handoff file: {handoff_path}\n\n"
+        "Requirements:\n"
+        "1. Doc gate: if this phase changed behavior, an API, a flag/config, the "
+        "data model, or notable performance, update the docs that describe it in "
+        "this repository. If it is not doc-impacting, record exactly "
+        '"not doc-impacting: <reason>" in the handoff.\n'
+        "2. Plan write-back: set this phase's Status marker line to "
+        "`Status: COMPLETE` directly under the phase heading, and add one "
+        "runner-owned one-line evidence note directly after it in the form "
+        "`Evidence: <commit/hash/checks summary>`.\n"
+        "3. Handoff: write the handoff file with these markdown sections: "
+        "Completed Work, Decisions, Files Changed, Checks Run, Open Risks, "
+        "Next-Phase Context.\n"
+        "4. Do not start future phase work. Do not merge PRs, force-push, "
+        "delete branches, or delete files outside this repository.\n\n"
+        "Phase body:\n"
+        f"{parsed_phase.content}\n\n"
+        "Check output:\n"
+        "```text\n"
+        f"{_checks_log_text(log_dir)}\n"
+        "```\n\n"
+        "Review result:\n"
+        "```json\n"
+        f"{_review_json_text(log_dir)}\n"
+        "```"
+    )
+
+
+def _validate_close_phase_outputs(
+    *,
+    repo_root: Path,
+    plan_path: str,
+    phase: sqlite3.Row,
+    fresh_phase: ParsedPhase,
+) -> None:
+    if fresh_phase.status != "COMPLETE":
+        raise JobError(
+            "closer did not set the plan phase marker to Status: COMPLETE"
+        )
+    if fresh_phase.content_hash != phase["content_hash"]:
+        raise JobError(
+            "closer changed the protected phase body; only status/evidence "
+            "write-back is allowed"
+        )
+    handoff_path = repo_root / _handoff_path(plan_path, phase)
+    if not handoff_path.exists():
+        raise JobError(f"closer did not write handoff file: {handoff_path}")
+    handoff_text = handoff_path.read_text(encoding="utf-8")
+    missing_sections = [
+        section
+        for section in (
+            "Completed Work",
+            "Decisions",
+            "Files Changed",
+            "Checks Run",
+            "Open Risks",
+            "Next-Phase Context",
+        )
+        if f"## {section}" not in handoff_text
+    ]
+    if missing_sections:
+        raise JobError(
+            "handoff file is missing required section(s): "
+            + ", ".join(missing_sections)
+        )
+
+
+def _commit_phase_close(repo_root: Path, phase: sqlite3.Row) -> Optional[str]:
+    _git_add_all(repo_root)
+    if not _git_dirty_paths(repo_root):
+        print(
+            "[agent-runner] CLOSE_PHASE produced nothing to commit",
+            file=sys.stderr,
+            flush=True,
+        )
+        return None
+    message = f"Phase {phase['phase_number']}: {phase['title']}"
+    result = _git_commit(repo_root, message)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "git commit failed"
+        if _git_identity_missing(detail):
+            result = _git_commit(
+                repo_root,
+                message,
+                fallback_identity=True,
+            )
+            detail = (
+                result.stderr.strip() or result.stdout.strip() or "git commit failed"
+            )
+        if "nothing to commit" in detail:
+            print(
+                "[agent-runner] CLOSE_PHASE produced nothing to commit",
+                file=sys.stderr,
+                flush=True,
+            )
+            return None
+        if result.returncode == 0:
+            return _git_head_sha(repo_root)
+        raise JobError(detail)
+    return _git_head_sha(repo_root)
+
+
+def _git_commit(
+    repo_root: Path, message: str, *, fallback_identity: bool = False
+) -> subprocess.CompletedProcess[str]:
+    command = ["git"]
+    if fallback_identity:
+        command.extend(
+            [
+                "-c",
+                "user.email=agent-runner@example.invalid",
+                "-c",
+                "user.name=agent-runner",
+            ]
+        )
+    command.extend(["commit", "-m", message])
+    return subprocess.run(
+        command,
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def _git_identity_missing(output: str) -> bool:
+    return (
+        "Author identity unknown" in output
+        or "unable to auto-detect email address" in output
+    )
+
+
+def _next_pending_phase(
+    connection: sqlite3.Connection, plan_id: int
+) -> Optional[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT * FROM phases
+        WHERE plan_id = ? AND status = 'PENDING'
+        ORDER BY phase_number
+        LIMIT 1
+        """,
+        (plan_id,),
+    ).fetchone()
+
+
+def _handoff_path(plan_path: str, phase: sqlite3.Row) -> str:
+    return (
+        f".acc/phases/{slug_for_path(plan_path)}/"
+        f"phase-{phase['phase_number']:02d}-handoff.md"
+    )
+
+
+def _review_json_text(log_dir: Path) -> str:
+    review_json = log_dir / "review.json"
+    if not review_json.exists():
+        return ""
+    return review_json.read_text(encoding="utf-8")
 
 
 def _publish_instructions(require_publish: bool, *, update_existing: bool = False) -> str:

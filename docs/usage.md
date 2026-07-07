@@ -1,8 +1,8 @@
 # Using agent-runner
 
-This guide describes the runner as it exists after Phase 6. It is ready for
-dogfooding the implementation, check, review, and retry-limited fix loop.
-CLOSE_PHASE, pause/resume, and rich log tailing are still future phases.
+This guide describes the runner as it exists after Phase 7. It is ready for
+dogfooding the implementation, check, review, retry-limited fix, and close-phase
+loop. Pause/resume and rich log tailing are still future phases.
 
 ## Current Loop
 
@@ -20,10 +20,11 @@ CLOSE_PHASE, pause/resume, and rich log tailing are still future phases.
 - Failing checks: run a `FIX` job with `trigger="checks"` if retries remain,
   then rerun checks.
 - `CHECKING`: resume by running checks without running IMPLEMENT again.
-- `REVIEWING`: run review. `PASS` moves to `CLOSING`; `CHANGES_REQUESTED`
+- `REVIEWING`: run review. `PASS` runs `CLOSE_PHASE`; `CHANGES_REQUESTED`
   runs a `FIX` job with `trigger="review"` if retries remain; `BLOCKED` stops.
 - `FIXING`: resume the last available fix prompt, then rerun checks.
-- `CLOSING`: stop with a message that later phases own the next step.
+- `CLOSING`: run the closer profile with write flags, validate the plan
+  write-back and handoff, optionally commit, and mark the phase `COMPLETE`.
 - `BLOCKED`: exit non-zero.
 
 The automated loop is now:
@@ -32,7 +33,7 @@ The automated loop is now:
 IMPLEMENT -> RUN_CHECKS -> REVIEW -> FIX/RUN_CHECKS/REVIEW -> CLOSE_PHASE
 ```
 
-Only `CLOSE_PHASE` and later operational commands remain manual.
+`CLOSE_PHASE` is automated. Later operational commands remain manual.
 
 ## Installation
 
@@ -137,19 +138,22 @@ Current notes:
 - Review output must be strict JSON with `status`, `summary`, `blockingIssues`,
   `nonBlockingIssues`, and `recommendedFixPrompt`. Invalid review JSON blocks
   the phase and leaves the raw output in `review.log`.
+- The closer uses the configured coder profile with write flags. It must update
+  docs or record a `not doc-impacting` reason, set the phase plan marker to
+  `Status: COMPLETE`, add an `Evidence:` line, and write the phase handoff.
 
 ## Plan Format
 
 The plan file is markdown. Phases are discovered from headings like:
 
 ```md
-## Phase 6: REVIEW and FIX convergence loop
+## Phase 7: CLOSE_PHASE - the full circle
 Status: PENDING
 
-Build the reviewer leg...
+Close the accepted phase...
 
 Acceptance Criteria:
-- Reviewer PASS advances to CLOSE_PHASE.
+- A passing phase writes docs, plan evidence, and a handoff.
 ```
 
 Rules:
@@ -157,8 +161,9 @@ Rules:
 - Use `## Phase <number>: <title>` headings.
 - Add `Status: <STATE>` directly under the phase heading.
 - If the status line is missing, the runner treats the phase as `PENDING`.
-- The status line is excluded from the phase content hash, so status write-back
-  will not count as a plan body change.
+- The status line and the runner-owned `Evidence:` line immediately after it are
+  excluded from the phase content hash, so close-phase write-back does not count
+  as a plan body change.
 - Duplicate phase numbers and invalid status values are rejected.
 
 Useful statuses while dogfooding:
@@ -166,7 +171,7 @@ Useful statuses while dogfooding:
 - `PENDING`: ready for the runner to start.
 - `REVIEWING`: ready to run the reviewer, or retry review after checks pass.
 - `FIXING`: ready to resume a fix prompt after interruption.
-- `CLOSING`: review passed; manual close-phase work is needed until Phase 7 lands.
+- `CLOSING`: ready to run or resume `CLOSE_PHASE`.
 - `BLOCKED`: implementation failed or the phase needs human intervention.
 - `COMPLETE`: done; the loop skips it.
 
@@ -184,23 +189,34 @@ If `allowDirty=false`, this must be clean. Then run:
 python3 -m agent_runner run
 ```
 
-Expected Phase 6 success flow:
+Expected Phase 7 success flow:
 
 ```text
 [agent-runner] acquired lock for <project-slug>
 [agent-runner] registered/resumed plan docs/plan.md with N phase(s)
-[agent-runner] phase <n> review passed; moved to CLOSING
+[agent-runner] phase <n> complete; plan complete
 ```
 
-With `autoCommit=true`, after that:
+With `autoCommit=true`, close-phase changes are committed with:
+
+```text
+Phase <n>: <title>
+```
+
+If another phase is still `PENDING`, the runner starts its IMPLEMENT job after
+the closure commit. With `autoCommit=false`, the runner marks the phase complete
+but stops before starting the next pending phase so local staged work can be
+handled deliberately.
+
+After a published review:
 
 ```sh
 python3 -m agent_runner status
 ```
 
 The phase status line includes `branch_name`, `pr_url`, and `published_sha`.
-The reviewer approved the published PR diff. Phase 7 will automate the
-close-phase doc/plan/handoff step; until then, inspect and close manually.
+The reviewer approved that published PR diff; the later closure commit may move
+local `HEAD` beyond the stored reviewed SHA.
 
 With `autoCommit=false`, the reviewer still works from `git diff --staged`.
 
@@ -215,16 +231,17 @@ Then open the phase log directory under `~/.agent-runner/logs/.../phase-N/`.
 `checks.log`, `fix.log`, `review.log`, and `review.json` show the convergence
 history and outstanding blockers.
 
-## Manual Handoff Until Phase 7-8
+## Close Handoff
 
-When a phase reaches `CLOSING`, the runner has stopped at the current automation
-boundary. For dogfooding now:
+When `CLOSE_PHASE` succeeds, the runner validates that the closer wrote:
 
-1. Inspect the phase PR, `python3 -m agent_runner status`, and the phase logs.
-2. Run any extra checks you need.
-3. Update the plan status manually, usually from `CLOSING` to `COMPLETE`.
-4. Set the next phase to `PENDING`.
-5. Run `python3 -m agent_runner run` again.
+1. `Status: COMPLETE` plus an `Evidence:` line in the plan.
+2. A handoff at `.acc/phases/<plan-slug>/phase-NN-handoff.md`.
+3. The handoff sections `Completed Work`, `Decisions`, `Files Changed`,
+   `Checks Run`, `Open Risks`, and `Next-Phase Context`.
+
+Closer failure, timeout, missing handoff, missing completion marker, or protected
+phase-body hash drift marks the phase `BLOCKED` instead of silently completing it.
 
 When a phase reaches `BLOCKED`, use `python3 -m agent_runner status` and the
 latest events to see why. IMPLEMENT failures are recorded as events and in the
@@ -262,6 +279,8 @@ Common files:
   profile capture mode.
 - `checks.log`: combined check command output.
 - `fix-checks-prompt.md`: generated context when checks fail.
+- `close_phase-prompt.md`: prompt sent to the closer.
+- `close_phase.log`: streamed stdout/stderr from close-phase work.
 
 The SQLite DB is at `~/.agent-runner/runner.sqlite`.
 
@@ -308,5 +327,5 @@ pushed work on a PR before review starts. With `autoCommit=false`, after a
 successful IMPLEMENT the runner stages the implementation so new files appear
 in `git diff --staged`.
 
-Closer jobs are not automated yet, so the final plan/handoff close remains
-manual after a review pass moves the phase to `CLOSING`.
+Closer jobs run with write flags, but the runner still validates their output
+before marking a phase complete.

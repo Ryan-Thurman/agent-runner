@@ -13,6 +13,7 @@ from .storage import PHASE_STATUSES, phase_log_dir
 
 PHASE_HEADING_RE = re.compile(r"^## Phase\s+(\d+):\s*(.+?)\s*$")
 STATUS_RE = re.compile(r"^Status:\s*([A-Z_]+)\s*$")
+EVIDENCE_RE = re.compile(r"^Evidence:\s*(.+?)\s*$")
 PROTECTED_CHANGE_STATUSES = {
     "IMPLEMENTING",
     "CHECKING",
@@ -271,7 +272,12 @@ def _extract_status_and_hash_lines(lines: list[str]) -> tuple[str, list[str]]:
     status = match.group(1)
     if status not in PHASE_STATUSES:
         raise PlanError(f"invalid phase status marker: {status}")
-    return status, list(lines[status_index + 1 :])
+    hash_start_index = status_index + 1
+    if hash_start_index < len(lines):
+        evidence_match = EVIDENCE_RE.match(lines[hash_start_index].rstrip("\r\n"))
+        if evidence_match:
+            hash_start_index += 1
+    return status, list(lines[hash_start_index:])
 
 
 def _next_heading_index(
