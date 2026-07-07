@@ -2,10 +2,11 @@ import os
 import signal
 import sqlite3
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import AgentProfile
 from .errors import JobError
@@ -71,6 +72,13 @@ def run_agent_job(
     argv = _agent_argv(profile, role, effective_prompt, output_path)
     exit_code: Optional[int]
     error: Optional[str]
+    _print_job_start(
+        job_id=job["id"],
+        job_type=job_type,
+        role=role,
+        profile_name=profile.name,
+        log_path=log_path,
+    )
     try:
         exit_code, stdout, stderr, error = _run_process(
             argv,
@@ -79,6 +87,7 @@ def run_agent_job(
             shell=False,
             log_path=log_path,
             log_header="$ " + " ".join(argv) + "\n",
+            on_spawn=lambda pid: _print_job_spawned(job["id"], job_type, pid),
         )
         if profile.output_capture in {"stdout", "structured-stdout"}:
             output_path.write_text(stdout, encoding="utf-8")
@@ -145,6 +154,13 @@ def run_checks_job(
     error: Optional[str] = None
     try:
         log_path.write_text("", encoding="utf-8")
+        _print_job_start(
+            job_id=job["id"],
+            job_type="RUN_CHECKS",
+            role="checks",
+            profile_name="shell",
+            log_path=log_path,
+        )
         for command in commands:
             exit_code, stdout, stderr, process_error = _run_process(
                 command,
@@ -153,6 +169,9 @@ def run_checks_job(
                 shell=True,
                 log_path=log_path,
                 log_header=f"$ {command}\n",
+                on_spawn=lambda pid: _print_job_spawned(
+                    job["id"], "RUN_CHECKS", pid
+                ),
             )
             if process_error is not None or exit_code != 0:
                 failed_command = command
@@ -229,6 +248,7 @@ def _run_process(
     shell: bool,
     log_path: Path,
     log_header: str,
+    on_spawn: Optional[Callable[[int], None]] = None,
 ) -> tuple[Optional[int], str, str, Optional[str]]:
     with log_path.open("a", encoding="utf-8") as log_file:
         log_file.write(log_header)
@@ -249,6 +269,8 @@ def _run_process(
                 bufsize=1,
                 start_new_session=True,
             )
+            if on_spawn is not None:
+                on_spawn(process.pid)
         except OSError as exc:
             error = f"failed to start process: {exc}"
             log_file.write(f"\n[error]\n{error}\n")
@@ -287,6 +309,32 @@ def _run_process(
                 log_file.write(f"\n[error]\n{error}\n")
                 log_file.flush()
         return exit_code, "".join(stdout_chunks), "".join(stderr_chunks), error
+
+
+def _print_job_start(
+    *,
+    job_id: int,
+    job_type: str,
+    role: str,
+    profile_name: str,
+    log_path: Path,
+) -> None:
+    print(
+        "[agent-runner] "
+        f"starting {job_type} job {job_id} "
+        f"(role={role}, profile={profile_name})",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(f"[agent-runner]   log: {log_path}", file=sys.stderr, flush=True)
+
+
+def _print_job_spawned(job_id: int, job_type: str, pid: int) -> None:
+    print(
+        f"[agent-runner] spawned {job_type} job {job_id} pid={pid}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _pump_stream(stream, chunks: list[str], log_file, lock: threading.Lock) -> None:

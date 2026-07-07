@@ -8,8 +8,15 @@ import unittest
 from pathlib import Path
 from typing import Optional
 
-from agent_runner.config import SAMPLE_CONFIG, strip_json_comments
-from agent_runner.storage import connect_db
+from agent_runner.config import SAMPLE_CONFIG, project_slug, strip_json_comments
+from agent_runner.plan import parse_plan_file
+from agent_runner.storage import (
+    connect_db,
+    create_phase,
+    create_plan,
+    get_or_create_project,
+    phase_log_dir,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -187,6 +194,7 @@ def write_fake_gh(path: Path) -> None:
     path.write_text(
         r"""#!/usr/bin/env python3
 import json
+import os
 import subprocess
 import sys
 
@@ -197,10 +205,14 @@ branch = subprocess.check_output(
 sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 
 if args[:2] == ["pr", "view"]:
+    pr_url = "https://example.test/pull/1"
+    if len(args) > 2 and not args[2].startswith("--"):
+        pr_url = args[2]
     print(json.dumps({
-        "url": "https://example.test/pull/1",
+        "url": pr_url,
         "headRefName": branch,
         "headRefOid": sha,
+        "state": os.environ.get("GH_PR_STATE", "OPEN"),
     }))
     raise SystemExit(0)
 
@@ -351,6 +363,81 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("BLOCKED before REVIEW", result.stderr)
             self.assertIn("worktree is dirty", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            phase_jobs = jobs(home, phase["id"])
+            self.assertNotIn("REVIEW", [job["type"] for job in phase_jobs])
+
+    def test_auto_commit_blocks_merged_stored_pr_before_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="REVIEWING")
+            write_config(repo, script, checks=[], auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            published_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+            parsed_plan = parse_plan_file(repo, "docs/plan.md")
+            parsed_phase = parsed_plan.phases[0]
+
+            with connect_db(home) as db:
+                project = get_or_create_project(
+                    db, slug=project_slug(repo), repo_path=repo
+                )
+                plan = create_plan(
+                    db,
+                    project_id=project["id"],
+                    path=parsed_plan.path,
+                    content_hash=parsed_plan.content_hash,
+                )
+                phase = create_phase(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan["id"],
+                    phase_number=parsed_phase.phase_number,
+                    title=parsed_phase.title,
+                    content_hash=parsed_phase.content_hash,
+                    status="REVIEWING",
+                    publish_mode="pr",
+                    branch_name="dev/test-phase",
+                    pr_url="https://example.test/pull/1",
+                    published_sha=published_sha,
+                    log_dir=phase_log_dir(
+                        home / "logs",
+                        project_slug=project_slug(repo),
+                        plan_path=parsed_plan.path,
+                        phase_number=parsed_phase.phase_number,
+                    ),
+                )
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_PR_STATE": "MERGED",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("phase PR is MERGED", result.stderr)
             phase = phase_row(home, repo)
             self.assertEqual(phase["status"], "BLOCKED")
             phase_jobs = jobs(home, phase["id"])

@@ -275,13 +275,27 @@ class Phase2StorageTests(unittest.TestCase):
                     event_type="phase.reviewing",
                     message="phase is ready for review",
                 )
+                create_job(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan["id"],
+                    phase_id=phase["id"],
+                    job_type="REVIEW",
+                    status="RUNNING",
+                    log_path=Path("/tmp/review.log"),
+                    started_at="2026-07-06T00:00:00+00:00",
+                )
 
             result = run_cli(repo, home, "status")
 
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("running jobs:", result.stderr)
+            self.assertIn("job 1: REVIEW phase=2", result.stderr)
             self.assertIn("phase 2: REVIEWING retries=1", result.stderr)
             self.assertIn("branch_name=phase-2-sqlite-state", result.stderr)
             payload = json.loads(result.stdout)
+            self.assertEqual(payload["runningJobs"][0]["type"], "REVIEW")
+            self.assertEqual(payload["runningJobs"][0]["phase_number"], 2)
             self.assertEqual(payload["plans"][0]["path"], "docs/plan.md")
             self.assertEqual(payload["plans"][0]["phases"][0]["status"], "REVIEWING")
             self.assertEqual(

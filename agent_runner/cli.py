@@ -19,6 +19,7 @@ from .storage import (
     list_phases_for_plan,
     list_plans_for_project,
     list_recent_events,
+    list_running_jobs_for_project,
     reap_orphaned_jobs,
     rows_to_dicts,
 )
@@ -166,8 +167,13 @@ def cmd_status(args: argparse.Namespace) -> int:
                 }
             )
         events = list_recent_events(db, project["id"])
+        running_jobs = list_running_jobs_for_project(db, project["id"])
 
     print(f"[agent-runner] project: {repo_root}", file=sys.stderr)
+    if running_jobs:
+        print("[agent-runner] running jobs:", file=sys.stderr)
+        for job in running_jobs:
+            print(f"[agent-runner]   {_format_running_job(job)}", file=sys.stderr)
     if not plan_payloads:
         print("[agent-runner] no plan registered yet", file=sys.stderr)
     else:
@@ -198,6 +204,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     payload = {
         "project": dict(project),
         "plans": plan_payloads,
+        "runningJobs": rows_to_dicts(running_jobs),
         "recentEvents": rows_to_dicts(events),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -243,3 +250,13 @@ def _format_publish_state(phase: dict) -> str:
         if phase.get(key):
             details.append(f"{key}={phase[key]}")
     return f" ({', '.join(details)})" if details else ""
+
+
+def _format_running_job(job: dict) -> str:
+    job = dict(job)
+    phase = ""
+    if job.get("phase_number") is not None:
+        phase = f" phase={job['phase_number']}"
+    log = f" log={job['log_path']}" if job.get("log_path") else ""
+    started = f" started={job['started_at']}" if job.get("started_at") else ""
+    return f"job {job['id']}: {job['type']}{phase}{started}{log}"

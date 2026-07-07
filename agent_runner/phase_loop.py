@@ -288,9 +288,36 @@ def _run_review(
     config: RunnerConfig,
     repo_root: Path,
 ) -> PhaseLoopResult:
-    if config.auto_commit and not _phase_has_publish_metadata(phase):
+    if config.auto_commit:
         try:
-            metadata = _verify_published_phase(repo_root)
+            if _phase_has_publish_metadata(phase):
+                _verify_stored_phase_pr(repo_root, phase)
+            else:
+                metadata = _verify_published_phase(repo_root)
+                phase = update_phase_publish_metadata(
+                    connection,
+                    phase["id"],
+                    publish_mode="pr",
+                    branch_name=metadata.branch_name,
+                    pr_url=metadata.pr_url,
+                    published_sha=metadata.published_sha,
+                )
+                record_event(
+                    connection,
+                    project_id=project_id,
+                    plan_id=plan_id,
+                    phase_id=phase["id"],
+                    event_type="phase.published",
+                    message=(
+                        f"phase {phase['phase_number']} published to PR "
+                        f"{metadata.pr_url}"
+                    ),
+                    data={
+                        "branchName": metadata.branch_name,
+                        "prUrl": metadata.pr_url,
+                        "publishedSha": metadata.published_sha,
+                    },
+                )
         except JobError as exc:
             return _block_phase_after_publish_failure(
                 connection,
@@ -300,27 +327,6 @@ def _run_review(
                 source_job=None,
                 message=str(exc),
             )
-        phase = update_phase_publish_metadata(
-            connection,
-            phase["id"],
-            publish_mode="pr",
-            branch_name=metadata.branch_name,
-            pr_url=metadata.pr_url,
-            published_sha=metadata.published_sha,
-        )
-        record_event(
-            connection,
-            project_id=project_id,
-            plan_id=plan_id,
-            phase_id=phase["id"],
-            event_type="phase.published",
-            message=f"phase {phase['phase_number']} published to PR {metadata.pr_url}",
-            data={
-                "branchName": metadata.branch_name,
-                "prUrl": metadata.pr_url,
-                "publishedSha": metadata.published_sha,
-            },
-        )
 
     profile = _profile_for_role(config, "reviewer")
     log_dir = Path(phase["log_dir"])
@@ -780,6 +786,8 @@ def _verify_published_phase(repo_root: Path) -> PublishMetadata:
     if not isinstance(pr_url, str) or not pr_url:
         raise JobError("publish required before review, but gh returned no PR URL")
 
+    _ensure_pr_is_open(payload, pr_url)
+
     head_ref_name = payload.get("headRefName")
     if isinstance(head_ref_name, str) and head_ref_name and head_ref_name != branch_name:
         raise JobError(
@@ -800,6 +808,46 @@ def _verify_published_phase(repo_root: Path) -> PublishMetadata:
         pr_url=pr_url,
         published_sha=published_sha,
     )
+
+
+def _verify_stored_phase_pr(repo_root: Path, phase: sqlite3.Row) -> PublishMetadata:
+    pr_url = phase["pr_url"]
+    payload = _gh_pr_view(repo_root, pr_url=pr_url)
+    _ensure_pr_is_open(payload, pr_url)
+
+    head_ref_name = payload.get("headRefName")
+    if (
+        isinstance(head_ref_name, str)
+        and head_ref_name
+        and head_ref_name != phase["branch_name"]
+    ):
+        raise JobError(
+            "stored phase PR branch changed: "
+            f"{head_ref_name!r} is not {phase['branch_name']!r}"
+        )
+
+    head_ref_oid = payload.get("headRefOid")
+    if (
+        isinstance(head_ref_oid, str)
+        and head_ref_oid
+        and head_ref_oid != phase["published_sha"]
+    ):
+        raise JobError(
+            "stored phase PR head changed: "
+            f"{head_ref_oid[:12]} is not {phase['published_sha'][:12]}"
+        )
+
+    return PublishMetadata(
+        branch_name=phase["branch_name"],
+        pr_url=pr_url,
+        published_sha=phase["published_sha"],
+    )
+
+
+def _ensure_pr_is_open(payload: dict[str, Any], pr_url: str) -> None:
+    state = payload.get("state")
+    if isinstance(state, str) and state and state != "OPEN":
+        raise JobError(f"phase PR is {state}; cannot review stale PR {pr_url}")
 
 
 def _git_current_branch(repo_root: Path) -> str:
@@ -831,10 +879,14 @@ def _git_head_sha(repo_root: Path) -> str:
     return result.stdout.strip()
 
 
-def _gh_pr_view(repo_root: Path) -> dict[str, Any]:
+def _gh_pr_view(repo_root: Path, *, pr_url: Optional[str] = None) -> dict[str, Any]:
+    command = ["gh", "pr", "view"]
+    if pr_url:
+        command.append(pr_url)
+    command.extend(["--json", "url,headRefName,headRefOid,state"])
     try:
         result = subprocess.run(
-            ["gh", "pr", "view", "--json", "url,headRefName,headRefOid"],
+            command,
             cwd=repo_root,
             text=True,
             stdout=subprocess.PIPE,
