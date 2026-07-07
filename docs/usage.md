@@ -328,8 +328,21 @@ Expected success flow:
 ```text
 [agent-runner] acquired lock for <project-slug>
 [agent-runner] registered/resumed plan docs/plan.md with N phase(s)
+[agent-runner] starting IMPLEMENT job 1 (role=coder, profile=codex)
+codex coding: ...
+[agent-runner] starting RUN_CHECKS job 2 (role=checks, profile=shell)
+checks checking: ...
+[agent-runner] starting REVIEW job 3 (role=reviewer, profile=codex)
+codex reviewing: ...
 [agent-runner] phase <n> complete; plan complete
 ```
+
+The `codex coding:`, `checks checking:`, and similar lines are live stderr
+previews of child-process output. They are intentionally bounded for terminal
+readability; long lines end with `... [truncated]` in the preview only. The
+complete stdout/stderr remains in the phase `.log` files under
+`~/.agent-runner/logs/`, and agent output capture files keep their exact
+configured contents.
 
 With `autoCommit=true`, close-phase changes are committed with:
 
@@ -471,6 +484,28 @@ python3 -m agent_runner status
 When a job is active, `status` shows the running job id, type, phase, start
 time, and log path. `run` also prints job start lines as soon as it launches a
 job, including the role/profile, log path, and child PID.
+
+During `run`, agent and check jobs also stream live previews to stderr with
+labels derived from job metadata:
+
+- `IMPLEMENT` with the coder profile prints `<profile> coding: ...`.
+- `REVIEW` with the reviewer profile prints `<profile> reviewing: ...`.
+- `FIX` with the coder profile prints `<profile> fixing: ...`.
+- `CLOSE_PHASE` with the closer profile prints `<profile> closing: ...`.
+- `RUN_CHECKS` prints `checks checking: ...`.
+
+Preview lines are not a substitute for logs. They may be truncated and colored,
+while the log files are complete and uncolored child output. Set
+`AGENT_RUNNER_LIVE_LOGS=0` to disable previews:
+
+```sh
+AGENT_RUNNER_LIVE_LOGS=0 python3 -m agent_runner run
+```
+
+Color is controlled by `AGENT_RUNNER_COLOR=auto|always|never`. The default
+`auto` emits ANSI color only when stderr is a TTY and `NO_COLOR` is not set.
+Use `always` to force color and `never` to suppress raw ANSI escapes even in an
+interactive terminal.
 
 `logs` prints the latest registered phase log directory and tails the newest
 `.log` file:

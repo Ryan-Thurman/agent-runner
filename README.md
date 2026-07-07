@@ -135,6 +135,34 @@ rules.
 - `logs [-n N]`: print the latest phase log directory and tail the newest log.
 - `reset-lock`: clear a stale project lock when no runner is active.
 
+## Live Job Previews
+
+`run` streams a bounded preview of agent and check output to stderr while jobs
+are active:
+
+```text
+codex coding: edited agent_runner/jobs.py
+checks checking: python3 -m unittest discover -s tests -v
+codex reviewing: {"status": "PASS", ...}
+```
+
+The preview is for terminal visibility only. Long lines are truncated in the
+preview with `... [truncated]`, but the full stdout/stderr still lands in the
+phase `.log` file, and profile output capture files remain unchanged. Stdout
+stays reserved for machine-readable command payloads such as `status` JSON and
+`logs` output.
+
+Disable previews for quiet automation:
+
+```sh
+AGENT_RUNNER_LIVE_LOGS=0 python3 -m agent_runner run
+```
+
+Color is controlled with `AGENT_RUNNER_COLOR=auto|always|never`. The default
+`auto` emits ANSI color only when stderr is a terminal and `NO_COLOR` is not
+set. `always` forces color for snapshots or demos, and `never` keeps stderr
+plain.
+
 ## Safety Rules
 
 The runner does not auto-merge, force-push, delete branches, delete files

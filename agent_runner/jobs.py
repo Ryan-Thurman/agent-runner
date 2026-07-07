@@ -29,6 +29,18 @@ QUOTA_ERROR_PATTERN = re.compile(
 # How much of the log tail to scan for quota signatures. Retried jobs append
 # to the same log, so a bounded tail keeps the newest attempt's output in view.
 _QUOTA_SCAN_TAIL_CHARS = 8000
+_LIVE_PREVIEW_MAX_CHARS = 240
+_TRUNCATION_MARKER = " ... [truncated]"
+_COLOR_RESET = "\033[0m"
+_COLOR_PREFIX = "\033[36m"
+_LIVE_LOGS_DISABLE_VALUES = {"0", "false", "no", "off"}
+
+
+@dataclass(frozen=True)
+class LivePreviewContext:
+    subject: str
+    verb: str
+    max_chars: int = _LIVE_PREVIEW_MAX_CHARS
 
 
 @dataclass(frozen=True)
@@ -100,6 +112,7 @@ def run_agent_job(
             shell=False,
             log_path=log_path,
             log_header="$ " + " ".join(argv) + "\n",
+            live_preview_context=_live_preview_context(job_type, role, profile.name),
             on_spawn=lambda pid: _record_job_spawn(
                 connection, job["id"], job_type, pid
             ),
@@ -196,6 +209,9 @@ def run_checks_job(
                 shell=True,
                 log_path=log_path,
                 log_header=f"$ {command}\n",
+                live_preview_context=_live_preview_context(
+                    "RUN_CHECKS", "checks", "checks"
+                ),
                 on_spawn=lambda pid: _record_job_spawn(
                     connection, job["id"], "RUN_CHECKS", pid
                 ),
@@ -275,8 +291,10 @@ def _run_process(
     shell: bool,
     log_path: Path,
     log_header: str,
+    live_preview_context: Optional[LivePreviewContext] = None,
     on_spawn: Optional[Callable[[int], None]] = None,
 ) -> tuple[Optional[int], str, str, Optional[str]]:
+    live_preview = _live_preview_writer(live_preview_context)
     with log_path.open("a", encoding="utf-8") as log_file:
         log_file.write(log_header)
         log_file.flush()
@@ -313,11 +331,11 @@ def _run_process(
         try:
             stdout_thread = threading.Thread(
                 target=_pump_stream,
-                args=(process.stdout, stdout_chunks, log_file, lock),
+                args=(process.stdout, stdout_chunks, log_file, lock, live_preview),
             )
             stderr_thread = threading.Thread(
                 target=_pump_stream,
-                args=(process.stderr, stderr_chunks, log_file, lock),
+                args=(process.stderr, stderr_chunks, log_file, lock, live_preview),
             )
             stdout_thread.start()
             stderr_thread.start()
@@ -378,7 +396,111 @@ def _record_job_spawn(
     _print_job_spawned(job_id, job_type, pid)
 
 
-def _pump_stream(stream, chunks: list[str], log_file, lock: threading.Lock) -> None:
+def _live_preview_context(
+    job_type: str, role: str, profile_name: str
+) -> LivePreviewContext:
+    if job_type == "RUN_CHECKS":
+        return LivePreviewContext(subject="checks", verb="checking")
+
+    verb_by_job_type = {
+        "IMPLEMENT": "coding",
+        "REVIEW": "reviewing",
+        "TRIAGE": "reviewing",
+        "FIX": "fixing",
+        "AUTOFIX": "fixing",
+        "CLOSE_PHASE": "closing",
+    }
+    verb = verb_by_job_type.get(job_type, role.lower())
+    return LivePreviewContext(subject=profile_name, verb=verb)
+
+
+def _live_preview_writer(
+    context: Optional[LivePreviewContext],
+) -> Optional[Callable[[str], None]]:
+    if context is None or not _live_logs_enabled():
+        return None
+    color_enabled = _resolve_color_enabled()
+
+    def write(text: str) -> None:
+        for line in _preview_lines(text):
+            print(
+                _format_live_preview_line(
+                    context, line, color_enabled=color_enabled
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+
+    return write
+
+
+def _preview_lines(text: str) -> list[str]:
+    lines = text.splitlines()
+    return lines or [""]
+
+
+def _format_live_preview_line(
+    context: LivePreviewContext,
+    text: str,
+    *,
+    color_enabled: bool,
+) -> str:
+    prefix = f"{context.subject} {context.verb}:"
+    body = text.rstrip("\r\n")
+    plain = prefix if not body.strip() else f"{prefix} {body}"
+    truncated = _truncate_visible(plain, context.max_chars)
+    if not color_enabled:
+        return truncated
+    if truncated == prefix:
+        return f"{_COLOR_PREFIX}{truncated}{_COLOR_RESET}"
+    colored_prefix = f"{_COLOR_PREFIX}{prefix}{_COLOR_RESET}"
+    return truncated.replace(prefix, colored_prefix, 1)
+
+
+def _truncate_visible(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= len(_TRUNCATION_MARKER):
+        return _TRUNCATION_MARKER[:max_chars]
+    keep = max_chars - len(_TRUNCATION_MARKER)
+    return text[:keep].rstrip() + _TRUNCATION_MARKER
+
+
+def _live_logs_enabled() -> bool:
+    value = os.environ.get("AGENT_RUNNER_LIVE_LOGS")
+    if value is None:
+        return True
+    return value.strip().lower() not in _LIVE_LOGS_DISABLE_VALUES
+
+
+def _resolve_color_enabled(
+    *,
+    mode: Optional[str] = None,
+    stream=None,
+    env: Optional[dict[str, str]] = None,
+) -> bool:
+    env = os.environ if env is None else env
+    mode = env.get("AGENT_RUNNER_COLOR", "auto") if mode is None else mode
+    normalized = mode.strip().lower()
+    if normalized == "always":
+        return True
+    if normalized == "never":
+        return False
+    if normalized != "auto":
+        normalized = "auto"
+    if "NO_COLOR" in env:
+        return False
+    stream = sys.stderr if stream is None else stream
+    return bool(getattr(stream, "isatty", lambda: False)())
+
+
+def _pump_stream(
+    stream,
+    chunks: list[str],
+    log_file,
+    lock: threading.Lock,
+    live_preview: Optional[Callable[[str], None]] = None,
+) -> None:
     if stream is None:
         return
     with stream:
@@ -387,6 +509,11 @@ def _pump_stream(stream, chunks: list[str], log_file, lock: threading.Lock) -> N
             with lock:
                 log_file.write(text)
                 log_file.flush()
+                if live_preview is not None:
+                    try:
+                        live_preview(text)
+                    except OSError:
+                        pass
 
 
 def _join_thread(thread: Optional[threading.Thread], *, timeout: float) -> None:
