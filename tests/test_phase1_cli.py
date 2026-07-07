@@ -264,9 +264,28 @@ class Phase1CliTests(unittest.TestCase):
 
             config = load_config(repo)
             self.assertEqual(config.role_fallbacks, {"reviewer": ["antigravity"]})
+            self.assertEqual(config.warnings, [])
             self.assertEqual(config.base_branch, "main")
             self.assertFalse(config.merge_on_close)
             self.assertEqual(config.merge_strategy, "squash")
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["roleFallbacks"] = {"coder": ["antigravity"]}
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            config = load_config(repo)
+            self.assertEqual(config.role_fallbacks, {"coder": ["antigravity"]})
+            self.assertEqual(config.warnings, [])
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["roles"]["planner"] = "claude"
+            data["roleFallbacks"] = {"planner": ["antigravity"]}
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            config = load_config(repo)
+            self.assertEqual(config.role_fallbacks, {"planner": ["antigravity"]})
+            self.assertEqual(len(config.warnings), 1)
+            self.assertIn("only the coder and reviewer roles", config.warnings[0])
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
             data["mergeStrategy"] = "octopus"

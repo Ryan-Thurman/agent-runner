@@ -80,6 +80,8 @@ def write_config(
     checks: list[str],
     max_retries: int = 3,
     auto_commit: bool = False,
+    coder_args: Optional[list[str]] = None,
+    coder_fallback: bool = False,
     reviewer_args: Optional[list[str]] = None,
     reviewer_fallback: bool = False,
 ) -> None:
@@ -94,6 +96,15 @@ def write_config(
         }
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
+    if coder_args is not None:
+        data["agents"]["special-coder"] = {
+            "command": sys.executable,
+            "promptArgs": [str(agent_script), *coder_args],
+            "writeFlags": [],
+            "readOnlyFlags": [],
+            "outputCapture": "stdout",
+        }
+        data["roles"]["coder"] = "special-coder"
     if reviewer_args is not None:
         data["agents"]["special-reviewer"] = {
             "command": sys.executable,
@@ -103,8 +114,13 @@ def write_config(
             "outputCapture": "stdout",
         }
         data["roles"]["reviewer"] = "special-reviewer"
+    role_fallbacks = {}
+    if coder_fallback:
+        role_fallbacks["coder"] = ["fake"]
     if reviewer_fallback:
-        data["roleFallbacks"] = {"reviewer": ["fake"]}
+        role_fallbacks["reviewer"] = ["fake"]
+    if role_fallbacks:
+        data["roleFallbacks"] = role_fallbacks
     data["checks"] = checks
     data["maxRetriesPerPhase"] = max_retries
     data["autoCommit"] = auto_commit
@@ -185,6 +201,9 @@ if "Fix only" in prompt:
         prompt,
         encoding="utf-8",
     )
+    if "--quota-fail-fix" in sys.argv:
+        print("coder quota exceeded: 429 Too Many Requests", file=sys.stderr)
+        raise SystemExit(1)
     Path("fix-marker.txt").write_text("fixed\n", encoding="utf-8")
     if os.environ.get("AGENT_PUBLISH") == "1":
         subprocess.run(["git", "add", "-A"], check=True)
@@ -226,6 +245,9 @@ if "Close the accepted phase" in prompt:
     print("fake closer completed")
     raise SystemExit(0)
 
+if "--quota-fail-implement" in sys.argv:
+    print("coder quota exceeded: 429 Too Many Requests", file=sys.stderr)
+    raise SystemExit(1)
 Path("generated.txt").write_text("created\n", encoding="utf-8")
 if os.environ.get("AGENT_PUBLISH") == "1":
     subprocess.run(["git", "add", "-A"], check=True)
@@ -804,6 +826,94 @@ class Phase6LoopTests(unittest.TestCase):
                 event
                 for event in events(home, phase["id"])
                 if event["event_type"] == "review.fallback"
+            ]
+            self.assertEqual(len(fallback_events), 1)
+            self.assertIn("quota/rate limit", fallback_events[0]["message"])
+
+    def test_implement_quota_failure_falls_back_to_coder_fallback_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                checks=[],
+                coder_args=["--quota-fail-implement"],
+                coder_fallback=True,
+            )
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("falling back to profile 'fake'", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            self.assertTrue((repo / "generated.txt").exists())
+            implement_jobs = [
+                job for job in jobs(home, phase["id"]) if job["type"] == "IMPLEMENT"
+            ]
+            self.assertEqual(
+                [job["status"] for job in implement_jobs], ["FAILED", "SUCCEEDED"]
+            )
+            fallback_events = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "implement.fallback"
+            ]
+            self.assertEqual(len(fallback_events), 1)
+            self.assertIn("quota/rate limit", fallback_events[0]["message"])
+
+    def test_fix_quota_failure_falls_back_to_coder_fallback_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                checks=[
+                    f"{shlex.quote(sys.executable)} -c "
+                    "\"from pathlib import Path; assert Path('generated.txt').exists()\""
+                ],
+                coder_args=["--quota-fail-fix"],
+                coder_fallback=True,
+            )
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "AGENT_MODE": "REVIEW_FIX"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("falling back to profile 'fake'", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            self.assertTrue((repo / "fix-marker.txt").exists())
+            fix_jobs = [job for job in jobs(home, phase["id"]) if job["type"] == "FIX"]
+            self.assertEqual(
+                [job["status"] for job in fix_jobs], ["FAILED", "SUCCEEDED"]
+            )
+            fallback_events = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "fix.fallback"
             ]
             self.assertEqual(len(fallback_events), 1)
             self.assertIn("quota/rate limit", fallback_events[0]["message"])

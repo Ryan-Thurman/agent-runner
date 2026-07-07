@@ -42,7 +42,13 @@ phases.
   phase.
 
 ## Phase 1: Extend role fallbacks to the coder role
-Status: PENDING
+Status: COMPLETE
+Evidence: Shared fallback helper added for reviewer REVIEW and coder
+IMPLEMENT/FIX jobs, including FIX resume paths; config validation now accepts
+`roleFallbacks.coder` without warning and still warns for unrelated roles;
+docs updated for coder/reviewer fallbacks; tests cover IMPLEMENT, FIX, reviewer
+fallback compatibility, and validation warnings.
+Checks: `python3 -m compileall -q .`; `python3 -m unittest discover -s tests`.
 
 Today only the reviewer retries with `roleFallbacks` profiles on quota/rate
 limit failures; the fallback loop is open-coded in `_run_review` and
@@ -319,4 +325,3 @@ Acceptance Criteria:
   the chosen tier and profile.
 - `python3 -m compileall -q .` and `python3 -m unittest discover -s tests`
   pass.
-
