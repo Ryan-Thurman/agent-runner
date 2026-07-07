@@ -265,10 +265,10 @@ def _validate_role_fallbacks(
                 raise ConfigError(
                     f"invalid roleFallbacks.{role}: unknown agent profile {name!r}"
                 )
-        if role != "reviewer" and names:
+        if role not in {"coder", "reviewer"} and names:
             warnings.append(
-                f"roleFallbacks.{role} is configured but only the reviewer role "
-                "falls back on quota failures today"
+                f"roleFallbacks.{role} is configured but only the coder and "
+                "reviewer roles fall back on quota failures today"
             )
         role_fallbacks[role] = names
     return role_fallbacks
@@ -373,9 +373,9 @@ SAMPLE_CONFIG = """{
   },
 
   // Optional. When a role's agent fails on a quota/rate limit, the runner
-  // retries the job with these profiles in order. Only the reviewer role
-  // falls back today.
-  // "roleFallbacks": { "reviewer": ["antigravity"] },
+  // retries coder IMPLEMENT/FIX and reviewer REVIEW jobs with these profiles
+  // in order.
+  // "roleFallbacks": { "coder": ["codex"], "reviewer": ["antigravity"] },
 
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,

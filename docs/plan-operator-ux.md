@@ -42,7 +42,9 @@ phases.
   phase.
 
 ## Phase 1: Extend role fallbacks to the coder role
-Status: PENDING
+Status: COMPLETE
+Evidence: 6e75dd9; coder IMPLEMENT/FIX fallbacks, docs, and tests accepted; `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
+Checks: `python3 -m compileall -q .`; `python3 -m unittest discover -s tests`.
 
 Today only the reviewer retries with `roleFallbacks` profiles on quota/rate
 limit failures; the fallback loop is open-coded in `_run_review` and
@@ -319,4 +321,3 @@ Acceptance Criteria:
   the chosen tier and profile.
 - `python3 -m compileall -q .` and `python3 -m unittest discover -s tests`
   pass.
-

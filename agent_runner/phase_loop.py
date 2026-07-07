@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from .config import RunnerConfig
+from .config import AgentProfile, RunnerConfig
 from .errors import AgentRunnerError, JobError
 from .jobs import JobResult, is_quota_failure, run_agent_job, run_checks_job
 from .plan import ParsedPhase, ParsedPlan, parse_plan_file
@@ -237,15 +237,14 @@ def _run_implement(
         event_type="phase.implementing",
         message=f"started IMPLEMENT for phase {phase['phase_number']}",
     )
-    profile = _profile_for_role(config, "coder")
-    result = run_agent_job(
+    result, _ = _run_agent_job_with_fallbacks(
         connection,
         project_id=project_id,
         plan_id=plan_id,
         phase_id=phase["id"],
         job_type="IMPLEMENT",
         role="coder",
-        profile=profile,
+        profiles=_profiles_for_role(config, "coder"),
         prompt=_implement_prompt(
             repo_root, parsed_phase, require_publish=config.auto_commit
         ),
@@ -445,7 +444,7 @@ def _run_review(
                 message=str(exc),
             )
 
-    profiles = _reviewer_profiles(config)
+    profiles = _profiles_for_role(config, "reviewer")
     log_dir = Path(phase["log_dir"])
     review_prompt = _review_prompt(
         repo_root,
@@ -454,46 +453,19 @@ def _run_review(
         phase=phase,
         use_published_diff=config.auto_commit,
     )
-    for attempt, profile in enumerate(profiles):
-        result = run_agent_job(
-            connection,
-            project_id=project_id,
-            plan_id=plan_id,
-            phase_id=phase["id"],
-            job_type="REVIEW",
-            role="reviewer",
-            profile=profile,
-            prompt=review_prompt,
-            repo_root=repo_root,
-            log_dir=log_dir,
-            timeout_seconds=config.timeout_minutes * 60,
-        )
-        if result.status == "SUCCEEDED":
-            break
-        next_profile = (
-            profiles[attempt + 1] if attempt + 1 < len(profiles) else None
-        )
-        if next_profile is None or not is_quota_failure(result):
-            break
-        message = (
-            f"REVIEW hit a quota/rate limit with profile {profile.name!r}; "
-            f"falling back to profile {next_profile.name!r}"
-        )
-        print(f"[agent-runner] {message}", file=sys.stderr, flush=True)
-        record_event(
-            connection,
-            project_id=project_id,
-            plan_id=plan_id,
-            phase_id=phase["id"],
-            job_id=result.job_id,
-            event_type="review.fallback",
-            message=message,
-            data={
-                "failedProfile": profile.name,
-                "fallbackProfile": next_profile.name,
-                "error": result.error,
-            },
-        )
+    result, _ = _run_agent_job_with_fallbacks(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        job_type="REVIEW",
+        role="reviewer",
+        profiles=profiles,
+        prompt=review_prompt,
+        repo_root=repo_root,
+        log_dir=log_dir,
+        timeout_seconds=config.timeout_minutes * 60,
+    )
     if result.status != "SUCCEEDED":
         _block_phase_after_job(
             connection,
@@ -943,15 +915,14 @@ def _run_fix(
     if paused is not None:
         return paused
 
-    profile = _profile_for_role(config, "coder")
-    fix_result = run_agent_job(
+    fix_result, _ = _run_agent_job_with_fallbacks(
         connection,
         project_id=project_id,
         plan_id=plan_id,
         phase_id=phase["id"],
         job_type="FIX",
         role="coder",
-        profile=profile,
+        profiles=_profiles_for_role(config, "coder"),
         prompt=prompt,
         repo_root=repo_root,
         log_dir=Path(phase["log_dir"]),
@@ -1070,15 +1041,14 @@ def _run_fix_without_increment(
     prompt: str,
     source_job: Optional[JobResult],
 ) -> PhaseLoopResult:
-    profile = _profile_for_role(config, "coder")
-    fix_result = run_agent_job(
+    fix_result, _ = _run_agent_job_with_fallbacks(
         connection,
         project_id=project_id,
         plan_id=plan_id,
         phase_id=phase["id"],
         job_type="FIX",
         role="coder",
-        profile=profile,
+        profiles=_profiles_for_role(config, "coder"),
         prompt=prompt,
         repo_root=repo_root,
         log_dir=Path(phase["log_dir"]),
@@ -1215,14 +1185,73 @@ def _profile_for_role(config: RunnerConfig, role: str):
         raise JobError(f"missing configured role: {role}") from exc
 
 
-def _reviewer_profiles(config: RunnerConfig):
-    profiles = [_profile_for_role(config, "reviewer")]
+def _profiles_for_role(config: RunnerConfig, role: str) -> list[AgentProfile]:
+    profiles = [_profile_for_role(config, role)]
     seen = {profiles[0].name}
-    for name in config.role_fallbacks.get("reviewer", []):
+    for name in config.role_fallbacks.get(role, []):
         if name not in seen:
             profiles.append(config.agents[name])
             seen.add(name)
     return profiles
+
+
+def _run_agent_job_with_fallbacks(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase_id: int,
+    job_type: str,
+    role: str,
+    profiles: list[AgentProfile],
+    prompt: str,
+    repo_root: Path,
+    log_dir: Path,
+    timeout_seconds: float,
+    trigger: Optional[str] = None,
+) -> tuple[JobResult, AgentProfile]:
+    for attempt, profile in enumerate(profiles):
+        result = run_agent_job(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase_id,
+            job_type=job_type,
+            role=role,
+            profile=profile,
+            prompt=prompt,
+            repo_root=repo_root,
+            log_dir=log_dir,
+            timeout_seconds=timeout_seconds,
+            trigger=trigger,
+        )
+        if result.status == "SUCCEEDED":
+            return result, profile
+        next_profile = (
+            profiles[attempt + 1] if attempt + 1 < len(profiles) else None
+        )
+        if next_profile is None or not is_quota_failure(result):
+            return result, profile
+        message = (
+            f"{job_type} hit a quota/rate limit with profile {profile.name!r}; "
+            f"falling back to profile {next_profile.name!r}"
+        )
+        print(f"[agent-runner] {message}", file=sys.stderr, flush=True)
+        record_event(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase_id,
+            job_id=result.job_id,
+            event_type=f"{job_type.lower()}.fallback",
+            message=message,
+            data={
+                "failedProfile": profile.name,
+                "fallbackProfile": next_profile.name,
+                "error": result.error,
+            },
+        )
+    raise JobError(f"no profiles configured for role {role}")
 
 
 def _ensure_clean_or_allowed(config: RunnerConfig, repo_root: Path) -> Optional[set[str]]:
@@ -2111,7 +2140,8 @@ def _close_phase_prompt(
         "2. Plan write-back: set this phase's Status marker line to "
         "`Status: COMPLETE` directly under the phase heading, and add one "
         "runner-owned one-line evidence note directly after it in the form "
-        "`Evidence: <commit/hash/checks summary>`.\n"
+        "`Evidence: <commit/hash/checks summary>`. Keep Evidence on one line; "
+        "do not add a separate `Checks:` line.\n"
         "3. Handoff: write the handoff file with these markdown sections: "
         "Completed Work, Decisions, Files Changed, Checks Run, Open Risks, "
         "Next-Phase Context.\n"
@@ -2144,7 +2174,7 @@ def _validate_close_phase_outputs(
     if fresh_phase.content_hash != phase["content_hash"]:
         raise JobError(
             "closer changed the protected phase body; only status/evidence "
-            "write-back is allowed"
+            "metadata write-back is allowed"
         )
     handoff_path = repo_root / _handoff_path(plan_path, phase)
     if not handoff_path.exists():

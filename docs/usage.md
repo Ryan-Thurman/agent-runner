@@ -141,13 +141,14 @@ Current notes:
 - `promptPrefix` is optional. When set, the runner prepends it to every prompt
   sent to that agent profile.
 - `roleFallbacks` is optional and maps a role to an ordered list of agent
-  profiles. When a REVIEW job fails with a quota/rate-limit error (429, "usage
-  limit", "quota exceeded", and similar), the runner reruns the review with the
-  next profile and records a `review.fallback` event. Any other review failure
-  blocks the phase without falling back. Only the reviewer role falls back
-  today; other roles are accepted but warned about. The sample config includes
-  an `antigravity` profile (the `agy` CLI) suitable as a reviewer fallback on a
-  separate quota pool.
+  profiles. When a coder IMPLEMENT/FIX job or reviewer REVIEW job fails with a
+  quota/rate-limit error (429, "usage limit", "quota exceeded", and similar),
+  the runner reruns the job with the next profile and records a
+  `<jobtype>.fallback` event such as `implement.fallback`, `fix.fallback`, or
+  `review.fallback`. Any other failure blocks the phase without falling back.
+  Other roles are accepted but warned about. The sample config includes an
+  `antigravity` profile (the `agy` CLI) suitable as a fallback on a separate
+  quota pool.
 - `checks` run as shell commands from the repo root, in order. The first failure
   stops the check job.
 - `timeoutMinutes` applies per agent/check process.
@@ -203,7 +204,9 @@ Rules:
 - If the status line is missing, the runner treats the phase as `PENDING`.
 - The status line and the runner-owned `Evidence:` line immediately after it are
   excluded from the phase content hash, so close-phase write-back does not count
-  as a plan body change.
+  as a plan body change. For compatibility with earlier write-backs, a wrapped
+  evidence block that contains a `Checks:` line is also treated as runner-owned
+  metadata.
 - Duplicate phase numbers and invalid status values are rejected.
 
 Useful statuses while dogfooding:
