@@ -10,6 +10,8 @@ from typing import Optional
 from agent_runner.config import SAMPLE_CONFIG, project_slug, strip_json_comments
 from agent_runner.errors import PlanError
 from agent_runner.plan import (
+    PLAN_CONTEXT_CHAR_LIMIT,
+    PLAN_CONTEXT_TRUNCATION_MARKER,
     parse_plan_file,
     parse_plan_markdown,
     register_or_resume_plan,
@@ -143,6 +145,27 @@ class Phase3PlanTests(unittest.TestCase):
         self.assertIn("Parse plan.", parsed.phases[1].content)
         self.assertNotIn("Ignored preamble", parsed.phases[0].content)
         self.assertNotIn("Ignored preamble", parsed.phases[1].content)
+        self.assertIn("Ignored preamble", parsed.plan_context)
+        self.assertEqual(parsed.phases[0].plan_context, parsed.plan_context)
+        self.assertEqual(parsed.phases[1].plan_context, parsed.plan_context)
+
+    def test_parser_bounds_oversized_plan_context_deterministically(self):
+        oversized_preamble = (
+            "# Build Plan\n\n"
+            + ("A" * (PLAN_CONTEXT_CHAR_LIMIT + 200))
+            + "\n\nStanding guidance after cap.\n\n"
+        )
+        parsed = parse_plan_markdown(
+            oversized_preamble
+            + "## Phase 1: CLI\n"
+            + "Build CLI.\n",
+            path="docs/plan.md",
+        )
+
+        self.assertEqual(len(parsed.plan_context), PLAN_CONTEXT_CHAR_LIMIT)
+        self.assertTrue(parsed.plan_context.endswith(PLAN_CONTEXT_TRUNCATION_MARKER))
+        self.assertNotIn("Standing guidance after cap", parsed.plan_context)
+        self.assertEqual(parsed.phases[0].plan_context, parsed.plan_context)
 
     def test_parser_rejects_duplicate_phase_numbers(self):
         text = (

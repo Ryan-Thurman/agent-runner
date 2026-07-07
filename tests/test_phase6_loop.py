@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from agent_runner.config import SAMPLE_CONFIG, project_slug, strip_json_comments
-from agent_runner.plan import parse_plan_file
+from agent_runner.plan import PLAN_CONTEXT_CHAR_LIMIT, parse_plan_file
 from agent_runner.storage import (
     connect_db,
     create_phase,
@@ -60,11 +60,12 @@ def commit_all(repo: Path, message: str = "baseline") -> None:
     )
 
 
-def write_plan(repo: Path, *, status: str = "PENDING") -> None:
+def write_plan(repo: Path, *, status: str = "PENDING", preamble: str = "") -> None:
     plan_path = repo / "docs" / "plan.md"
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path.write_text(
-        "## Phase 6: REVIEW and FIX convergence loop\n"
+        preamble
+        + "## Phase 6: REVIEW and FIX convergence loop\n"
         f"Status: {status}\n\n"
         "Create generated.txt and converge through review.\n\n"
         "Acceptance Criteria:\n"
@@ -323,6 +324,10 @@ if "Fix only" in prompt:
     raise SystemExit(0)
 
 if "Close the accepted phase" in prompt:
+    (trace_dir / f"close-{len(list(trace_dir.glob('close-*.md'))) + 1}.md").write_text(
+        prompt,
+        encoding="utf-8",
+    )
     phase_number = int(re.search(r"Phase (\d+):", prompt).group(1))
     plan = Path("docs/plan.md")
     text = plan.read_text(encoding="utf-8")
@@ -350,6 +355,10 @@ if "Close the accepted phase" in prompt:
 if "--quota-fail-implement" in sys.argv:
     print("coder quota exceeded: 429 Too Many Requests", file=sys.stderr)
     raise SystemExit(1)
+(trace_dir / f"implement-{len(list(trace_dir.glob('implement-*.md'))) + 1}.md").write_text(
+    prompt,
+    encoding="utf-8",
+)
 Path("generated.txt").write_text("created\n", encoding="utf-8")
 if os.environ.get("AGENT_PUBLISH") == "1":
     subprocess.run(["git", "add", "-A"], check=True)
@@ -1268,6 +1277,56 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertIn("Create fix-marker.txt", second_prompt)
             self.assertIn("Create fix-marker.txt", fix_prompt)
             self.assertIn("Should Fix: tidy wording", fix_prompt)
+
+    def test_plan_context_appears_in_implement_review_fix_and_close_prompts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(
+                repo,
+                preamble=(
+                    "# Runner Plan\n\n"
+                    "PLAN-CONTEXT-SENTINEL: all review findings are requested updates.\n\n"
+                    "Runner safety rules still win over plan prose.\n\n"
+                ),
+            )
+            write_config(
+                repo,
+                script,
+                checks=[
+                    f"{shlex.quote(sys.executable)} -c "
+                    "\"from pathlib import Path; assert Path('generated.txt').exists()\""
+                ],
+            )
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "AGENT_MODE": "REVIEW_FIX"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            prompts = [
+                (trace / "implement-1.md").read_text(encoding="utf-8"),
+                (trace / "review-1.md").read_text(encoding="utf-8"),
+                (trace / "fix-1.md").read_text(encoding="utf-8"),
+                (trace / "close-1.md").read_text(encoding="utf-8"),
+            ]
+            for prompt in prompts:
+                self.assertIn(
+                    f"Plan-level context (bounded to {PLAN_CONTEXT_CHAR_LIMIT} characters)",
+                    prompt,
+                )
+                self.assertIn("PLAN-CONTEXT-SENTINEL", prompt)
+                self.assertIn("does not override runner safety rules", prompt)
 
     def test_bucketed_review_findings_request_changes_and_reach_fix_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:

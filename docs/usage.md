@@ -281,6 +281,15 @@ Acceptance Criteria:
 Rules:
 
 - Use `## Phase <number>: <title>` headings.
+- Text before the first phase heading is treated as plan-level context. Use it
+  for standing guidance, shared acceptance notes, or review contracts that apply
+  across phases.
+- IMPLEMENT, REVIEW, FIX, and CLOSE_PHASE prompts include this plan-level
+  context, bounded deterministically to 4000 characters. Oversized preambles are
+  truncated at that cap and marked as truncated.
+- Plan-level context is prompt data only. It can guide agents, but it does not
+  override runner safety rules, phase scope rules, or explicit job
+  requirements.
 - Add `Status: <STATE>` directly under the phase heading.
 - If the status line is missing, the runner treats the phase as `PENDING`.
 - The status line and the runner-owned `Evidence:` line immediately after it are

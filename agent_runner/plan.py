@@ -25,6 +25,8 @@ PROTECTED_CHANGE_STATUSES = {
     "COMPLETE",
     "BLOCKED",
 }
+PLAN_CONTEXT_CHAR_LIMIT = 4000
+PLAN_CONTEXT_TRUNCATION_MARKER = "\n\n[plan context truncated]"
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,7 @@ class ParsedPhase:
     status: str
     content: str
     content_hash: str
+    plan_context: str = ""
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,7 @@ class ParsedPlan:
     path: str
     phases: list[ParsedPhase]
     content_hash: str
+    plan_context: str = ""
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,8 @@ def parse_plan_markdown(text: str, *, path: str) -> ParsedPlan:
             seen_phase_numbers.add(phase_number)
             headings.append((index, phase_number, match.group(2).strip()))
 
+    first_heading_index = headings[0][0] if headings else len(lines)
+    plan_context = _bounded_plan_context("".join(lines[:first_heading_index]))
     phases: list[ParsedPhase] = []
     for heading_index, phase_number, title in headings:
         next_heading_index = _next_heading_index(headings, heading_index, len(lines))
@@ -79,6 +85,7 @@ def parse_plan_markdown(text: str, *, path: str) -> ParsedPlan:
                 status=status,
                 content=content,
                 content_hash=content_hash,
+                plan_context=plan_context,
             )
         )
 
@@ -88,7 +95,12 @@ def parse_plan_markdown(text: str, *, path: str) -> ParsedPlan:
             for phase in phases
         )
     )
-    return ParsedPlan(path=path, phases=phases, content_hash=content_hash)
+    return ParsedPlan(
+        path=path,
+        phases=phases,
+        content_hash=content_hash,
+        plan_context=plan_context,
+    )
 
 
 def parse_plan_file(repo_root: Path, plan_path: str) -> ParsedPlan:
@@ -286,6 +298,14 @@ def _extract_status_and_hash_lines(lines: list[str]) -> tuple[str, list[str]]:
         if evidence_match:
             hash_start_index = _skip_runner_metadata(lines, hash_start_index)
     return status, list(lines[hash_start_index:])
+
+
+def _bounded_plan_context(text: str) -> str:
+    context = text.strip()
+    if len(context) <= PLAN_CONTEXT_CHAR_LIMIT:
+        return context
+    content_limit = PLAN_CONTEXT_CHAR_LIMIT - len(PLAN_CONTEXT_TRUNCATION_MARKER)
+    return context[:content_limit].rstrip() + PLAN_CONTEXT_TRUNCATION_MARKER
 
 
 def _skip_runner_metadata(lines: list[str], evidence_index: int) -> int:
