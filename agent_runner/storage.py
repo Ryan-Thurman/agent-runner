@@ -1,4 +1,6 @@
 import json
+import os
+import signal
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,6 +113,7 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             log_path TEXT,
             output_path TEXT,
             error TEXT,
+            pid INTEGER,
             started_sha TEXT,
             finished_sha TEXT,
             exit_code INTEGER,
@@ -139,6 +142,7 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
         );
         """
     )
+    _ensure_column(connection, "jobs", "pid", "INTEGER")
     connection.commit()
 
 
@@ -206,6 +210,54 @@ def get_plan(connection: sqlite3.Connection, plan_id: int) -> sqlite3.Row:
     row = connection.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
     if row is None:
         raise LookupError(f"plan is not registered: {plan_id}")
+    return row
+
+
+def update_plan_status(
+    connection: sqlite3.Connection, plan_id: int, status: str
+) -> sqlite3.Row:
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE plans
+        SET status = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (status, now, plan_id),
+    )
+    connection.commit()
+    return get_plan(connection, plan_id)
+
+
+def update_project_status(
+    connection: sqlite3.Connection, project_id: int, status: str
+) -> sqlite3.Row:
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE projects
+        SET status = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (status, now, project_id),
+    )
+    connection.commit()
+    row = connection.execute(
+        "SELECT * FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"project is not registered: {project_id}")
+    return row
+
+
+def get_project(connection: sqlite3.Connection, project_id: int) -> sqlite3.Row:
+    row = connection.execute(
+        "SELECT * FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"project is not registered: {project_id}")
     return row
 
 
@@ -364,6 +416,7 @@ def create_job(
     log_path: Optional[Path] = None,
     output_path: Optional[Path] = None,
     error: Optional[str] = None,
+    pid: Optional[int] = None,
     started_sha: Optional[str] = None,
     finished_sha: Optional[str] = None,
     exit_code: Optional[int] = None,
@@ -379,10 +432,10 @@ def create_job(
         """
         INSERT INTO jobs (
             project_id, plan_id, phase_id, type, status, trigger, prompt_path,
-            log_path, output_path, error, started_sha, finished_sha, exit_code,
+            log_path, output_path, error, pid, started_sha, finished_sha, exit_code,
             started_at, finished_at, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             project_id,
@@ -395,6 +448,7 @@ def create_job(
             str(log_path) if log_path is not None else None,
             str(output_path) if output_path is not None else None,
             error,
+            pid,
             started_sha,
             finished_sha,
             exit_code,
@@ -413,6 +467,23 @@ def get_job(connection: sqlite3.Connection, job_id: int) -> sqlite3.Row:
     if row is None:
         raise LookupError(f"job is not registered: {job_id}")
     return row
+
+
+def update_job_pid(
+    connection: sqlite3.Connection, job_id: int, pid: int
+) -> sqlite3.Row:
+    now = utc_now_iso()
+    connection.execute(
+        """
+        UPDATE jobs
+        SET pid = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (pid, now, job_id),
+    )
+    connection.commit()
+    return get_job(connection, job_id)
 
 
 def list_running_jobs_for_project(
@@ -511,6 +582,9 @@ def reap_orphaned_jobs(connection: sqlite3.Connection, project_id: int) -> list[
     try:
         connection.execute("BEGIN")
         for job in running_jobs:
+            pid = job["pid"]
+            if isinstance(pid, int):
+                _terminate_process_group(pid)
             connection.execute(
                 """
                 UPDATE jobs
@@ -559,6 +633,28 @@ def reap_orphaned_jobs(connection: sqlite3.Connection, project_id: int) -> list[
     else:
         connection.commit()
     return reaped_ids
+
+
+def _ensure_column(
+    connection: sqlite3.Connection, table_name: str, column_name: str, definition: str
+) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name not in columns:
+        connection.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+        )
+
+
+def _terminate_process_group(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        return
 
 
 def phase_log_dir(

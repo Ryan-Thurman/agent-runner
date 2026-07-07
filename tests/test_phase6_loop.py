@@ -80,6 +80,8 @@ def write_config(
     checks: list[str],
     max_retries: int = 3,
     auto_commit: bool = False,
+    reviewer_args: Optional[list[str]] = None,
+    reviewer_fallback: bool = False,
 ) -> None:
     data = json.loads(strip_json_comments(SAMPLE_CONFIG))
     data["agents"] = {
@@ -92,6 +94,17 @@ def write_config(
         }
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
+    if reviewer_args is not None:
+        data["agents"]["special-reviewer"] = {
+            "command": sys.executable,
+            "promptArgs": [str(agent_script), *reviewer_args],
+            "writeFlags": [],
+            "readOnlyFlags": [],
+            "outputCapture": "stdout",
+        }
+        data["roles"]["reviewer"] = "special-reviewer"
+    if reviewer_fallback:
+        data["roleFallbacks"] = {"reviewer": ["fake"]}
     data["checks"] = checks
     data["maxRetriesPerPhase"] = max_retries
     data["autoCommit"] = auto_commit
@@ -104,6 +117,7 @@ def write_phase6_agent(path: Path) -> None:
         r"""
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -119,6 +133,12 @@ if (
 ):
     review_number = len(list(trace_dir.glob("review-*.md"))) + 1
     (trace_dir / f"review-{review_number}.md").write_text(prompt, encoding="utf-8")
+    if "--quota-fail" in sys.argv:
+        print("codex quota exceeded: 429 Too Many Requests", file=sys.stderr)
+        raise SystemExit(1)
+    if "--hard-fail" in sys.argv:
+        print("reviewer crashed for unrelated reasons", file=sys.stderr)
+        raise SystemExit(1)
     if mode == "GARBAGE":
         print("not json from reviewer")
         raise SystemExit(0)
@@ -130,6 +150,17 @@ if (
             "nonBlockingIssues": ["non-gating note"],
             "recommendedFixPrompt": ""
         }))
+        raise SystemExit(0)
+    if mode == "FENCED_PASS":
+        print("```json")
+        print(json.dumps({
+            "status": "PASS",
+            "summary": "accepted in markdown",
+            "blockingIssues": [],
+            "nonBlockingIssues": ["Nice to Have: optional cleanup"],
+            "recommendedFixPrompt": ""
+        }))
+        print("```")
         raise SystemExit(0)
     if mode == "REVIEW_FIX" and not Path("fix-marker.txt").exists():
         print(json.dumps({
@@ -168,6 +199,31 @@ if "Fix only" in prompt:
             "fix phase",
         ], check=True)
     print("fake fixer completed")
+    raise SystemExit(0)
+
+if "Close the accepted phase" in prompt:
+    phase_number = int(re.search(r"Phase (\d+):", prompt).group(1))
+    plan = Path("docs/plan.md")
+    text = plan.read_text(encoding="utf-8")
+    text = re.sub(
+        rf"(## Phase {phase_number}: [^\n]+\n)(?:Status: [A-Z_]+\n)?",
+        rf"\1Status: COMPLETE\nEvidence: commit pending; checks passed\n",
+        text,
+        count=1,
+    )
+    plan.write_text(text, encoding="utf-8")
+    handoff = Path(f".acc/phases/docs-plan.md/phase-{phase_number:02d}-handoff.md")
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text(
+        "## Completed Work\nDone.\n\n"
+        "## Decisions\nNone.\n\n"
+        "## Files Changed\ndocs/plan.md\n\n"
+        "## Checks Run\nConfigured checks passed.\n\n"
+        "## Open Risks\nNone.\n\n"
+        "## Next-Phase Context\nContinue.\n",
+        encoding="utf-8",
+    )
+    print("fake closer completed")
     raise SystemExit(0)
 
 Path("generated.txt").write_text("created\n", encoding="utf-8")
@@ -250,6 +306,13 @@ def jobs(home: Path, phase_id: int):
         ).fetchall()
 
 
+def events(home: Path, phase_id: int):
+    with connect_db(home) as db:
+        return db.execute(
+            "SELECT * FROM events WHERE phase_id = ? ORDER BY id", (phase_id,)
+        ).fetchall()
+
+
 def seed_reviewing_published_phase(repo: Path, home: Path) -> str:
     published_sha = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=repo, text=True
@@ -312,13 +375,43 @@ class Phase6LoopTests(unittest.TestCase):
             result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("review passed", result.stderr)
+            self.assertIn("plan complete", result.stderr)
             phase = phase_row(home, repo)
-            self.assertEqual(phase["status"], "CLOSING")
+            self.assertEqual(phase["status"], "COMPLETE")
             self.assertEqual(phase["retry_count"], 0)
             review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("git diff --staged", review_prompt)
             self.assertNotIn("fake coder completed", review_prompt)
+
+    def test_reviewer_markdown_fenced_json_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[])
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "AGENT_MODE": "FENCED_PASS"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            review = json.loads(
+                (Path(phase["log_dir"]) / "review.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(review["status"], "PASS")
+            self.assertEqual(review["summary"], "accepted in markdown")
 
     def test_auto_commit_requires_published_pr_before_review(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -358,16 +451,13 @@ class Phase6LoopTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("review passed", result.stderr)
+            self.assertIn("plan complete", result.stderr)
             phase = phase_row(home, repo)
-            head_sha = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
-            ).strip()
-            self.assertEqual(phase["status"], "CLOSING")
+            self.assertEqual(phase["status"], "COMPLETE")
             self.assertEqual(phase["publish_mode"], "pr")
             self.assertEqual(phase["branch_name"], "dev/test-phase")
             self.assertEqual(phase["pr_url"], "https://example.test/pull/1")
-            self.assertEqual(phase["published_sha"], head_sha)
+            self.assertEqual(len(phase["published_sha"]), 40)
             review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("Review the published phase PR independently", review_prompt)
             self.assertIn("Published PR: https://example.test/pull/1", review_prompt)
@@ -562,7 +652,7 @@ class Phase6LoopTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             phase = phase_row(home, repo)
-            self.assertEqual(phase["status"], "CLOSING")
+            self.assertEqual(phase["status"], "COMPLETE")
             self.assertEqual(phase["retry_count"], 1)
             phase_jobs = jobs(home, phase["id"])
             self.assertEqual(
@@ -574,6 +664,7 @@ class Phase6LoopTests(unittest.TestCase):
                     ("FIX", "review"),
                     ("RUN_CHECKS", None),
                     ("REVIEW", None),
+                    ("CLOSE_PHASE", None),
                 ],
             )
             first_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
@@ -676,6 +767,82 @@ class Phase6LoopTests(unittest.TestCase):
             review_log = Path(phase["log_dir"]) / "review.log"
             self.assertIn("not json from reviewer", review_log.read_text(encoding="utf-8"))
             self.assertFalse((Path(phase["log_dir"]) / "review.json").exists())
+
+    def test_review_quota_failure_falls_back_to_fallback_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                checks=[],
+                reviewer_args=["--quota-fail"],
+                reviewer_fallback=True,
+            )
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("falling back to profile 'fake'", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            review_jobs = [
+                job for job in jobs(home, phase["id"]) if job["type"] == "REVIEW"
+            ]
+            self.assertEqual(
+                [job["status"] for job in review_jobs], ["FAILED", "SUCCEEDED"]
+            )
+            fallback_events = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "review.fallback"
+            ]
+            self.assertEqual(len(fallback_events), 1)
+            self.assertIn("quota/rate limit", fallback_events[0]["message"])
+
+    def test_review_non_quota_failure_does_not_fall_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                checks=[],
+                reviewer_args=["--hard-fail"],
+                reviewer_fallback=True,
+            )
+            commit_all(repo)
+
+            result = run_cli(repo, home, "run", extra_env={"TRACE_DIR": str(trace)})
+
+            self.assertEqual(result.returncode, 1)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            review_jobs = [
+                job for job in jobs(home, phase["id"]) if job["type"] == "REVIEW"
+            ]
+            self.assertEqual([job["status"] for job in review_jobs], ["FAILED"])
+            fallback_events = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "review.fallback"
+            ]
+            self.assertEqual(fallback_events, [])
 
 
 if __name__ == "__main__":

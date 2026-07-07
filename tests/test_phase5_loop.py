@@ -107,8 +107,9 @@ def write_fake_agent(path: Path, *, exit_code: int = 0, create_file: bool = True
     if create_file:
         create_line = "Path('generated.txt').write_text('created by fake coder\\n')"
     path.write_text(
-        f"""
+        fr"""
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -121,6 +122,30 @@ if "Review the staged phase work independently" in prompt:
         "nonBlockingIssues": [],
         "recommendedFixPrompt": ""
     }}))
+    raise SystemExit(0)
+if "Close the accepted phase" in prompt:
+    phase_number = int(re.search(r"Phase (\d+):", prompt).group(1))
+    plan = Path("docs/plan.md")
+    text = plan.read_text(encoding="utf-8")
+    text = re.sub(
+        rf"(## Phase {{phase_number}}: [^\n]+\n)(?:Status: [A-Z_]+\n)?",
+        rf"\1Status: COMPLETE\nEvidence: commit pending; checks passed\n",
+        text,
+        count=1,
+    )
+    plan.write_text(text, encoding="utf-8")
+    handoff = Path(f".acc/phases/docs-plan.md/phase-{{phase_number:02d}}-handoff.md")
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text(
+        "## Completed Work\nDone.\n\n"
+        "## Decisions\nNone.\n\n"
+        "## Files Changed\ndocs/plan.md\n\n"
+        "## Checks Run\nConfigured checks passed.\n\n"
+        "## Open Risks\nNone.\n\n"
+        "## Next-Phase Context\nContinue.\n",
+        encoding="utf-8",
+    )
+    print("fake closer completed")
     raise SystemExit(0)
 if "Phase 5: Test implementation" not in prompt:
     print("missing phase prompt", file=sys.stderr)
@@ -192,7 +217,7 @@ class Phase5LoopTests(unittest.TestCase):
             result = run_cli(repo, home, "run")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("review passed", result.stderr)
+            self.assertIn("plan complete", result.stderr)
             staged = subprocess.run(
                 ["git", "diff", "--staged", "--name-only"],
                 cwd=repo,
@@ -201,7 +226,7 @@ class Phase5LoopTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
             ).stdout.splitlines()
             self.assertIn("generated.txt", staged)
-            self.assertEqual(phase_row(home, repo)["status"], "CLOSING")
+            self.assertEqual(phase_row(home, repo)["status"], "COMPLETE")
 
     def test_coder_failure_blocks_phase_and_status_explains_why(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -392,7 +417,7 @@ class Phase5LoopTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("reaped 1 orphaned job", result.stderr)
-            self.assertEqual(phase_row(home, repo)["status"], "CLOSING")
+            self.assertEqual(phase_row(home, repo)["status"], "COMPLETE")
 
     def test_checking_resume_runs_checks_without_implement(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -410,15 +435,15 @@ class Phase5LoopTests(unittest.TestCase):
             result = run_cli(repo, home, "run")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("review passed", result.stderr)
+            self.assertIn("plan complete", result.stderr)
             self.assertFalse((repo / "generated.txt").exists())
             with connect_db(home) as db:
                 job_types = [
                     row["type"]
                     for row in db.execute("SELECT type FROM jobs ORDER BY id").fetchall()
                 ]
-            self.assertEqual(job_types, ["RUN_CHECKS", "REVIEW"])
-            self.assertEqual(phase_row(home, repo)["status"], "CLOSING")
+            self.assertEqual(job_types, ["RUN_CHECKS", "REVIEW", "CLOSE_PHASE"])
+            self.assertEqual(phase_row(home, repo)["status"], "COMPLETE")
 
     def test_allow_dirty_warns_and_stages_only_new_implementation_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -458,7 +483,7 @@ class Phase5LoopTests(unittest.TestCase):
 
     def test_terminal_status_branches_have_expected_exit_codes(self):
         cases = [
-            ("CLOSING", 0, "later phases handle the next step"),
+            ("CLOSING", 0, "plan complete"),
             ("BLOCKED", 1, "inspect status before rerunning"),
         ]
         for phase_status, expected_code, expected_message in cases:
@@ -481,7 +506,8 @@ class Phase5LoopTests(unittest.TestCase):
                     self.assertIn(expected_message, result.stderr)
                     with connect_db(home) as db:
                         job_count = db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-                    self.assertEqual(job_count, 0)
+                    expected_jobs = 1 if phase_status == "CLOSING" else 0
+                    self.assertEqual(job_count, expected_jobs)
 
 
 if __name__ == "__main__":

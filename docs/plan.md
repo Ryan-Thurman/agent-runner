@@ -24,8 +24,9 @@ retries run out, then a closure job updates docs + plan + handoff and commits.
 - One phase per session/PR. Do not start future phases or refactor unrelated code.
 - Every phase ships with tests (stdlib `unittest` or `pytest` if already present) and a
   manual verification note in the phase handoff.
-- The runner must never: auto-merge, force-push, delete branches/worktrees, delete files
+- The runner must never: force-push, delete branches/worktrees, delete files
   outside the repo, modify global git config, or run without its project lock.
+  Merging is allowed only for the reviewed phase PR when `mergeOnClose=true`.
 - Never interrupt a running agent process; pause/stop takes effect at job boundaries.
 - Prompts are written per **role** (coder/reviewer/closer), never per vendor. Reviewer
   jobs always get the profile's `readOnlyFlags`; coder/closer jobs get `writeFlags`.
@@ -171,7 +172,8 @@ Acceptance Criteria:
   `review.log`.
 
 ## Phase 7: CLOSE_PHASE — the full circle
-Status: PENDING
+Status: COMPLETE
+Evidence: 6a1e6ae/e3e0f1c/c8f4685; checks: python3 -m compileall -q .; python3 -m unittest discover -s tests -v (76 passed)
 
 On PASS, launch the **closer** (coder profile, write flags) with the closure prompt:
 (1) doc gate — if the phase changed behavior, an API, a flag/config, the data model, or
@@ -194,7 +196,8 @@ Acceptance Criteria:
 - Multi-phase plan: completing phase 1 automatically starts phase 2's IMPLEMENT.
 
 ## Phase 8: Resume, pause, logs, and end-to-end dogfood
-Status: PENDING
+Status: COMPLETE
+Evidence: tests passed with python3 -m compileall -q . and python3 -m unittest discover -s tests -v; toy repo dogfood completed both phases with configured codex agent.
 
 Finish the operator surface. `pause`/`resume` flip project status; a paused project
 stops at the next job boundary and `run` on it explains how to resume. `run` on an

@@ -43,9 +43,11 @@ def write_config(repo: Path, overrides: Optional[dict] = None) -> None:
     data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
     agent_script = repo / "fake_agent.py"
     agent_script.write_text(
-        """
+        r"""
 import json
+import re
 import sys
+from pathlib import Path
 
 prompt = sys.argv[-1]
 if "Review the staged phase work independently" in prompt:
@@ -56,6 +58,29 @@ if "Review the staged phase work independently" in prompt:
         "nonBlockingIssues": [],
         "recommendedFixPrompt": ""
     }))
+elif "Close the accepted phase" in prompt:
+    phase_number = int(re.search(r"Phase (\d+):", prompt).group(1))
+    plan = Path("docs/plan.md")
+    text = plan.read_text(encoding="utf-8")
+    text = re.sub(
+        rf"(## Phase {phase_number}: [^\n]+\n)(?:Status: [A-Z_]+\n)?",
+        rf"\1Status: COMPLETE\nEvidence: commit pending; checks passed\n",
+        text,
+        count=1,
+    )
+    plan.write_text(text, encoding="utf-8")
+    handoff = Path(f".acc/phases/docs-plan.md/phase-{phase_number:02d}-handoff.md")
+    handoff.parent.mkdir(parents=True, exist_ok=True)
+    handoff.write_text(
+        "## Completed Work\nDone.\n\n"
+        "## Decisions\nNone.\n\n"
+        "## Files Changed\ndocs/plan.md\n\n"
+        "## Checks Run\nConfigured checks passed.\n\n"
+        "## Open Risks\nNone.\n\n"
+        "## Next-Phase Context\nContinue.\n",
+        encoding="utf-8",
+    )
+    print("fake closer completed")
 else:
     print("fake agent completed")
 """.lstrip(),
@@ -205,6 +230,45 @@ class Phase1CliTests(unittest.TestCase):
             (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
 
             with self.assertRaisesRegex(ConfigError, "promptPrefix"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["roleFallbacks"] = {"reviewer": ["missing-agent"]}
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "unknown agent profile"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["roleFallbacks"] = {"unknown-role": ["antigravity"]}
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "configured role"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["roleFallbacks"] = {"reviewer": ["antigravity"]}
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            config = load_config(repo)
+            self.assertEqual(config.role_fallbacks, {"reviewer": ["antigravity"]})
+            self.assertEqual(config.base_branch, "main")
+            self.assertFalse(config.merge_on_close)
+            self.assertEqual(config.merge_strategy, "squash")
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["mergeStrategy"] = "octopus"
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "mergeStrategy"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["mergeOnClose"] = True
+            data["autoCommit"] = False
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "mergeOnClose requires autoCommit"):
                 load_config(repo)
 
     def test_empty_checks_are_accepted_with_warning(self):
