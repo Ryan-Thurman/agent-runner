@@ -109,7 +109,8 @@ Acceptance Criteria:
   pass.
 
 ## Phase 4: Include bounded plan context in prompts
-Status: PENDING
+Status: COMPLETE
+Evidence: c8ffff1; bounded plan context parsing, prompt inclusion, tests, and docs updated; `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
 
 Make top-level plan guidance, standing rules, and review contracts available to
 agents without requiring every phase to duplicate them.

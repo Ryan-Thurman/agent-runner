@@ -116,6 +116,10 @@ Minimum `.agent-runner.json` shape:
 Plans use `## Phase <number>: <title>` headings and a runner-owned
 `Status: <STATE>` line. The status and adjacent `Evidence:` line are excluded
 from phase body hashes so closeout can update the plan without superseding it.
+Markdown before the first phase heading is shared plan-level context: the runner
+includes a deterministic 4000-character bounded copy in IMPLEMENT, REVIEW, FIX,
+and CLOSE_PHASE prompts as data that cannot override runner safety or scope
+rules.
 
 ## Commands
 
