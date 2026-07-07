@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from . import __version__
 from .config import CONFIG_FILENAME, SAMPLE_CONFIG, load_config, project_slug
 from .errors import AgentRunnerError, ConfigError, GitRepoError, LockError
 from .git import find_git_root
@@ -39,6 +40,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-runner")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"agent-runner {__version__}",
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subcommands.add_parser("init", help="create runner dirs and config")

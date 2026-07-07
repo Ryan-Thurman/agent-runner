@@ -10,7 +10,8 @@
 - Ship tests with the change (stdlib `unittest`, matching the existing suite).
 
 ## Phase 1: Add a --version flag to the CLI
-Status: PENDING
+Status: COMPLETE
+Evidence: `python3 -m agent_runner --version`; `python3 -m compileall -q .`; `python3 -m unittest discover -s tests`
 
 Expose the existing `agent_runner.__version__` through the command line. Add a
 `--version` flag to the top-level argument parser in `agent_runner/cli.py`
