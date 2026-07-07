@@ -150,7 +150,8 @@ Acceptance Criteria:
   pass.
 
 ## Phase 3: Show PR numbers on publish and merge
-Status: PENDING
+Status: COMPLETE
+Evidence: 5d60fd4, 572ee37; review PASS; `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
 
 Surface the phase PR number in runner output so an operator can follow the
 loop from the terminal.

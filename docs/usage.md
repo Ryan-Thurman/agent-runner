@@ -328,7 +328,8 @@ After a published review:
 python3 -m agent_runner status
 ```
 
-The phase status line includes `branch_name`, `pr_url`, and `published_sha`.
+The phase status line includes `branch_name`, the PR URL as `pr=#<number>
+(<url>)` when the URL ends in `/pull/<number>`, and `published_sha`.
 The reviewer approved that published PR diff. Before `CLOSE_PHASE` runs with
 `autoCommit=true`, the runner rechecks that stored PR metadata and requires a
 clean worktree on the stored `branch_name` with local `HEAD` still matching
