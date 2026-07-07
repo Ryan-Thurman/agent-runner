@@ -20,15 +20,18 @@ from .git import find_git_root
 from .lock import ProjectLock, SignalLockRelease, pid_is_alive, reset_project_lock
 from .paths import ensure_runner_layout
 from .phase_loop import (
+    PhaseLoopResult,
     RESTART_COUNT_ENV,
     extract_pr_number,
     restart_count,
     run_phase_loop,
 )
+from .jobs import run_agent_job
 from .plan import parse_plan_file, register_or_resume_plan
 from .storage import (
     PHASE_STATUSES,
     connect_db,
+    get_project,
     get_or_create_project,
     list_phases_for_plan,
     list_plans_for_project,
@@ -213,6 +216,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                     config=config,
                     repo_root=repo_root,
                 )
+                loop_result = _run_autofix_loop(
+                    db,
+                    project_id=project["id"],
+                    plan_id=plan_result.plan_id,
+                    parsed_plan=parsed_plan,
+                    config=config,
+                    repo_root=repo_root,
+                    initial_result=loop_result,
+                )
             print(f"[agent-runner] {loop_result.message}", file=sys.stderr)
             if loop_result.restart:
                 _exec_self_restart(lock, repo_root)
@@ -236,6 +248,236 @@ def _exec_self_restart(lock: ProjectLock, repo_root: Path) -> None:
     lock.release()
     shim = repo_root / "agent-runner"
     os.execv(sys.executable, [sys.executable, str(shim), "run"])
+
+
+def _run_autofix_loop(
+    db,
+    *,
+    project_id: int,
+    plan_id: int,
+    parsed_plan,
+    config,
+    repo_root: Path,
+    initial_result: PhaseLoopResult,
+) -> PhaseLoopResult:
+    if config.auto_fix_attempts <= 0 or "fixer" not in config.roles:
+        return initial_result
+
+    result = initial_result
+    attempts_by_phase: dict[int, int] = {}
+    while result.blocked:
+        phase = _blocked_phase_for_plan(db, plan_id)
+        if phase is None or not phase["blocked_from"]:
+            return result
+
+        blocking_message = _latest_blocking_message(db, phase["id"], result.message)
+        if _requires_human_intent(blocking_message):
+            return result
+
+        used_attempts = attempts_by_phase.get(phase["id"], 0)
+        if used_attempts >= config.auto_fix_attempts:
+            return result
+
+        paused = _autofix_paused_result_if_needed(db, project_id)
+        if paused is not None:
+            return paused
+
+        attempt = used_attempts + 1
+        attempts_by_phase[phase["id"]] = attempt
+        profile = config.agents[config.roles["fixer"]]
+        print(
+            "[agent-runner] "
+            f"phase {phase['phase_number']} blocked; auto-fix attempt "
+            f"{attempt}/{config.auto_fix_attempts} with profile {profile.name}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+        parsed_phase = _parsed_phase_for_number(parsed_plan, phase["phase_number"])
+        fix_result = run_agent_job(
+            db,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            job_type="AUTOFIX",
+            role="fixer",
+            profile=profile,
+            prompt=_autofix_prompt(
+                phase=phase,
+                parsed_phase=parsed_phase,
+                blocking_message=blocking_message,
+            ),
+            repo_root=repo_root,
+            log_dir=Path(phase["log_dir"]),
+            timeout_seconds=config.timeout_minutes * 60,
+        )
+        if fix_result.status != "SUCCEEDED":
+            return result
+
+        target = _unblock_phase(
+            db,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=phase,
+            to_status=phase["blocked_from"],
+        )
+        record_event(
+            db,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            job_id=fix_result.job_id,
+            event_type="phase.autofix",
+            message=(
+                f"auto-fix attempt {attempt}/{config.auto_fix_attempts} "
+                f"succeeded for phase {phase['phase_number']}; unblocked to {target}"
+            ),
+            data={
+                "attempt": attempt,
+                "maxAttempts": config.auto_fix_attempts,
+                "profile": profile.name,
+                "to": target,
+            },
+        )
+        result = run_phase_loop(
+            db,
+            project_id=project_id,
+            plan_id=plan_id,
+            parsed_plan=parsed_plan,
+            config=config,
+            repo_root=repo_root,
+        )
+    return result
+
+
+def _blocked_phase_for_plan(db, plan_id: int):
+    return db.execute(
+        """
+        SELECT * FROM phases
+        WHERE plan_id = ? AND status = 'BLOCKED'
+        ORDER BY phase_number
+        LIMIT 1
+        """,
+        (plan_id,),
+    ).fetchone()
+
+
+def _latest_blocking_message(db, phase_id: int, fallback: str) -> str:
+    row = db.execute(
+        """
+        SELECT message FROM events
+        WHERE phase_id = ? AND event_type = 'phase.blocked'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (phase_id,),
+    ).fetchone()
+    if row is None or not row["message"]:
+        return fallback
+    return row["message"]
+
+
+def _requires_human_intent(blocking_message: str) -> bool:
+    lower = blocking_message.lower()
+    return any(
+        marker in lower
+        for marker in (
+            "plan changed for phase",
+            "protected phase body",
+            "registered phase",
+            "body on origin/",
+        )
+    )
+
+
+def _autofix_paused_result_if_needed(db, project_id: int) -> Optional[PhaseLoopResult]:
+    project = get_project(db, project_id)
+    if project["status"] != "PAUSED":
+        return None
+    return PhaseLoopResult(
+        "project is PAUSED; run `agent-runner resume` then "
+        "`agent-runner run` to continue"
+    )
+
+
+def _parsed_phase_for_number(parsed_plan, phase_number: int):
+    for phase in parsed_plan.phases:
+        if phase.phase_number == phase_number:
+            return phase
+    raise AgentRunnerError(f"registered phase {phase_number} is missing from parsed plan")
+
+
+def _autofix_prompt(*, phase, parsed_phase, blocking_message: str) -> str:
+    log_tail = _newest_phase_log_tail(Path(phase["log_dir"]))
+    return (
+        "Fix the underlying problem that blocked this phase. This is a one-shot "
+        "write-capable fixer job.\n\n"
+        "Rules:\n"
+        "- Fix only the blocker described below.\n"
+        "- Do not start future phases or unrelated refactors.\n"
+        "- Do not commit anything.\n"
+        "- Never invoke `autorun`, `agent-runner`, or any nested runner command; "
+        "the current process holds the project lock and a nested run would deadlock.\n"
+        "- Return a concise summary of the files changed and checks, if any, you ran.\n\n"
+        f"Phase {parsed_phase.phase_number}: {parsed_phase.title}\n\n"
+        "Phase body:\n"
+        f"{parsed_phase.content}\n\n"
+        "Blocking event message:\n"
+        f"{blocking_message}\n\n"
+        "Newest phase log tail:\n"
+        f"{log_tail}"
+    )
+
+
+def _newest_phase_log_tail(log_dir: Path) -> str:
+    newest_log = _newest_log_file(log_dir)
+    if newest_log is None:
+        return "(no phase log file found)\n"
+    return (
+        f"{newest_log}:\n"
+        "```text\n"
+        f"{''.join(_tail_lines(newest_log, 80))}"
+        "\n```"
+    )
+
+
+def _unblock_phase(
+    db,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase,
+    to_status: Optional[str],
+) -> str:
+    if phase["status"] != "BLOCKED":
+        raise AgentRunnerError(
+            f"phase {phase['phase_number']} is {phase['status']}, not BLOCKED"
+        )
+
+    target = to_status or phase["blocked_from"]
+    if not target:
+        raise AgentRunnerError(
+            f"phase {phase['phase_number']} has no recorded pre-block status; "
+            "rerun with --to STATUS (e.g. --to MERGING)"
+        )
+    target = target.upper()
+    resumable = sorted(PHASE_STATUSES - {"BLOCKED", "COMPLETE"})
+    if target not in resumable:
+        raise AgentRunnerError(
+            f"cannot unblock to {target}; choose one of {', '.join(resumable)}"
+        )
+
+    update_phase_status(db, phase["id"], target)
+    record_event(
+        db,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        event_type="phase.unblocked",
+        message=f"phase {phase['phase_number']} unblocked to {target}",
+        data={"to": target, "blockedFrom": phase["blocked_from"]},
+    )
+    return target
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -394,33 +636,12 @@ def cmd_unblock(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 0
-        if phase["status"] != "BLOCKED":
-            raise AgentRunnerError(
-                f"phase {phase['phase_number']} is {phase['status']}, not BLOCKED"
-            )
-
-        target = args.to or phase["blocked_from"]
-        if not target:
-            raise AgentRunnerError(
-                f"phase {phase['phase_number']} has no recorded pre-block status; "
-                "rerun with --to STATUS (e.g. --to MERGING)"
-            )
-        target = target.upper()
-        resumable = sorted(PHASE_STATUSES - {"BLOCKED", "COMPLETE"})
-        if target not in resumable:
-            raise AgentRunnerError(
-                f"cannot unblock to {target}; choose one of {', '.join(resumable)}"
-            )
-
-        update_phase_status(db, phase["id"], target)
-        record_event(
+        target = _unblock_phase(
             db,
             project_id=project["id"],
             plan_id=plan["id"],
-            phase_id=phase["id"],
-            event_type="phase.unblocked",
-            message=f"phase {phase['phase_number']} unblocked to {target}",
-            data={"to": target, "blockedFrom": phase["blocked_from"]},
+            phase=phase,
+            to_status=args.to,
         )
     print(
         f"[agent-runner] phase {phase['phase_number']} unblocked to {target}; "

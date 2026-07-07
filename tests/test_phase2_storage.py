@@ -83,6 +83,122 @@ class Phase2StorageTests(unittest.TestCase):
 
             self.assertEqual(project["slug"], "repo-abc123")
 
+    def test_connect_db_migrates_jobs_type_check_for_autofix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            paths = storage_paths(home)
+            paths.db_path.parent.mkdir(parents=True, exist_ok=True)
+            raw = sqlite3.connect(paths.db_path)
+            raw.executescript(
+                """
+                CREATE TABLE projects (
+                    id INTEGER PRIMARY KEY,
+                    slug TEXT NOT NULL UNIQUE,
+                    repo_path TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'ACTIVE',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE plans (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    path TEXT NOT NULL,
+                    content_hash TEXT,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(project_id, path)
+                );
+                CREATE TABLE phases (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    plan_id INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+                    phase_number INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    content_hash TEXT NOT NULL,
+                    publish_mode TEXT,
+                    branch_name TEXT,
+                    pr_url TEXT,
+                    published_sha TEXT,
+                    log_dir TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(plan_id, phase_number)
+                );
+                CREATE TABLE jobs (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    plan_id INTEGER REFERENCES plans(id) ON DELETE SET NULL,
+                    phase_id INTEGER REFERENCES phases(id) ON DELETE SET NULL,
+                    type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    trigger TEXT,
+                    prompt_path TEXT,
+                    log_path TEXT,
+                    output_path TEXT,
+                    error TEXT,
+                    pid INTEGER,
+                    started_sha TEXT,
+                    finished_sha TEXT,
+                    exit_code INTEGER,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK(type IN ('IMPLEMENT', 'RUN_CHECKS', 'REVIEW', 'FIX', 'CLOSE_PHASE')),
+                    CHECK(status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')),
+                    CHECK(trigger IS NULL OR trigger IN ('checks', 'review'))
+                );
+                CREATE TABLE events (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    plan_id INTEGER REFERENCES plans(id) ON DELETE SET NULL,
+                    phase_id INTEGER REFERENCES phases(id) ON DELETE SET NULL,
+                    job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+                    event_type TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    data_json TEXT,
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO projects (id, slug, repo_path, created_at, updated_at)
+                VALUES (1, 'repo', '/tmp/repo', 'now', 'now');
+                INSERT INTO plans (id, project_id, path, created_at, updated_at)
+                VALUES (1, 1, 'docs/plan.md', 'now', 'now');
+                INSERT INTO phases (
+                    id, project_id, plan_id, phase_number, title, content_hash,
+                    created_at, updated_at
+                )
+                VALUES (1, 1, 1, 1, 'Old phase', 'hash', 'now', 'now');
+                INSERT INTO jobs (
+                    id, project_id, plan_id, phase_id, type, status,
+                    created_at, updated_at
+                )
+                VALUES (1, 1, 1, 1, 'IMPLEMENT', 'SUCCEEDED', 'now', 'now');
+                """
+            )
+            raw.commit()
+            raw.close()
+
+            with connect_db(home) as db:
+                prior = db.execute("SELECT * FROM jobs WHERE id = 1").fetchone()
+                project = db.execute("SELECT * FROM projects WHERE id = 1").fetchone()
+                create_job(
+                    db,
+                    project_id=project["id"],
+                    plan_id=1,
+                    phase_id=1,
+                    job_type="AUTOFIX",
+                )
+                types = [
+                    row["type"]
+                    for row in db.execute("SELECT type FROM jobs ORDER BY id")
+                ]
+
+            self.assertEqual(prior["type"], "IMPLEMENT")
+            self.assertEqual(types, ["IMPLEMENT", "AUTOFIX"])
+
     def test_unique_constraints_fire_for_plans_and_phases(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"

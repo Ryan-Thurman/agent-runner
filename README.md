@@ -95,9 +95,14 @@ Minimum `.agent-runner.json` shape:
       "outputCapture": "stdout"
     }
   },
-  "roles": { "coder": "codex", "reviewer": "claude-opus" },
+  "roles": {
+    "coder": "codex",
+    "reviewer": "claude-opus",
+    "fixer": "claude-opus"
+  },
   "roleFallbacks": { "reviewer": ["antigravity"], "coder": ["claude-sonnet"] },
   "maxRetriesPerPhase": 3,
+  "autoFixAttempts": 2,
   "timeoutMinutes": 45,
   "autoCommit": true,
   "allowDirty": false,
@@ -132,7 +137,10 @@ outside the repo, modify global git config, or interrupt a running agent for
 pause. With `allowDirty=false`, a dirty worktree blocks before a new IMPLEMENT
 job. With `autoCommit=true`, review requires a clean pushed PR for the current
 branch; with `autoCommit=false`, the runner stages local changes so new files
-are visible in `git diff --staged`.
+are visible in `git diff --staged`. With `autoFixAttempts>0`, blocked phases can
+launch the configured one-shot `fixer` profile to repair the blocker and resume
+the same `run`; fixer prompts forbid commits and nested `autorun`/`agent-runner`
+invocations.
 
 ## Dogfood Transcript
 

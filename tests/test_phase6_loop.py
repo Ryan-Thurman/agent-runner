@@ -97,6 +97,7 @@ def write_config(
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
     data["roleFallbacks"] = {}
+    data["autoFixAttempts"] = 0
     if coder_args is not None:
         data["agents"]["special-coder"] = {
             "command": sys.executable,

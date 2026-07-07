@@ -15,7 +15,7 @@ from .lock import utc_now_iso
 from .storage import create_job, get_job, update_job_pid
 
 
-WRITE_ROLES = {"coder", "closer"}
+WRITE_ROLES = {"coder", "closer", "fixer"}
 READ_ONLY_ROLES = {"reviewer"}
 
 # Vendor CLIs word these differently (codex, claude, gemini/antigravity), so

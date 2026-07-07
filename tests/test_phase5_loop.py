@@ -96,6 +96,7 @@ def write_config(
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
     data["roleFallbacks"] = {}
+    data["autoFixAttempts"] = 0
     data["checks"] = checks
     data["allowDirty"] = allow_dirty
     data["autoCommit"] = auto_commit
