@@ -226,6 +226,8 @@ if args[:2] == ["pr", "view"]:
         "headRefName": branch,
         "headRefOid": sha,
         "state": state,
+        "mergeable": os.environ.get("GH_PR_MERGEABLE", "MERGEABLE"),
+        "isDraft": os.environ.get("GH_PR_DRAFT") == "1",
     }))
     raise SystemExit(0)
 
@@ -555,6 +557,72 @@ class Phase7CloseTests(unittest.TestCase):
                 ["git", "show", "origin/main:docs/plan.md"], cwd=repo, text=True
             )
             self.assertIn("## Phase 1: First phase\nStatus: COMPLETE", origin_plan)
+
+    def _run_merge_preflight_case(self, extra_env: dict[str, str]):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            gh_state = root / "gh-state"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, phase_count=1, status="CLOSING")
+            write_config(repo, script, auto_commit=True, merge_on_close=True)
+            commit_all(repo)
+            add_origin_remote(repo, root)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            seed_closing_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "GH_STATE_DIR": str(gh_state),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                    **extra_env,
+                },
+            )
+            rows = phase_rows(home, repo)
+            with connect_db(home) as db:
+                event_types = [
+                    row["event_type"]
+                    for row in db.execute(
+                        "SELECT event_type FROM events ORDER BY id"
+                    ).fetchall()
+                ]
+            return result, rows, event_types
+
+    def test_draft_pr_blocks_merge_on_close(self):
+        result, rows, event_types = self._run_merge_preflight_case(
+            {"GH_PR_DRAFT": "1"}
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("phase PR is a draft", result.stderr)
+        self.assertEqual(rows[0]["status"], "BLOCKED")
+        self.assertNotIn("phase.merged", event_types)
+
+    def test_conflicting_pr_blocks_merge_on_close(self):
+        result, rows, event_types = self._run_merge_preflight_case(
+            {"GH_PR_MERGEABLE": "CONFLICTING"}
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("merge conflicts with the base branch", result.stderr)
+        self.assertEqual(rows[0]["status"], "BLOCKED")
+        self.assertNotIn("phase.merged", event_types)
 
     def test_close_without_merge_on_close_stops_before_next_phase(self):
         with tempfile.TemporaryDirectory() as tmp:
