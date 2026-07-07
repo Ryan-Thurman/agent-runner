@@ -160,6 +160,10 @@ Minimum config shape:
     "reviewer": ["antigravity"],
     "coder": ["claude-sonnet"]
   },
+  "reviewTriage": {
+    "simple": "claude-sonnet",
+    "complex": "claude-opus"
+  },
   "maxRetriesPerPhase": 3,
   "autoFixAttempts": 2,
   "timeoutMinutes": 45,
@@ -202,6 +206,14 @@ Current notes:
   Other roles are accepted but warned about. The sample config includes an
   `antigravity` profile (the `agy` CLI) suitable as a fallback on a separate
   quota pool.
+- `reviewTriage` is optional. When configured, the runner launches one
+  read-only `TRIAGE` job before each `REVIEW` using the `simple` profile. The
+  triage prompt includes the phase body and a stat-only diff summary, then asks
+  for `{"tier": "simple"}` or `{"tier": "complex"}`. The selected tier chooses
+  the primary reviewer profile for that review; `roleFallbacks.reviewer` still
+  applies after it. If triage fails, times out, or returns invalid JSON, the
+  runner records the reason in a `review.triage` event and reviews with the
+  `complex` profile without blocking the phase.
 - `checks` run as shell commands from the repo root, in order. The first failure
   stops the check job.
 - `timeoutMinutes` applies per agent/check process.

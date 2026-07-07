@@ -88,6 +88,7 @@ def write_config(
     if include_fixer:
         data["roles"]["fixer"] = "fake"
     data["roleFallbacks"] = {}
+    data.pop("reviewTriage", None)
     data["checks"] = [
         f"{shlex.quote(sys.executable)} -c "
         "\"from pathlib import Path; assert Path('fixed.txt').exists()\""

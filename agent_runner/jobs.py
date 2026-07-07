@@ -16,7 +16,7 @@ from .storage import create_job, get_job, update_job_pid
 
 
 WRITE_ROLES = {"coder", "closer", "fixer"}
-READ_ONLY_ROLES = {"reviewer"}
+READ_ONLY_ROLES = {"reviewer", "triage"}
 
 # Vendor CLIs word these differently (codex, claude, gemini/antigravity), so
 # match the common quota/rate-limit phrasings rather than any one CLI's text.

@@ -269,7 +269,8 @@ Acceptance Criteria:
   pass.
 
 ## Phase 5: Review triage — route simple reviews to Sonnet, behavioral to Opus
-Status: PENDING
+Status: COMPLETE
+Evidence: 689a6c7, ede9649; review triage config/routing/docs/tests accepted; `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
 
 Before each REVIEW job, ask a cheap model to classify the phase's diff and
 pick the reviewer profile accordingly. A reviewer agent cannot switch its own

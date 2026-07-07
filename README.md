@@ -101,6 +101,7 @@ Minimum `.agent-runner.json` shape:
     "fixer": "claude-opus"
   },
   "roleFallbacks": { "reviewer": ["antigravity"], "coder": ["claude-sonnet"] },
+  "reviewTriage": { "simple": "claude-sonnet", "complex": "claude-opus" },
   "maxRetriesPerPhase": 3,
   "autoFixAttempts": 2,
   "timeoutMinutes": 45,
