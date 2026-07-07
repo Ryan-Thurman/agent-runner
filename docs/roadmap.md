@@ -7,16 +7,18 @@ remaining work observed while dogfooding `agent-runner` on its own repo.
 
 ## Current State
 
-- `docs/plan.md`: core runner build plan is complete in the repository plan
-  file. The local SQLite state still has stale history for the old Phase 8
-  dogfood run, so future work should prefer the tracked plan file and add state
-  reconciliation rather than relying on that stale row.
-- `docs/plan-smoke.md`: complete. This covered the CLI `--version` smoke
-  change.
-- `docs/plan-operator-ux.md`: complete. This added coder fallbacks, the
-  `autorun` shim and default config, PR number display, opt-in `AUTOFIX`, and
-  review triage.
+- `docs/archive/plan.md`: archived core runner build plan. The local SQLite
+  state still has stale history for the old Phase 8 dogfood run, so future work
+  should prefer the tracked plan files and add state reconciliation rather than
+  relying on that stale row.
+- `docs/archive/plan-smoke.md`: archived smoke plan. This covered the CLI
+  `--version` smoke change.
+- `docs/archive/plan-operator-ux.md`: archived operator UX plan. This added
+  coder fallbacks, the `autorun` shim and default config, PR number display,
+  opt-in `AUTOFIX`, and review triage.
 - `docs/plan-live-logs.md`: not started. All three phases are still `PENDING`.
+- `docs/plan-roadmap.md`: executable plan derived from this roadmap. Use it
+  when you want `agent-runner` to implement the recommended roadmap items.
 
 ## Completed Capability Areas
 
@@ -133,6 +135,24 @@ Known cleanup items:
 - Consider enforcing close-time `Evidence:` and doc-gate requirements more
   strictly, or documenting why they remain prompt-enforced.
 
+### 7. Roadmap-to-Plan Generation
+
+Problem: the roadmap is useful for humans, but `agent-runner` executes phase
+plans. Today an operator has to manually translate unfinished roadmap items into
+an executable plan.
+
+Plan:
+
+- Add a runner workflow or command that asks a configured agent to read
+  `docs/roadmap.md`, identify unfinished roadmap items, and generate or update
+  an executable plan such as `docs/plan-roadmap.md`.
+- The generated plan should use normal `## Phase N` and `Status: PENDING`
+  markers so `agent-runner` can execute it.
+- The workflow should stop after creating or updating the plan. It should not
+  start implementation until a later `run`.
+- Include acceptance criteria in generated phases so review has a concrete
+  contract.
+
 ## Suggested Execution Order
 
 1. State reconciliation for manual PR merges.
@@ -141,3 +161,4 @@ Known cleanup items:
 4. Prompt context hygiene.
 5. Live logs plan.
 6. Hardening and documentation cleanup.
+7. Roadmap-to-plan generation.

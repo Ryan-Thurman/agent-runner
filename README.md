@@ -188,6 +188,8 @@ was set to `Status: COMPLETE`, the phase handoff was written, and
 ## Start Here
 
 - `docs/design.md` is the design source of truth.
-- `docs/plan.md` is the 8-phase build plan in the runner's own plan format.
+- `docs/plan-roadmap.md` is the current executable plan for upcoming work.
+- `docs/roadmap.md` summarizes completed work and planned follow-ups.
+- `docs/archive/` contains completed historical plans.
 - `docs/usage.md` has the detailed command and recovery guide.
 - `.agent-runner.json` is this repo's dogfood config.

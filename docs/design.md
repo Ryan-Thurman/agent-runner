@@ -1,7 +1,8 @@
 # Agent Runner Loop — design (`agent-runner`)
 
 > **Work in progress — not fully fleshed out.** This is the design doc for this repo's
-> runner; it wins on any conflict with `docs/plan.md`. Toolbelt paths in the reuse map
+> runner; completed historical plans live in `docs/archive/`, and current
+> execution work lives in `docs/plan-roadmap.md`. Toolbelt paths in the reuse map
 > below (`commands/…`, `skills/…`, `workflows/…`) refer to the
 > [agent-toolbelt](../../agent-toolbelt) repo, where the origin copy of this doc lives as
 > `workflows/WiP-agent-runner-loop.md`.
