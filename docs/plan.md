@@ -157,8 +157,10 @@ review. Review output is strict JSON (`status` PASS | CHANGES_REQUESTED | BLOCKE
 `summary`, `blockingIssues`, `nonBlockingIssues`, `recommendedFixPrompt`) extracted via
 the profile's capture mode into `review.json`; unparseable JSON → phase BLOCKED. FIX
 prompts carry only the listed issues plus the original phase body, with the
-fix-only-what's-listed constraints. Retries exhausted → phase BLOCKED with a clear
-console summary of outstanding blockers.
+fix-only-what's-listed constraints. Reviews are bounded to one review-triggered
+FIX and one re-review, so the first reviewer pass must list all known blocking
+changes instead of drip-feeding PR feedback. Retries exhausted → phase BLOCKED
+with a clear console summary of outstanding blockers.
 
 Acceptance Criteria:
 - Test with a scripted reviewer: PASS advances to CLOSE_PHASE; CHANGES_REQUESTED

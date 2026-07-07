@@ -98,6 +98,7 @@ else:
     }
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
     data["roleFallbacks"] = {}
+    data["autoFixAttempts"] = 0
     data["planPath"] = plan_path
     data["autoCommit"] = False
     data["mergeOnClose"] = False

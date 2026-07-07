@@ -193,7 +193,8 @@ Acceptance Criteria:
   pass.
 
 ## Phase 4: Opt-in one-shot fixer agent for blocked phases
-Status: PENDING
+Status: COMPLETE
+Evidence: implemented AUTOFIX job plumbing, opt-in config, loop retry wrapper, docs, migration and tests; `python3 -m compileall -q .` and `python3 -m unittest discover -s tests` passed.
 
 When a phase blocks, let a short-lived agent repair the problem and let the
 same `autorun run` invocation continue, instead of stopping for a human. No

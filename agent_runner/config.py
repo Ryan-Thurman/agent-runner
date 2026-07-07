@@ -53,6 +53,7 @@ class RunnerConfig:
     plan_path: str
     checks: list[str]
     max_retries_per_phase: int
+    auto_fix_attempts: int
     timeout_minutes: int
     auto_commit: bool
     allow_dirty: bool
@@ -166,6 +167,11 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
     )
 
     max_retries = _required_int(data, "maxRetriesPerPhase", minimum=0)
+    auto_fix_attempts = _optional_int(data, "autoFixAttempts", default=0, minimum=0)
+    if auto_fix_attempts > 0 and "fixer" not in normalized_roles:
+        raise ConfigError(
+            "invalid config: autoFixAttempts > 0 requires roles.fixer"
+        )
     timeout_minutes = _required_int(data, "timeoutMinutes", minimum=1)
     auto_commit = _required_bool(data, "autoCommit")
     allow_dirty = _required_bool(data, "allowDirty")
@@ -190,6 +196,7 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
         plan_path=plan_path,
         checks=checks,
         max_retries_per_phase=max_retries,
+        auto_fix_attempts=auto_fix_attempts,
         timeout_minutes=timeout_minutes,
         auto_commit=auto_commit,
         allow_dirty=allow_dirty,
@@ -345,6 +352,17 @@ def _required_int(data: dict[str, Any], key: str, minimum: int) -> int:
     return value
 
 
+def _optional_int(
+    data: dict[str, Any], key: str, *, default: int, minimum: int
+) -> int:
+    value = data.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise ConfigError(
+            f"invalid config: field {key!r} must be an integer >= {minimum}"
+        )
+    return value
+
+
 def _required_bool(data: dict[str, Any], key: str) -> bool:
     value = data.get(key)
     if not isinstance(value, bool):
@@ -410,7 +428,8 @@ SAMPLE_CONFIG_TEMPLATE = """{{
   "roles": {{
     "coder": "codex",
     // Reviews are pinned to Opus/Sonnet deliberately; do not use the claude CLI default.
-    "reviewer": "claude-opus"
+    "reviewer": "claude-opus",
+    "fixer": "claude-opus"
   }},
 
   // When a role's agent fails on a quota/rate limit, the runner retries coder
@@ -418,6 +437,8 @@ SAMPLE_CONFIG_TEMPLATE = """{{
   "roleFallbacks": {{ "reviewer": ["antigravity"], "coder": ["claude-sonnet"] }},
 
   "maxRetriesPerPhase": 3,
+  // If a phase blocks, run up to this many one-shot fixer jobs in the same run.
+  "autoFixAttempts": 2,
   "timeoutMinutes": 45,
   "autoCommit": true,
   "allowDirty": false,

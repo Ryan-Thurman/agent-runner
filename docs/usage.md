@@ -29,7 +29,10 @@ pause/resume, crash recovery, and log-tailing loop.
   merge the phase PR without re-running the closer. A phase PR that was already
   merged out-of-band (e.g. by an operator) counts as success.
 - `BLOCKED`: exit non-zero. `agent-runner unblock` restores the status the
-  phase was in when it blocked so `run` can retry it.
+  phase was in when it blocked so `run` can retry it. If `autoFixAttempts` is
+  greater than zero and `roles.fixer` is configured, `run` can first launch a
+  one-shot `AUTOFIX` job to repair the blocker, unblock the phase, and continue
+  in the same invocation.
 - A `PAUSED` project does not start another job. Run `agent-runner resume`,
   then `agent-runner run`, to continue from the current phase status.
 
@@ -150,13 +153,15 @@ Minimum config shape:
   },
   "roles": {
     "coder": "codex",
-    "reviewer": "claude-opus"
+    "reviewer": "claude-opus",
+    "fixer": "claude-opus"
   },
   "roleFallbacks": {
     "reviewer": ["antigravity"],
     "coder": ["claude-sonnet"]
   },
   "maxRetriesPerPhase": 3,
+  "autoFixAttempts": 2,
   "timeoutMinutes": 45,
   "autoCommit": true,
   "allowDirty": false,
@@ -168,9 +173,24 @@ Minimum config shape:
 
 Current notes:
 
-- `roles.coder` is used for IMPLEMENT and FIX. With `autoCommit=true`, the
-  coder/fixer prompt requires committing, pushing, and creating or updating a
-  PR before the job exits. `roles.reviewer` is used for read-only review.
+- `roles.coder` is used for IMPLEMENT and normal FIX jobs. With
+  `autoCommit=true`, those prompts require committing, pushing, and creating or
+  updating a PR before the job exits. `roles.reviewer` is used for read-only
+  review. `roles.fixer` is optional and used only for one-shot `AUTOFIX` jobs
+  when `autoFixAttempts` is greater than zero.
+- `autoFixAttempts` defaults to `0`, which disables auto-fix. Values above zero
+  require `roles.fixer`. Each blocked phase can consume up to that many
+  auto-fix attempts during one `run` invocation; the count is in memory and
+  resets on a later `run`.
+- An `AUTOFIX` job is a short-lived subprocess launched through the same
+  `run_agent_job` machinery as IMPLEMENT and REVIEW jobs. It is not a daemon and
+  no fixer process is kept alive after its single job. The prompt includes the
+  phase content, the blocking event message, and the newest phase log tail.
+  With `autoCommit=true`, fixer prompts require committing, pushing, and
+  updating the existing PR before the job exits; with `autoCommit=false`, they
+  explicitly forbid committing. All fixer prompts forbid invoking `autorun`,
+  `agent-runner`, or nested runner commands because the current `run` process
+  holds the project lock.
 - `promptPrefix` is optional. When set, the runner prepends it to every prompt
   sent to that agent profile.
 - `roleFallbacks` is optional and maps a role to an ordered list of agent
@@ -375,6 +395,16 @@ python3 -m agent_runner run
 override the restored status — useful for phases blocked before `blocked_from`
 existed. A phase blocked because retries ran out will block again on resume
 unless you fix the underlying findings or raise `maxRetriesPerPhase`.
+Review-driven fixes are stricter than check-driven fixes: the runner allows one
+review-triggered FIX, then one re-review. If that re-review still reports
+blocking issues, the phase blocks instead of starting another PR review cycle.
+
+When auto-fix is enabled, `run` tries the configured `fixer` before returning
+the blocked result, but only for resumable blocks with `blocked_from` recorded.
+It skips blockers that need human intent, such as protected plan-content
+changes. If the fixer process fails or the phase consumes its
+`autoFixAttempts` for the current invocation, the phase remains `BLOCKED` and
+the command exits non-zero as usual.
 
 ## Logs and State
 

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import signal
 import sqlite3
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from .lock import utc_now_iso
 
 DB_FILENAME = "runner.sqlite"
 
-JOB_TYPES = {"IMPLEMENT", "RUN_CHECKS", "REVIEW", "FIX", "CLOSE_PHASE"}
+JOB_TYPES = {"IMPLEMENT", "RUN_CHECKS", "REVIEW", "FIX", "CLOSE_PHASE", "AUTOFIX"}
 JOB_STATUSES = {"PENDING", "RUNNING", "SUCCEEDED", "FAILED"}
 PHASE_STATUSES = {
     "PENDING",
@@ -31,6 +32,7 @@ ORPHAN_PHASE_STATUS = {
     "REVIEW": "REVIEWING",
     "FIX": "FIXING",
     "CLOSE_PHASE": "CLOSING",
+    "AUTOFIX": "BLOCKED",
 }
 
 
@@ -62,7 +64,7 @@ def configure_connection(connection: sqlite3.Connection) -> None:
 
 def ensure_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY,
             slug TEXT NOT NULL UNIQUE,
@@ -102,33 +104,7 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             UNIQUE(plan_id, phase_number)
         );
 
-        CREATE TABLE IF NOT EXISTS jobs (
-            id INTEGER PRIMARY KEY,
-            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            plan_id INTEGER REFERENCES plans(id) ON DELETE SET NULL,
-            phase_id INTEGER REFERENCES phases(id) ON DELETE SET NULL,
-            type TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'PENDING',
-            trigger TEXT,
-            prompt_path TEXT,
-            log_path TEXT,
-            output_path TEXT,
-            error TEXT,
-            pid INTEGER,
-            started_sha TEXT,
-            finished_sha TEXT,
-            exit_code INTEGER,
-            started_at TEXT,
-            finished_at TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            CHECK(type IN ('IMPLEMENT', 'RUN_CHECKS', 'REVIEW', 'FIX', 'CLOSE_PHASE')),
-            CHECK(status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')),
-            CHECK(trigger IS NULL OR trigger IN ('checks', 'review'))
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_jobs_phase_id ON jobs(phase_id);
-        CREATE INDEX IF NOT EXISTS idx_jobs_project_status ON jobs(project_id, status);
+        {_jobs_table_sql("jobs", if_not_exists=True)};
 
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY,
@@ -145,6 +121,8 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
     )
     _ensure_column(connection, "jobs", "pid", "INTEGER")
     _ensure_column(connection, "phases", "blocked_from", "TEXT")
+    _ensure_jobs_type_check_covers_job_types(connection)
+    _ensure_jobs_indexes(connection)
     connection.commit()
 
 
@@ -661,6 +639,132 @@ def _ensure_column(
         connection.execute(
             f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
         )
+
+
+def _ensure_jobs_indexes(connection: sqlite3.Connection) -> None:
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_jobs_phase_id ON jobs(phase_id)")
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_jobs_project_status
+        ON jobs(project_id, status)
+        """
+    )
+
+
+def _ensure_jobs_type_check_covers_job_types(connection: sqlite3.Connection) -> None:
+    row = connection.execute(
+        """
+        SELECT sql FROM sqlite_master
+        WHERE type = 'table' AND name = 'jobs'
+        """
+    ).fetchone()
+    if row is None or not row["sql"]:
+        return
+    if _job_types_from_jobs_sql(row["sql"]) >= JOB_TYPES:
+        return
+    _rebuild_jobs_table(connection)
+
+
+def _job_types_from_jobs_sql(sql: str) -> set[str]:
+    match = re.search(r"CHECK\s*\(\s*type\s+IN\s*\((?P<types>[^)]*)\)", sql)
+    if match is None:
+        return set()
+    return {
+        value.replace("''", "'")
+        for value in re.findall(r"'((?:''|[^'])*)'", match.group("types"))
+    }
+
+
+def _rebuild_jobs_table(connection: sqlite3.Connection) -> None:
+    columns = [
+        "id",
+        "project_id",
+        "plan_id",
+        "phase_id",
+        "type",
+        "status",
+        "trigger",
+        "prompt_path",
+        "log_path",
+        "output_path",
+        "error",
+        "pid",
+        "started_sha",
+        "finished_sha",
+        "exit_code",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+    ]
+    column_sql = ", ".join(columns)
+    was_in_transaction = connection.in_transaction
+    if was_in_transaction:
+        connection.commit()
+    foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute("BEGIN")
+    try:
+        connection.execute("DROP TABLE IF EXISTS jobs_new_type_check")
+        connection.execute(_jobs_table_sql("jobs_new_type_check"))
+        connection.execute(
+            f"""
+            INSERT INTO jobs_new_type_check ({column_sql})
+            SELECT {column_sql}
+            FROM jobs
+            """
+        )
+        connection.execute("DROP TABLE jobs")
+        connection.execute("ALTER TABLE jobs_new_type_check RENAME TO jobs")
+    except Exception:
+        connection.rollback()
+        if foreign_keys:
+            connection.execute("PRAGMA foreign_keys = ON")
+        raise
+    else:
+        connection.commit()
+        if foreign_keys:
+            connection.execute("PRAGMA foreign_keys = ON")
+            violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise sqlite3.IntegrityError(
+                    "jobs table rebuild left foreign key violations"
+                )
+
+
+def _jobs_table_sql(table_name: str, *, if_not_exists: bool = False) -> str:
+    if_clause = " IF NOT EXISTS" if if_not_exists else ""
+    job_types = ", ".join(_sql_string(job_type) for job_type in sorted(JOB_TYPES))
+    return f"""
+        CREATE TABLE{if_clause} {table_name} (
+            id INTEGER PRIMARY KEY,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            plan_id INTEGER REFERENCES plans(id) ON DELETE SET NULL,
+            phase_id INTEGER REFERENCES phases(id) ON DELETE SET NULL,
+            type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            trigger TEXT,
+            prompt_path TEXT,
+            log_path TEXT,
+            output_path TEXT,
+            error TEXT,
+            pid INTEGER,
+            started_sha TEXT,
+            finished_sha TEXT,
+            exit_code INTEGER,
+            started_at TEXT,
+            finished_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK(type IN ({job_types})),
+            CHECK(status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')),
+            CHECK(trigger IS NULL OR trigger IN ('checks', 'review'))
+        )
+        """
+
+
+def _sql_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _terminate_process_group(pid: int) -> None:
