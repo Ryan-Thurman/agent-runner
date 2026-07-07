@@ -204,7 +204,9 @@ Rules:
 - If the status line is missing, the runner treats the phase as `PENDING`.
 - The status line and the runner-owned `Evidence:` line immediately after it are
   excluded from the phase content hash, so close-phase write-back does not count
-  as a plan body change.
+  as a plan body change. For compatibility with earlier write-backs, a wrapped
+  evidence block that contains a `Checks:` line is also treated as runner-owned
+  metadata.
 - Duplicate phase numbers and invalid status values are rejected.
 
 Useful statuses while dogfooding:

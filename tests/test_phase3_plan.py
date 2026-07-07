@@ -193,6 +193,29 @@ class Phase3PlanTests(unittest.TestCase):
         )
         self.assertEqual(without_evidence.content_hash, with_evidence.content_hash)
 
+    def test_wrapped_evidence_and_checks_metadata_do_not_change_phase_hash(self):
+        without_metadata = parse_plan_markdown(
+            "## Phase 1: CLI\n"
+            "Status: COMPLETE\n\n"
+            "Build CLI.\n",
+            path="docs/plan.md",
+        )
+        with_metadata = parse_plan_markdown(
+            "## Phase 1: CLI\n"
+            "Status: COMPLETE\n"
+            "Evidence: implemented the CLI, docs, tests, and compatibility\n"
+            "updates across the runner entry points.\n"
+            "Checks: `python3 -m compileall -q .`; `python3 -m unittest discover -s tests`\n\n"
+            "Build CLI.\n",
+            path="docs/plan.md",
+        )
+
+        self.assertEqual(
+            without_metadata.phases[0].content_hash,
+            with_metadata.phases[0].content_hash,
+        )
+        self.assertEqual(without_metadata.content_hash, with_metadata.content_hash)
+
     def test_status_marker_can_follow_blank_lines(self):
         direct = parse_plan_markdown(
             "## Phase 1: CLI\n"

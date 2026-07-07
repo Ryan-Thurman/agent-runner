@@ -2140,7 +2140,8 @@ def _close_phase_prompt(
         "2. Plan write-back: set this phase's Status marker line to "
         "`Status: COMPLETE` directly under the phase heading, and add one "
         "runner-owned one-line evidence note directly after it in the form "
-        "`Evidence: <commit/hash/checks summary>`.\n"
+        "`Evidence: <commit/hash/checks summary>`. Keep Evidence on one line; "
+        "do not add a separate `Checks:` line.\n"
         "3. Handoff: write the handoff file with these markdown sections: "
         "Completed Work, Decisions, Files Changed, Checks Run, Open Risks, "
         "Next-Phase Context.\n"
@@ -2173,7 +2174,7 @@ def _validate_close_phase_outputs(
     if fresh_phase.content_hash != phase["content_hash"]:
         raise JobError(
             "closer changed the protected phase body; only status/evidence "
-            "write-back is allowed"
+            "metadata write-back is allowed"
         )
     handoff_path = repo_root / _handoff_path(plan_path, phase)
     if not handoff_path.exists():

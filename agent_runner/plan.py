@@ -14,6 +14,7 @@ from .storage import PHASE_STATUSES, phase_log_dir
 PHASE_HEADING_RE = re.compile(r"^## Phase\s+(\d+):\s*(.+?)\s*$")
 STATUS_RE = re.compile(r"^Status:\s*([A-Z_]+)\s*$")
 EVIDENCE_RE = re.compile(r"^Evidence:\s*(.+?)\s*$")
+CHECKS_RE = re.compile(r"^Checks:\s*(.+?)\s*$")
 PROTECTED_CHANGE_STATUSES = {
     "IMPLEMENTING",
     "CHECKING",
@@ -277,8 +278,23 @@ def _extract_status_and_hash_lines(lines: list[str]) -> tuple[str, list[str]]:
     if hash_start_index < len(lines):
         evidence_match = EVIDENCE_RE.match(lines[hash_start_index].rstrip("\r\n"))
         if evidence_match:
-            hash_start_index += 1
+            hash_start_index = _skip_runner_metadata(lines, hash_start_index)
     return status, list(lines[hash_start_index:])
+
+
+def _skip_runner_metadata(lines: list[str], evidence_index: int) -> int:
+    hash_start_index = evidence_index + 1
+    if hash_start_index >= len(lines) or not lines[hash_start_index].strip():
+        return hash_start_index
+
+    blank_index = hash_start_index
+    while blank_index < len(lines) and lines[blank_index].strip():
+        blank_index += 1
+
+    metadata_lines = lines[hash_start_index:blank_index]
+    if any(CHECKS_RE.match(line.rstrip("\r\n")) for line in metadata_lines):
+        return blank_index
+    return hash_start_index
 
 
 def _next_heading_index(
