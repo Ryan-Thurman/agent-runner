@@ -38,6 +38,7 @@ class RunnerConfig:
     data: dict[str, Any]
     agents: dict[str, AgentProfile]
     roles: dict[str, str]
+    role_fallbacks: dict[str, list[str]]
     plan_path: str
     checks: list[str]
     max_retries_per_phase: int
@@ -146,6 +147,10 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
         if required_role not in normalized_roles:
             raise ConfigError(f"invalid roles: missing required role {required_role!r}")
 
+    role_fallbacks = _validate_role_fallbacks(
+        data, agents=agents, roles=normalized_roles, warnings=warnings
+    )
+
     max_retries = _required_int(data, "maxRetriesPerPhase", minimum=0)
     timeout_minutes = _required_int(data, "timeoutMinutes", minimum=1)
     auto_commit = _required_bool(data, "autoCommit")
@@ -156,6 +161,7 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
         data=data,
         agents=agents,
         roles=normalized_roles,
+        role_fallbacks=role_fallbacks,
         plan_path=plan_path,
         checks=checks,
         max_retries_per_phase=max_retries,
@@ -211,6 +217,42 @@ def _validate_agent_profile(name: str, profile: dict[str, Any]) -> AgentProfile:
         output_capture=output_capture,
         prompt_prefix=prompt_prefix,
     )
+
+
+def _validate_role_fallbacks(
+    data: dict[str, Any],
+    *,
+    agents: dict[str, AgentProfile],
+    roles: dict[str, str],
+    warnings: list[str],
+) -> dict[str, list[str]]:
+    value = data.get("roleFallbacks")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("invalid roleFallbacks: expected an object")
+
+    role_fallbacks: dict[str, list[str]] = {}
+    for role, profile_names in value.items():
+        if not isinstance(role, str) or role not in roles:
+            raise ConfigError(
+                f"invalid roleFallbacks.{role}: must reference a configured role"
+            )
+        if not isinstance(profile_names, list):
+            raise ConfigError(f"invalid roleFallbacks.{role}: expected a list")
+        names = _string_list(profile_names, f"roleFallbacks.{role}")
+        for name in names:
+            if name not in agents:
+                raise ConfigError(
+                    f"invalid roleFallbacks.{role}: unknown agent profile {name!r}"
+                )
+        if role != "reviewer" and names:
+            warnings.append(
+                f"roleFallbacks.{role} is configured but only the reviewer role "
+                "falls back on quota failures today"
+            )
+        role_fallbacks[role] = names
+    return role_fallbacks
 
 
 def _required_dict(data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -282,6 +324,13 @@ SAMPLE_CONFIG = """{
       "writeFlags": ["--sandbox", "workspace-write"],
       "readOnlyFlags": ["--sandbox", "read-only"],
       "outputCapture": "last-message-file"
+    },
+    "antigravity": {
+      "command": "agy",
+      "promptArgs": ["-p", "--print-timeout", "40m"],
+      "writeFlags": ["--dangerously-skip-permissions"],
+      "readOnlyFlags": ["--sandbox"],
+      "outputCapture": "stdout"
     }
   },
 
@@ -289,6 +338,11 @@ SAMPLE_CONFIG = """{
     "coder": "claude",
     "reviewer": "codex"
   },
+
+  // Optional. When a role's agent fails on a quota/rate limit, the runner
+  // retries the job with these profiles in order. Only the reviewer role
+  // falls back today.
+  // "roleFallbacks": { "reviewer": ["antigravity"] },
 
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,

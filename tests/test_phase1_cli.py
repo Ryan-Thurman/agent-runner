@@ -232,6 +232,27 @@ class Phase1CliTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "promptPrefix"):
                 load_config(repo)
 
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["roleFallbacks"] = {"reviewer": ["missing-agent"]}
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "unknown agent profile"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["roleFallbacks"] = {"unknown-role": ["antigravity"]}
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "configured role"):
+                load_config(repo)
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["roleFallbacks"] = {"reviewer": ["antigravity"]}
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            config = load_config(repo)
+            self.assertEqual(config.role_fallbacks, {"reviewer": ["antigravity"]})
+
     def test_empty_checks_are_accepted_with_warning(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"

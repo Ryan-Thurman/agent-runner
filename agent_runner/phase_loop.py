@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from .config import RunnerConfig
 from .errors import AgentRunnerError, JobError
-from .jobs import JobResult, run_agent_job, run_checks_job
+from .jobs import JobResult, is_quota_failure, run_agent_job, run_checks_job
 from .plan import ParsedPhase, ParsedPlan, parse_plan_file
 from .storage import (
     get_phase,
@@ -352,27 +352,55 @@ def _run_review(
                 message=str(exc),
             )
 
-    profile = _profile_for_role(config, "reviewer")
+    profiles = _reviewer_profiles(config)
     log_dir = Path(phase["log_dir"])
-    result = run_agent_job(
-        connection,
-        project_id=project_id,
-        plan_id=plan_id,
-        phase_id=phase["id"],
-        job_type="REVIEW",
-        role="reviewer",
-        profile=profile,
-        prompt=_review_prompt(
-            repo_root,
-            parsed_phase,
-            log_dir,
-            phase=phase,
-            use_published_diff=config.auto_commit,
-        ),
-        repo_root=repo_root,
-        log_dir=log_dir,
-        timeout_seconds=config.timeout_minutes * 60,
+    review_prompt = _review_prompt(
+        repo_root,
+        parsed_phase,
+        log_dir,
+        phase=phase,
+        use_published_diff=config.auto_commit,
     )
+    for attempt, profile in enumerate(profiles):
+        result = run_agent_job(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            job_type="REVIEW",
+            role="reviewer",
+            profile=profile,
+            prompt=review_prompt,
+            repo_root=repo_root,
+            log_dir=log_dir,
+            timeout_seconds=config.timeout_minutes * 60,
+        )
+        if result.status == "SUCCEEDED":
+            break
+        next_profile = (
+            profiles[attempt + 1] if attempt + 1 < len(profiles) else None
+        )
+        if next_profile is None or not is_quota_failure(result):
+            break
+        message = (
+            f"REVIEW hit a quota/rate limit with profile {profile.name!r}; "
+            f"falling back to profile {next_profile.name!r}"
+        )
+        print(f"[agent-runner] {message}", file=sys.stderr, flush=True)
+        record_event(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase_id=phase["id"],
+            job_id=result.job_id,
+            event_type="review.fallback",
+            message=message,
+            data={
+                "failedProfile": profile.name,
+                "fallbackProfile": next_profile.name,
+                "error": result.error,
+            },
+        )
     if result.status != "SUCCEEDED":
         _block_phase_after_job(
             connection,
@@ -957,6 +985,16 @@ def _profile_for_role(config: RunnerConfig, role: str):
         return config.agents[config.roles[role]]
     except KeyError as exc:
         raise JobError(f"missing configured role: {role}") from exc
+
+
+def _reviewer_profiles(config: RunnerConfig):
+    profiles = [_profile_for_role(config, "reviewer")]
+    seen = {profiles[0].name}
+    for name in config.role_fallbacks.get("reviewer", []):
+        if name not in seen:
+            profiles.append(config.agents[name])
+            seen.add(name)
+    return profiles
 
 
 def _ensure_clean_or_allowed(config: RunnerConfig, repo_root: Path) -> Optional[set[str]]:

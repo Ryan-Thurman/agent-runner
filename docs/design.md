@@ -75,6 +75,12 @@ These are changes to the draft worked out elsewhere; they fix real failure modes
    worktrees). Keep coder/reviewer args fully in `.agent-runner.json` (draft already does).
 10. **Rename `FIX_REVIEW` → `FIX`.** It handles check failures too; add a `trigger` column
     (`checks` | `review`) instead of encoding the source in the type name.
+11. **Reviewer quota fallback.** A reviewer that dies on a quota/rate limit should not
+    block the phase when another vendor CLI is available. `roleFallbacks.reviewer` lists
+    fallback profiles; the runner retries REVIEW with the next profile only when the
+    failure output matches quota/rate-limit signatures (429, "usage limit", …) and records
+    a `review.fallback` event. Non-quota failures still block — a crashing reviewer is a
+    bug to surface, not to route around.
 
 ## Full-circle closure: `CLOSE_PHASE`
 

@@ -1,4 +1,5 @@
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -16,6 +17,18 @@ from .storage import create_job, get_job, update_job_pid
 
 WRITE_ROLES = {"coder", "closer"}
 READ_ONLY_ROLES = {"reviewer"}
+
+# Vendor CLIs word these differently (codex, claude, gemini/antigravity), so
+# match the common quota/rate-limit phrasings rather than any one CLI's text.
+QUOTA_ERROR_PATTERN = re.compile(
+    r"quota|rate.?limit|usage.?limit|too many requests|resource.?exhausted"
+    r"|insufficient_quota|out of credits|credit balance|\b429\b",
+    re.IGNORECASE,
+)
+
+# How much of the log tail to scan for quota signatures. Retried jobs append
+# to the same log, so a bounded tail keeps the newest attempt's output in view.
+_QUOTA_SCAN_TAIL_CHARS = 8000
 
 
 @dataclass(frozen=True)
@@ -122,6 +135,18 @@ def run_agent_job(
         output_path=output_path,
         error=row["error"],
     )
+
+
+def is_quota_failure(result: JobResult) -> bool:
+    if result.status == "SUCCEEDED":
+        return False
+    if result.error and QUOTA_ERROR_PATTERN.search(result.error):
+        return True
+    try:
+        log_text = result.log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return QUOTA_ERROR_PATTERN.search(log_text[-_QUOTA_SCAN_TAIL_CHARS:]) is not None
 
 
 def run_checks_job(

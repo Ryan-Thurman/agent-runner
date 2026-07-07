@@ -114,6 +114,9 @@ Minimum config shape:
     "coder": "codex",
     "reviewer": "claude"
   },
+  "roleFallbacks": {
+    "reviewer": ["codex"]
+  },
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,
   "autoCommit": true,
@@ -128,6 +131,14 @@ Current notes:
   PR before the job exits. `roles.reviewer` is used for read-only review.
 - `promptPrefix` is optional. When set, the runner prepends it to every prompt
   sent to that agent profile.
+- `roleFallbacks` is optional and maps a role to an ordered list of agent
+  profiles. When a REVIEW job fails with a quota/rate-limit error (429, "usage
+  limit", "quota exceeded", and similar), the runner reruns the review with the
+  next profile and records a `review.fallback` event. Any other review failure
+  blocks the phase without falling back. Only the reviewer role falls back
+  today; other roles are accepted but warned about. The sample config includes
+  an `antigravity` profile (the `agy` CLI) suitable as a reviewer fallback on a
+  separate quota pool.
 - `checks` run as shell commands from the repo root, in order. The first failure
   stops the check job.
 - `timeoutMinutes` applies per agent/check process.
