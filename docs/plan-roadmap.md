@@ -78,7 +78,8 @@ Acceptance Criteria:
   pass.
 
 ## Phase 3: Mirror review results to GitHub
-Status: PENDING
+Status: COMPLETE
+Evidence: runner-owned GitHub review/comment posting, fake-gh coverage, and docs added; `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
 
 Make the runner post the reviewer findings to GitHub even when the review agent
 does not.

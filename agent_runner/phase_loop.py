@@ -928,7 +928,191 @@ def _post_review_to_github(
     repo_root: Path,
     log_dir: Path,
 ) -> None:
-    return None
+    pr_url = phase["pr_url"]
+    reviewed_sha = phase["published_sha"]
+    if not pr_url or not reviewed_sha:
+        _record_github_post_failed(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=phase,
+            source_job=source_job,
+            message="review GitHub post skipped because PR metadata is missing",
+            data={"prUrl": pr_url, "reviewedSha": reviewed_sha},
+        )
+        return
+
+    plan_path = _plan_path_for_id(connection, plan_id)
+    body_path = log_dir / f"review-{source_job.job_id}-github.md"
+    try:
+        body_path.write_text(
+            _render_github_review_body(
+                plan_path=plan_path,
+                phase_number=phase["phase_number"],
+                review_job_id=source_job.job_id,
+                reviewed_sha=reviewed_sha,
+                review=review,
+            ),
+            encoding="utf-8",
+        )
+        _run_gh_review_post(
+            repo_root=repo_root,
+            pr_url=pr_url,
+            review=review,
+            body_path=body_path,
+        )
+    except OSError as exc:
+        _record_github_post_failed(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=phase,
+            source_job=source_job,
+            message=f"review GitHub post failed for phase {phase['phase_number']}",
+            data={"error": str(exc), "bodyPath": str(body_path), "prUrl": pr_url},
+        )
+    except JobError as exc:
+        _record_github_post_failed(
+            connection,
+            project_id=project_id,
+            plan_id=plan_id,
+            phase=phase,
+            source_job=source_job,
+            message=f"review GitHub post failed for phase {phase['phase_number']}",
+            data={"error": str(exc), "bodyPath": str(body_path), "prUrl": pr_url},
+        )
+
+
+def _plan_path_for_id(connection: sqlite3.Connection, plan_id: int) -> str:
+    row = connection.execute("SELECT path FROM plans WHERE id = ?", (plan_id,)).fetchone()
+    if row is None:
+        return f"plan:{plan_id}"
+    return row["path"]
+
+
+def _render_github_review_body(
+    *,
+    plan_path: str,
+    phase_number: int,
+    review_job_id: int,
+    reviewed_sha: str,
+    review: dict[str, Any],
+) -> str:
+    lines = [
+        (
+            "<!-- agent-runner-review "
+            f"plan={plan_path} "
+            f"phase={phase_number} "
+            f"review_job={review_job_id} "
+            f"reviewed_sha={reviewed_sha} -->"
+        ),
+        "",
+        f"# Phase {phase_number} Review: {review['status']}",
+        "",
+        "## Summary",
+        "",
+        review["summary"],
+        "",
+        "## Reviewed SHA",
+        "",
+        f"`{reviewed_sha}`",
+        "",
+        "## Findings",
+        "",
+    ]
+    findings = review["findings"]
+    for bucket in REVIEW_FINDING_BUCKETS:
+        lines.extend([f"### {bucket}", ""])
+        issues = findings.get(bucket, [])
+        if issues:
+            for issue in issues:
+                lines.extend(_markdown_finding_item(issue))
+        else:
+            lines.append("- None")
+        lines.append("")
+
+    lines.extend(["## Recommended Fix Prompt", ""])
+    recommended_fix_prompt = review["recommendedFixPrompt"]
+    if recommended_fix_prompt:
+        lines.append(recommended_fix_prompt)
+    else:
+        lines.append("- None")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _markdown_finding_item(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        if "\n" not in text:
+            return [f"- {text}"]
+        first, *rest = text.splitlines()
+        lines = [f"- {first}"]
+        lines.extend(f"  {line}" if line else "" for line in rest)
+        return lines
+    rendered = json.dumps(value, indent=2, sort_keys=True)
+    return ["- ```json", *[f"  {line}" for line in rendered.splitlines()], "  ```"]
+
+
+def _run_gh_review_post(
+    *,
+    repo_root: Path,
+    pr_url: str,
+    review: dict[str, Any],
+    body_path: Path,
+) -> None:
+    status = review["status"]
+    if status == "BLOCKED":
+        command = ["gh", "pr", "comment", pr_url, "--body-file", str(body_path)]
+    elif status == "PASS":
+        command = ["gh", "pr", "review", pr_url, "--approve", "--body-file", str(body_path)]
+    else:
+        command = [
+            "gh",
+            "pr",
+            "review",
+            pr_url,
+            "--request-changes",
+            "--body-file",
+            str(body_path),
+        ]
+
+    try:
+        result = subprocess.run(
+            command,
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise JobError("gh is not installed or not on PATH") from exc
+
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "gh post failed"
+        raise JobError(detail)
+
+
+def _record_github_post_failed(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    source_job: JobResult,
+    message: str,
+    data: dict[str, Any],
+) -> None:
+    record_event(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        job_id=source_job.job_id,
+        event_type="review.github_post_failed",
+        message=message,
+        data=data,
+    )
 
 
 def _run_close_phase(

@@ -251,6 +251,15 @@ Current notes:
   `nonBlockingIssues` maps to `findings.shouldFix`. The runner still writes
   those legacy fields into normalized `review.json` for compatibility. Invalid
   review JSON blocks the phase and leaves the raw output in `review.log`.
+- With `autoCommit=true`, the runner mirrors normalized `review.json` back to
+  the published PR after extraction. `PASS` posts a whole-PR approval review,
+  `CHANGES_REQUESTED` posts a whole-PR request-changes review, and `BLOCKED`
+  posts a PR comment instead of a review decision. The body is mechanical: it
+  includes the review status, summary, all finding buckets, the recommended fix
+  prompt, and an idempotency marker with the plan path, phase number, review job
+  id, and reviewed SHA. GitHub posting is non-fatal by default; failures record
+  a `review.github_post_failed` event, while the SQLite state and `review.json`
+  remain the authoritative review result.
 - The closer uses the configured coder profile with write flags. It must update
   docs or record a `not doc-impacting` reason, set the phase plan marker to
   `Status: COMPLETE`, add an `Evidence:` line, and write the phase handoff.
