@@ -387,6 +387,11 @@ class Phase7CloseTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "[agent-runner] phase 1 PR #1 opened: "
+                "https://example.test/pull/1",
+                result.stderr,
+            )
             self.assertIn("plan complete", result.stderr)
             rows = phase_rows(home, repo)
             self.assertEqual(rows[0]["status"], "COMPLETE")
@@ -422,9 +427,19 @@ class Phase7CloseTests(unittest.TestCase):
                 ).fetchone()
                 plan = db.execute("SELECT * FROM plans").fetchone()
                 jobs = db.execute("SELECT type FROM jobs ORDER BY id").fetchall()
+                events = db.execute(
+                    "SELECT event_type, message FROM events ORDER BY id"
+                ).fetchall()
             self.assertEqual(project["status"], "COMPLETE")
             self.assertEqual(plan["status"], "COMPLETE")
             self.assertEqual([job["type"] for job in jobs][-1], "CLOSE_PHASE")
+            self.assertIn(
+                (
+                    "phase.published",
+                    "phase 1 published to PR #1 (https://example.test/pull/1)",
+                ),
+                [(event["event_type"], event["message"]) for event in events],
+            )
 
     def test_closer_failure_blocks_without_marking_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -540,6 +555,7 @@ class Phase7CloseTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 1)
+            self.assertIn("[agent-runner] phase 1 PR #1 merged (squash)", result.stderr)
             self.assertIn("BLOCKED after IMPLEMENT failure", result.stderr)
             rows = phase_rows(home, repo)
             self.assertEqual(rows[0]["status"], "COMPLETE")
@@ -560,10 +576,20 @@ class Phase7CloseTests(unittest.TestCase):
                         "SELECT event_type FROM events ORDER BY id"
                     ).fetchall()
                 ]
+                event_messages = [
+                    row["message"]
+                    for row in db.execute(
+                        "SELECT message FROM events ORDER BY id"
+                    ).fetchall()
+                ]
             self.assertIn(
                 (2, "IMPLEMENT"), [(row["phase_number"], row["type"]) for row in jobs]
             )
             self.assertIn("phase.merged", event_types)
+            self.assertIn(
+                "merged phase 1 PR #1 (https://example.test/pull/1) (squash)",
+                event_messages,
+            )
             self.assertIn("phase.branch_created", event_types)
 
             current_branch = subprocess.check_output(
@@ -837,6 +863,7 @@ class Phase7CloseTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("merge PR", result.stderr)
+            self.assertIn("merge PR #1 (https://example.test/pull/1)", result.stderr)
             rows = phase_rows(home, repo)
             self.assertEqual(rows[0]["status"], "COMPLETE")
             self.assertEqual(rows[1]["status"], "PENDING")
