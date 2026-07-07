@@ -156,7 +156,8 @@ Acceptance Criteria:
   pass.
 
 ## Phase 6: Harden state, docs, and roadmap planning
-Status: PENDING
+Status: COMPLETE
+Evidence: close-on-exit SQLite connections remove Python 3.14 ResourceWarning noise; `plan-roadmap` command, ROADMAP_PLAN job type, validation, tests, and docs added; design and usage docs updated; `python3 -m compileall -q .` and `python3 -Wd -m unittest discover -s tests -v` passed.
 
 Clean up known rough edges and add a first-class way for the runner to turn a
 roadmap into an executable plan.

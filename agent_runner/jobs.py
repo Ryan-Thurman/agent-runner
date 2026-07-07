@@ -15,7 +15,7 @@ from .lock import utc_now_iso
 from .storage import create_job, get_job, update_job_pid
 
 
-WRITE_ROLES = {"coder", "closer", "fixer"}
+WRITE_ROLES = {"coder", "closer", "fixer", "planner"}
 READ_ONLY_ROLES = {"reviewer", "triage"}
 
 # Vendor CLIs word these differently (codex, claude, gemini/antigravity), so
@@ -403,6 +403,7 @@ def _live_preview_context(
         return LivePreviewContext(subject="checks", verb="checking")
 
     verb_by_job_type = {
+        "ROADMAP_PLAN": "planning",
         "IMPLEMENT": "coding",
         "REVIEW": "reviewing",
         "TRIAGE": "reviewing",

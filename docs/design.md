@@ -1,11 +1,10 @@
-# Agent Runner Loop — design (`agent-runner`)
+# Agent Runner Loop - design (`agent-runner`)
 
-> **Work in progress — not fully fleshed out.** This is the design doc for this repo's
-> runner; completed historical plans live in `docs/archive/`, and current
-> execution work lives in `docs/plan-roadmap.md`. Toolbelt paths in the reuse map
-> below (`commands/…`, `skills/…`, `workflows/…`) refer to the
-> [agent-toolbelt](../../agent-toolbelt) repo, where the origin copy of this doc lives as
-> `workflows/WiP-agent-runner-loop.md`.
+This is the design doc for the local `agent-runner` CLI. Completed historical
+plans live in `docs/archive/`, and current execution work lives in
+`docs/plan-roadmap.md`. Toolbelt paths in the reuse map below (`commands/...`,
+`skills/...`, `workflows/...`) refer to the [agent-toolbelt](../../agent-toolbelt)
+repo, where the early origin copy of this design lived.
 
 A minimal local CLI (`agent-runner run`, Python 3 stdlib + SQLite) that automates the
 manual bounce between coding agents inside a Supacode project/worktree:
@@ -128,15 +127,27 @@ Closure is an agent job, not runner-native code — doc updates need judgment.
 - Everything else in the draft (projects/plans/phases/jobs/events, statuses, lock file,
   `~/.agent-runner/` layout, log-paths-in-SQLite) stands.
 
-## Still to build (all new code)
+## Implemented surface
 
-- The TS CLI itself: `run` / `status` / `pause` / `resume` / `logs` / `reset-lock` / `init`.
-- Plan parser (`## Phase <n>: <title>` blocks + per-phase hashing + status marker line).
-- Job state machine + child-process exec with log capture and timeouts.
-- Prompt templates (seeded from the commands in the reuse map above).
-- Review JSON extraction (prefer instructing the reviewer to write `review.json` to a given
-  path over scraping stdout).
-- Lock file + orphan reap on startup.
+The runner is a Python stdlib CLI with these operator commands:
+
+- `init`: create runner home directories and a sample `.agent-runner.json`.
+- `run`: register or resume the configured plan and drive the next job.
+- `status`: print project, plan, phase, job, and recent-event state.
+- `pause` / `resume`: stop or restart work at job boundaries.
+- `unblock`: restore a blocked phase to a resumable status.
+- `logs`: print the latest phase log directory and tail the newest log file.
+- `reset-lock`: clear a stale project lock.
+- `plan-roadmap`: ask a configured planner/coder agent to turn unfinished
+  roadmap items into an executable plan such as `docs/plan-roadmap.md`.
+
+Implemented internals include the markdown plan parser, per-phase hashing,
+runner-owned status/evidence metadata, SQLite state, lock files, orphan reaping,
+agent/check subprocess execution with log capture and timeouts, live bounded
+stderr previews, bucketed review JSON normalization, review-triggered fixes,
+closer validation, optional PR publishing, GitHub review mirroring, merge-on-close,
+manual-merge reconciliation, self-hosted restart after merges, and optional
+one-shot auto-fix for blocked phases.
 
 ## Agent profiles — roles are swappable
 
@@ -189,4 +200,5 @@ for repos without the toolbelt installed.
 
 ## Open questions
 
-- **Where the runner lives:** its own repo vs a `tools/` dir here. Currently external.
+- **Doc-gate strictness:** close-time docs/evidence requirements are validated
+  mechanically where possible, but some judgment remains prompt-enforced.
