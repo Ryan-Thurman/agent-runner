@@ -20,8 +20,10 @@ from .storage import (
     list_plans_for_project,
     list_recent_events,
     list_running_jobs_for_project,
+    record_event,
     reap_orphaned_jobs,
     rows_to_dicts,
+    update_project_status,
 )
 
 
@@ -59,7 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser = subcommands.add_parser("resume", help="resume a paused project")
     resume_parser.set_defaults(func=cmd_resume)
 
-    logs_parser = subcommands.add_parser("logs", help="show log location")
+    logs_parser = subcommands.add_parser("logs", help="show latest phase logs")
+    logs_parser.add_argument(
+        "-n",
+        "--lines",
+        type=int,
+        default=40,
+        help="number of lines to tail from the newest log file",
+    )
     logs_parser.set_defaults(func=cmd_logs)
 
     reset_parser = subcommands.add_parser("reset-lock", help="clear this project lock")
@@ -130,6 +139,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                     f"[agent-runner] accepted protected plan change(s): {phase_list}",
                     file=sys.stderr,
                 )
+            with connect_db(home) as db:
+                project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+                if project["status"] == "PAUSED":
+                    print(
+                        "[agent-runner] project is PAUSED; run "
+                        "`agent-runner resume` then `agent-runner run` to continue",
+                        file=sys.stderr,
+                    )
+                    return 0
             hold_seconds = float(os.environ.get("AGENT_RUNNER_HOLD_SECONDS", "0"))
             if hold_seconds > 0:
                 time.sleep(hold_seconds)
@@ -242,22 +260,72 @@ def _project_lock_is_live(locks_dir: Path, slug: str, repo_root: Path) -> bool:
 
 
 def cmd_pause(args: argparse.Namespace) -> int:
-    find_git_root()
-    print("[agent-runner] pause is not implemented until Phase 8", file=sys.stderr)
+    repo_root = find_git_root()
+    home = ensure_runner_layout()
+    slug = project_slug(repo_root)
+    with connect_db(home) as db:
+        project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+        update_project_status(db, project["id"], "PAUSED")
+        record_event(
+            db,
+            project_id=project["id"],
+            event_type="project.paused",
+            message="pause requested; runner will stop at the next job boundary",
+        )
+    print("[agent-runner] pause requested; active jobs will finish", file=sys.stderr)
     return 0
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
-    find_git_root()
-    print("[agent-runner] resume is not implemented until Phase 8", file=sys.stderr)
+    repo_root = find_git_root()
+    home = ensure_runner_layout()
+    slug = project_slug(repo_root)
+    with connect_db(home) as db:
+        project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+        update_project_status(db, project["id"], "ACTIVE")
+        record_event(
+            db,
+            project_id=project["id"],
+            event_type="project.resumed",
+            message="resume requested",
+        )
+    print("[agent-runner] project resumed", file=sys.stderr)
     return 0
 
 
 def cmd_logs(args: argparse.Namespace) -> int:
     repo_root = find_git_root()
     home = ensure_runner_layout()
-    print(str(home / "logs" / project_slug(repo_root)))
-    print("[agent-runner] detailed logs are not implemented yet", file=sys.stderr)
+    slug = project_slug(repo_root)
+    with connect_db(home) as db:
+        project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+        phase = db.execute(
+            """
+            SELECT phases.*
+            FROM phases
+            JOIN plans ON plans.id = phases.plan_id
+            WHERE phases.project_id = ?
+            ORDER BY phases.updated_at DESC, phases.id DESC
+            LIMIT 1
+            """,
+            (project["id"],),
+        ).fetchone()
+    if phase is None:
+        log_root = home / "logs" / slug
+        print(str(log_root))
+        print("[agent-runner] no phase logs registered yet", file=sys.stderr)
+        return 0
+
+    log_dir = Path(phase["log_dir"])
+    print(str(log_dir))
+    print(f"[agent-runner] latest phase log dir: {log_dir}", file=sys.stderr)
+    newest_log = _newest_log_file(log_dir)
+    if newest_log is None:
+        print("[agent-runner] no log files found in latest phase", file=sys.stderr)
+        return 0
+    print(f"[agent-runner] tailing: {newest_log}", file=sys.stderr)
+    for line in _tail_lines(newest_log, max(args.lines, 0)):
+        print(line, end="" if line.endswith("\n") else "\n")
     return 0
 
 
@@ -272,6 +340,24 @@ def cmd_reset_lock(args: argparse.Namespace) -> int:
 def emit_config_warnings(warnings: list[str]) -> None:
     for warning in warnings:
         print(f"[agent-runner] warning: {warning}", file=sys.stderr)
+
+
+def _newest_log_file(log_dir: Path) -> Optional[Path]:
+    if not log_dir.exists():
+        return None
+    candidates = [path for path in log_dir.glob("*.log") if path.is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name))
+
+
+def _tail_lines(path: Path, line_count: int) -> list[str]:
+    if line_count <= 0:
+        return []
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines(
+        keepends=True
+    )
+    return lines[-line_count:]
 
 
 def _format_publish_state(phase: dict) -> str:

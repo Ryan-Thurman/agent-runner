@@ -12,6 +12,7 @@ from .jobs import JobResult, run_agent_job, run_checks_job
 from .plan import ParsedPhase, ParsedPlan, parse_plan_file
 from .storage import (
     get_phase,
+    get_project,
     record_event,
     slug_for_path,
     update_phase_publish_metadata,
@@ -48,6 +49,10 @@ def run_phase_loop(
     config: RunnerConfig,
     repo_root: Path,
 ) -> PhaseLoopResult:
+    paused = _paused_result_if_needed(connection, project_id)
+    if paused is not None:
+        return paused
+
     phase = _next_action_phase(connection, plan_id)
     if phase is None:
         return PhaseLoopResult("no phase is ready for Phase 5 work")
@@ -180,6 +185,11 @@ def _run_implement(
         event_type="phase.checking",
         message=f"IMPLEMENT succeeded; checking phase {phase['phase_number']}",
     )
+    paused = _paused_result_if_needed(
+        connection, project_id, phase_number=phase["phase_number"]
+    )
+    if paused is not None:
+        return paused
     return _run_checks(
         connection,
         project_id=project_id,
@@ -260,6 +270,11 @@ def _run_checks(
             event_type="phase.reviewing",
             message=f"checks passed for phase {phase['phase_number']}",
         )
+        paused = _paused_result_if_needed(
+            connection, project_id, phase_number=phase["phase_number"]
+        )
+        if paused is not None:
+            return paused
         return _run_review(
             connection,
             project_id=project_id,
@@ -441,6 +456,11 @@ def _run_review(
             "nonBlockingIssues": review["nonBlockingIssues"],
         },
     )
+    paused = _paused_result_if_needed(
+        connection, project_id, phase_number=phase["phase_number"]
+    )
+    if paused is not None:
+        return paused
     return _run_close_phase(
         connection,
         project_id=project_id,
@@ -575,6 +595,11 @@ def _run_close_phase(
 
     next_phase = _next_pending_phase(connection, plan_id)
     if next_phase is not None:
+        paused = _paused_result_if_needed(
+            connection, project_id, phase_number=phase["phase_number"]
+        )
+        if paused is not None:
+            return paused
         if not config.auto_commit:
             return PhaseLoopResult(
                 f"phase {phase['phase_number']} complete; next phase "
@@ -645,6 +670,7 @@ def _run_fix(
         )
 
     phase = update_phase_status(connection, phase["id"], "FIXING", increment_retry=True)
+    _write_pending_fix_prompt(Path(phase["log_dir"]), prompt)
     record_event(
         connection,
         project_id=project_id,
@@ -655,6 +681,11 @@ def _run_fix(
         message=f"{trigger} requested FIX for phase {phase['phase_number']}",
         data={"trigger": trigger, "retryCount": phase["retry_count"]},
     )
+    paused = _paused_result_if_needed(
+        connection, project_id, phase_number=phase["phase_number"]
+    )
+    if paused is not None:
+        return paused
 
     profile = _profile_for_role(config, "coder")
     fix_result = run_agent_job(
@@ -697,6 +728,11 @@ def _run_fix(
         message=f"FIX succeeded for phase {phase['phase_number']}; rerunning checks",
         data={"trigger": trigger},
     )
+    paused = _paused_result_if_needed(
+        connection, project_id, phase_number=phase["phase_number"]
+    )
+    if paused is not None:
+        return paused
     return _run_checks(
         connection,
         project_id=project_id,
@@ -729,22 +765,28 @@ def _resume_fix(
         (phase["id"],),
     ).fetchone()
     if prior_fix is None:
-        update_phase_status(connection, phase["id"], "BLOCKED")
-        return PhaseLoopResult(
-            f"phase {phase['phase_number']} BLOCKED: no FIX prompt is available",
-            blocked=True,
+        pending_prompt = _pending_fix_prompt_path(Path(phase["log_dir"]))
+        if not pending_prompt.exists():
+            update_phase_status(connection, phase["id"], "BLOCKED")
+            return PhaseLoopResult(
+                f"phase {phase['phase_number']} BLOCKED: no FIX prompt is available",
+                blocked=True,
+            )
+        prompt = pending_prompt.read_text(encoding="utf-8")
+        trigger = _latest_fix_trigger(connection, phase["id"]) or "review"
+        source_job = None
+    else:
+        prompt = Path(prior_fix["prompt_path"]).read_text(encoding="utf-8")
+        trigger = prior_fix["trigger"] or "review"
+        source_job = JobResult(
+            job_id=prior_fix["id"],
+            status=prior_fix["status"],
+            exit_code=prior_fix["exit_code"],
+            log_path=Path(prior_fix["log_path"]),
+            prompt_path=Path(prior_fix["prompt_path"]),
+            output_path=Path(prior_fix["output_path"]) if prior_fix["output_path"] else None,
+            error=prior_fix["error"],
         )
-    prompt = Path(prior_fix["prompt_path"]).read_text(encoding="utf-8")
-    trigger = prior_fix["trigger"] or "review"
-    source_job = JobResult(
-        job_id=prior_fix["id"],
-        status=prior_fix["status"],
-        exit_code=prior_fix["exit_code"],
-        log_path=Path(prior_fix["log_path"]),
-        prompt_path=Path(prior_fix["prompt_path"]),
-        output_path=Path(prior_fix["output_path"]) if prior_fix["output_path"] else None,
-        error=prior_fix["error"],
-    )
     return _run_fix_without_increment(
         connection,
         project_id=project_id,
@@ -770,7 +812,7 @@ def _run_fix_without_increment(
     repo_root: Path,
     trigger: str,
     prompt: str,
-    source_job: JobResult,
+    source_job: Optional[JobResult],
 ) -> PhaseLoopResult:
     profile = _profile_for_role(config, "coder")
     fix_result = run_agent_job(
@@ -810,8 +852,16 @@ def _run_fix_without_increment(
         job_id=fix_result.job_id,
         event_type="phase.checking",
         message=f"FIX resumed for phase {phase['phase_number']}; rerunning checks",
-        data={"trigger": trigger, "sourceJobId": source_job.job_id},
+        data={
+            "trigger": trigger,
+            "sourceJobId": None if source_job is None else source_job.job_id,
+        },
     )
+    paused = _paused_result_if_needed(
+        connection, project_id, phase_number=phase["phase_number"]
+    )
+    if paused is not None:
+        return paused
     return _run_checks(
         connection,
         project_id=project_id,
@@ -821,6 +871,60 @@ def _run_fix_without_increment(
         config=config,
         repo_root=repo_root,
     )
+
+
+def _paused_result_if_needed(
+    connection: sqlite3.Connection,
+    project_id: int,
+    *,
+    phase_number: Optional[int] = None,
+) -> Optional[PhaseLoopResult]:
+    project = get_project(connection, project_id)
+    if project["status"] != "PAUSED":
+        return None
+    if phase_number is None:
+        return PhaseLoopResult(
+            "project is PAUSED; run `agent-runner resume` then "
+            "`agent-runner run` to continue"
+        )
+    return PhaseLoopResult(
+        f"project paused at a job boundary after phase {phase_number}; run "
+        "`agent-runner resume` then `agent-runner run` to continue"
+    )
+
+
+def _pending_fix_prompt_path(log_dir: Path) -> Path:
+    return log_dir / "fix-prompt.md"
+
+
+def _write_pending_fix_prompt(log_dir: Path, prompt: str) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    _pending_fix_prompt_path(log_dir).write_text(prompt, encoding="utf-8")
+
+
+def _latest_fix_trigger(
+    connection: sqlite3.Connection, phase_id: int
+) -> Optional[str]:
+    row = connection.execute(
+        """
+        SELECT data_json
+        FROM events
+        WHERE phase_id = ? AND event_type = 'phase.fixing'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (phase_id,),
+    ).fetchone()
+    if row is None or not row["data_json"]:
+        return None
+    try:
+        data = json.loads(row["data_json"])
+    except json.JSONDecodeError:
+        return None
+    trigger = data.get("trigger")
+    if isinstance(trigger, str) and trigger in {"checks", "review"}:
+        return trigger
+    return None
 
 
 def _next_action_phase(

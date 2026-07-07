@@ -11,7 +11,7 @@ from typing import Callable, Optional
 from .config import AgentProfile
 from .errors import JobError
 from .lock import utc_now_iso
-from .storage import create_job, get_job
+from .storage import create_job, get_job, update_job_pid
 
 
 WRITE_ROLES = {"coder", "closer"}
@@ -87,7 +87,9 @@ def run_agent_job(
             shell=False,
             log_path=log_path,
             log_header="$ " + " ".join(argv) + "\n",
-            on_spawn=lambda pid: _print_job_spawned(job["id"], job_type, pid),
+            on_spawn=lambda pid: _record_job_spawn(
+                connection, job["id"], job_type, pid
+            ),
         )
         if profile.output_capture in {"stdout", "structured-stdout"}:
             output_path.write_text(stdout, encoding="utf-8")
@@ -169,8 +171,8 @@ def run_checks_job(
                 shell=True,
                 log_path=log_path,
                 log_header=f"$ {command}\n",
-                on_spawn=lambda pid: _print_job_spawned(
-                    job["id"], "RUN_CHECKS", pid
+                on_spawn=lambda pid: _record_job_spawn(
+                    connection, job["id"], "RUN_CHECKS", pid
                 ),
             )
             if process_error is not None or exit_code != 0:
@@ -342,6 +344,13 @@ def _print_job_spawned(job_id: int, job_type: str, pid: int) -> None:
         file=sys.stderr,
         flush=True,
     )
+
+
+def _record_job_spawn(
+    connection: sqlite3.Connection, job_id: int, job_type: str, pid: int
+) -> None:
+    update_job_pid(connection, job_id, pid)
+    _print_job_spawned(job_id, job_type, pid)
 
 
 def _pump_stream(stream, chunks: list[str], log_file, lock: threading.Lock) -> None:

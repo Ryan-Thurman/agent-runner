@@ -1,8 +1,8 @@
 # Using agent-runner
 
-This guide describes the runner as it exists after Phase 7. It is ready for
-dogfooding the implementation, check, review, retry-limited fix, and close-phase
-loop. Pause/resume and rich log tailing are still future phases.
+This guide describes the runner as it exists after Phase 8. It is ready for
+dogfooding the implementation, check, review, retry-limited fix, close-phase,
+pause/resume, crash recovery, and log-tailing loop.
 
 ## Current Loop
 
@@ -26,6 +26,8 @@ loop. Pause/resume and rich log tailing are still future phases.
 - `CLOSING`: run the closer profile with write flags, validate the plan
   write-back and handoff, optionally commit, and mark the phase `COMPLETE`.
 - `BLOCKED`: exit non-zero.
+- A `PAUSED` project does not start another job. Run `agent-runner resume`,
+  then `agent-runner run`, to continue from the current phase status.
 
 The automated loop is now:
 
@@ -33,7 +35,8 @@ The automated loop is now:
 IMPLEMENT -> RUN_CHECKS -> REVIEW -> FIX/RUN_CHECKS/REVIEW -> CLOSE_PHASE
 ```
 
-`CLOSE_PHASE` is automated. Later operational commands remain manual.
+`CLOSE_PHASE` is automated. Operator pause and resume are project-level state
+flips and never interrupt a running agent process.
 
 ## Installation
 
@@ -189,7 +192,7 @@ If `allowDirty=false`, this must be clean. Then run:
 python3 -m agent_runner run
 ```
 
-Expected Phase 7 success flow:
+Expected success flow:
 
 ```text
 [agent-runner] acquired lock for <project-slug>
@@ -207,6 +210,23 @@ If another phase is still `PENDING`, the runner starts its IMPLEMENT job after
 the closure commit. With `autoCommit=false`, the runner marks the phase complete
 but stops before starting the next pending phase so local staged work can be
 handled deliberately.
+
+To pause at the next job boundary while a run is active:
+
+```sh
+python3 -m agent_runner pause
+```
+
+The active agent or check job is allowed to finish. The runner then exits before
+starting the next job and prints the resume command. Continue with:
+
+```sh
+python3 -m agent_runner resume
+python3 -m agent_runner run
+```
+
+Running while paused is non-destructive; it explains that the project is paused
+and exits without launching a job.
 
 After a published review:
 
@@ -262,10 +282,12 @@ When a job is active, `status` shows the running job id, type, phase, start
 time, and log path. `run` also prints job start lines as soon as it launches a
 job, including the role/profile, log path, and child PID.
 
-`logs` currently prints the project log root:
+`logs` prints the latest registered phase log directory and tails the newest
+`.log` file:
 
 ```sh
 python3 -m agent_runner logs
+python3 -m agent_runner logs -n 80
 ```
 
 Phase logs are under:
@@ -302,6 +324,10 @@ marks them failed, and resets the phase to the corresponding in-progress state.
 For an interrupted IMPLEMENT, rerunning skips the initial dirty gate so leftover
 agent changes do not block crash recovery.
 
+Job rows store the spawned child PID. When startup recovery reaps an orphaned
+`RUNNING` job, it also attempts to terminate that job's process group before
+re-enqueueing the phase from SQLite state.
+
 ## Plan Changes
 
 On every `run`, the plan is parsed and compared with the registered phase
@@ -320,9 +346,9 @@ canonical phase body.
 
 ## Safety Rules
 
-The runner currently does not auto-merge, force-push, delete branches, delete
-files outside the repo, modify global git config, or interrupt running agent
-processes.
+The runner does not auto-merge, force-push, delete branches, delete files
+outside the repo, modify global git config, or interrupt running agent processes
+for pause/resume.
 
 Before a normal IMPLEMENT job starts, the default dirty gate requires a clean
 worktree. With `autoCommit=true`, the coder/fixer must leave committed and

@@ -1,40 +1,137 @@
 # agent-runner
 
-> **Work in progress** — Phase 7 is merged, so the runner can register plans, run
-> IMPLEMENT jobs, stage changes, run checks, review diffs, execute retry-limited
-> fixes, and close accepted phases with docs, plan write-back, handoff, and
-> optional closure commits. Pause/resume and full log tailing are still being built.
-
-A minimal local CLI (Python 3, stdlib only) that automates the handoff loop between
-coding agents inside a project worktree:
+`agent-runner` is a local Python 3 CLI, stdlib only, that drives a markdown
+implementation plan through disposable coding and review agents.
 
 ```text
-Plan file   = what should be done
-SQLite      = where we are
-Logs        = what happened
-Runner      = what happens next
-Coder role  = implements / fixes   (e.g. Claude Code)
-Reviewer    = reviews, read-only   (e.g. Codex)
+IMPLEMENT -> RUN_CHECKS -> REVIEW -> FIX/RUN_CHECKS/REVIEW -> CLOSE_PHASE
 ```
 
-Per phase: `IMPLEMENT → RUN_CHECKS → REVIEW → (PASS → CLOSE_PHASE → next phase |
-CHANGES_REQUESTED → FIX → RUN_CHECKS → REVIEW …)` until clean, blocked, or out of
-retries. Agents are disposable; the runner regenerates full prompts from stored state.
-Roles are vendor-swappable via agent profiles in `.agent-runner.json`.
+The runner stores durable state in SQLite, writes prompts and logs under
+`~/.agent-runner/logs/`, and re-derives the next job from phase status after a
+restart. Agent profiles are vendor-neutral: config maps `roles.coder` and
+`roles.reviewer` to profiles such as Codex or Claude, and the runner applies
+write flags to coder/closer jobs and read-only flags to reviewer jobs.
 
-## Start here
+## Install
 
-- `docs/design.md` — the design: reuse map, corrections, schema, agent profiles,
-  CLOSE_PHASE full-circle closure. **Wins on any conflict with the plan.**
-- `docs/plan.md` — the 8-phase build plan, written in the runner's own
-  `## Phase <n>:` format so the runner can dogfood its own remaining plan.
-- `docs/usage.md` — how to configure and run the current Phase 7 runner while
-  dogfooding.
-- `.agent-runner.json` — the dogfood config for this repo (also serves as the
-  reference config shape).
+Run from this checkout:
 
-## Working agreement
+```sh
+python3 -m agent_runner status
+python3 -m agent_runner run
+```
 
-One phase per branch/session. Read `docs/design.md` before starting a phase; follow the
-standing rules in `docs/plan.md`. Prompt text and review semantics are borrowed from the
-[agent-toolbelt](../agent-toolbelt) packs referenced in the design doc's reuse map.
+The executable shim works too:
+
+```sh
+./agent-runner status
+./agent-runner run
+```
+
+For another repo, put this checkout on `PYTHONPATH` or put the `agent-runner`
+shim on `PATH`, then run commands from inside the target git worktree.
+
+## Configure
+
+Initialize a target repo:
+
+```sh
+python3 -m agent_runner init
+```
+
+Minimum `.agent-runner.json` shape:
+
+```json
+{
+  "planPath": "docs/plan.md",
+  "checks": ["python3 -m unittest discover -s tests -v"],
+  "agents": {
+    "codex": {
+      "command": "codex",
+      "promptArgs": ["exec"],
+      "writeFlags": ["--sandbox", "workspace-write"],
+      "readOnlyFlags": ["--sandbox", "read-only"],
+      "outputCapture": "last-message-file"
+    }
+  },
+  "roles": { "coder": "codex", "reviewer": "codex" },
+  "maxRetriesPerPhase": 3,
+  "timeoutMinutes": 45,
+  "autoCommit": false,
+  "allowDirty": false
+}
+```
+
+Plans use `## Phase <number>: <title>` headings and a runner-owned
+`Status: <STATE>` line. The status and adjacent `Evidence:` line are excluded
+from phase body hashes so closeout can update the plan without superseding it.
+
+## Commands
+
+- `run`: register or resume the plan, reap orphaned `RUNNING` jobs, and run the
+  next job derived from SQLite phase status.
+- `status`: print human status to stderr and JSON state to stdout.
+- `pause`: mark the project `PAUSED`; active jobs finish, then the loop stops at
+  the next job boundary.
+- `resume`: mark the project `ACTIVE` so the next `run` continues.
+- `logs [-n N]`: print the latest phase log directory and tail the newest log.
+- `reset-lock`: clear a stale project lock when no runner is active.
+
+## Safety Rules
+
+The runner does not auto-merge, force-push, delete branches, delete files
+outside the repo, modify global git config, or interrupt a running agent for
+pause. With `allowDirty=false`, a dirty worktree blocks before a new IMPLEMENT
+job. With `autoCommit=true`, review requires a clean pushed PR for the current
+branch; with `autoCommit=false`, the runner stages local changes so new files
+are visible in `git diff --staged`.
+
+## Dogfood Transcript
+
+Phase 8 was dogfooded against a temporary two-phase toy repo using the real
+configured `codex` profile for coder, reviewer, and closer. The toy plan asked
+for `alpha.txt` in phase 1 and `beta.txt` in phase 2, with
+`python3 checks/check_artifacts.py` as the stub check.
+
+```text
+$ AGENT_RUNNER_HOME=<tmp>/home PYTHONPATH=/Users/mac/workspaces/agent-runner \
+  python3 -m agent_runner run
+[agent-runner] acquired lock for toy-repo-3831be32867c
+[agent-runner] registered plan docs/plan.md with 2 phase(s)
+[agent-runner] starting IMPLEMENT job 1 (role=coder, profile=codex)
+[agent-runner] starting RUN_CHECKS job 2 (role=checks, profile=shell)
+[agent-runner] starting REVIEW job 3 (role=reviewer, profile=codex)
+[agent-runner] starting CLOSE_PHASE job 4 (role=closer, profile=codex)
+[agent-runner] phase 1 complete; next phase 2 is PENDING
+
+$ git commit -m 'Complete toy phase 1'
+[main a15d5d9] Complete toy phase 1
+
+$ AGENT_RUNNER_HOME=<tmp>/home PYTHONPATH=/Users/mac/workspaces/agent-runner \
+  python3 -m agent_runner run
+[agent-runner] acquired lock for toy-repo-3831be32867c
+[agent-runner] resumed plan docs/plan.md with 2 phase(s)
+[agent-runner] starting IMPLEMENT job 5 (role=coder, profile=codex)
+[agent-runner] starting RUN_CHECKS job 6 (role=checks, profile=shell)
+[agent-runner] starting REVIEW job 7 (role=reviewer, profile=codex)
+[agent-runner] starting CLOSE_PHASE job 8 (role=closer, profile=codex)
+[agent-runner] phase 2 complete; plan complete
+
+$ python3 -m agent_runner status
+[agent-runner] plan: docs/plan.md (COMPLETE)
+[agent-runner]   phase 1: COMPLETE retries=0
+[agent-runner]   phase 2: COMPLETE retries=0
+```
+
+`logs -n 20` printed the latest phase directory and tailed
+`phase-2/close_phase.log`, including the closer’s summary that `docs/plan.md`
+was set to `Status: COMPLETE`, the phase handoff was written, and
+`python3 checks/check_artifacts.py` passed.
+
+## Start Here
+
+- `docs/design.md` is the design source of truth.
+- `docs/plan.md` is the 8-phase build plan in the runner's own plan format.
+- `docs/usage.md` has the detailed command and recovery guide.
+- `.agent-runner.json` is this repo's dogfood config.
