@@ -424,6 +424,9 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertEqual(phase["retry_count"], 0)
             review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("git diff --staged", review_prompt)
+            self.assertIn("If a `pr-review` skill or workflow is available", review_prompt)
+            self.assertIn("Verify the phase acceptance criteria", review_prompt)
+            self.assertIn("severity, affected file/line", review_prompt)
             self.assertNotIn("fake coder completed", review_prompt)
 
     def test_reviewer_markdown_fenced_json_is_accepted(self):
