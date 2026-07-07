@@ -72,6 +72,7 @@ def write_config(
     *,
     auto_fix_attempts: Optional[int],
     include_fixer: bool = True,
+    auto_commit: bool = False,
 ) -> None:
     data = json.loads(strip_json_comments(SAMPLE_CONFIG))
     data["agents"] = {
@@ -96,7 +97,7 @@ def write_config(
         data.pop("autoFixAttempts", None)
     else:
         data["autoFixAttempts"] = auto_fix_attempts
-    data["autoCommit"] = False
+    data["autoCommit"] = auto_commit
     data["mergeOnClose"] = False
     data["timeoutMinutes"] = 1
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -108,6 +109,7 @@ def write_autofix_agent(path: Path) -> None:
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -122,10 +124,25 @@ if "Fix the underlying problem that blocked this phase" in prompt:
         print("auto-fix intentionally did nothing")
         raise SystemExit(0)
     Path("fixed.txt").write_text("fixed by auto-fix\n", encoding="utf-8")
+    if "Publish requirements before you finish" in prompt:
+        subprocess.run(["git", "add", "-A"], check=True)
+        subprocess.run([
+            "git",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=Test User",
+            "commit",
+            "-qm",
+            "auto-fix phase",
+        ], check=True)
     print("auto-fix completed")
     raise SystemExit(0)
 
-if "Review the staged phase work independently" in prompt:
+if (
+    "Review the staged phase work independently" in prompt
+    or "Review the published phase PR independently" in prompt
+):
     print(json.dumps({
         "status": "PASS",
         "summary": "accepted",
@@ -166,6 +183,46 @@ raise SystemExit(0)
 """.lstrip(),
         encoding="utf-8",
     )
+
+
+def write_fake_gh(path: Path) -> None:
+    path.write_text(
+        r"""#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+
+args = sys.argv[1:]
+branch = subprocess.check_output(
+    ["git", "branch", "--show-current"], text=True
+).strip()
+sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+branch = os.environ.get("GH_HEAD_REF_NAME", branch)
+sha = os.environ.get("GH_HEAD_REF_OID", sha)
+
+if args[:2] == ["pr", "view"]:
+    pr_url = "https://example.test/pull/1"
+    if len(args) > 2 and not args[2].startswith("--"):
+        pr_url = args[2]
+    print(json.dumps({
+        "url": pr_url,
+        "headRefName": branch,
+        "headRefOid": sha,
+        "state": os.environ.get("GH_PR_STATE", "OPEN"),
+    }))
+    raise SystemExit(0)
+
+if args[:2] == ["pr", "diff"]:
+    subprocess.run(["git", "show", "--format=", "--patch", "HEAD"], check=True)
+    raise SystemExit(0)
+
+print(f"unsupported gh args: {args}", file=sys.stderr)
+raise SystemExit(2)
+""".lstrip(),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
 
 
 def phase_row(home: Path, repo: Path):
@@ -242,6 +299,56 @@ class AutofixLoopTests(unittest.TestCase):
                 event for event in phase_events if event["event_type"] == "phase.unblocked"
             ]
             self.assertEqual(json.loads(unblocked_events[0]["data_json"])["to"], "CHECKING")
+
+    def test_autofix_publish_prompt_allows_autocommit_run_to_continue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "autofix_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_plan(repo)
+            write_autofix_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_config(repo, script, auto_fix_attempts=2, auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("worktree is dirty", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            self.assertEqual(phase["publish_mode"], "pr")
+            self.assertEqual(phase["branch_name"], "dev/test-phase")
+            self.assertEqual(phase["pr_url"], "https://example.test/pull/1")
+            autofix_prompt = (trace / "autofix-1.md").read_text(encoding="utf-8")
+            self.assertIn("Publish requirements before you finish", autofix_prompt)
+            self.assertIn("update the existing PR", autofix_prompt)
+            self.assertNotIn("- Do not commit anything.", autofix_prompt)
+            status = subprocess.check_output(
+                ["git", "status", "--porcelain"],
+                cwd=repo,
+                text=True,
+            )
+            self.assertEqual(status, "")
 
     def test_autofix_attempt_cap_leaves_phase_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:

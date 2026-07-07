@@ -139,8 +139,8 @@ job. With `autoCommit=true`, review requires a clean pushed PR for the current
 branch; with `autoCommit=false`, the runner stages local changes so new files
 are visible in `git diff --staged`. With `autoFixAttempts>0`, blocked phases can
 launch the configured one-shot `fixer` profile to repair the blocker and resume
-the same `run`; fixer prompts forbid commits and nested `autorun`/`agent-runner`
-invocations.
+the same `run`; fixer prompts forbid nested `autorun`/`agent-runner`
+invocations and require publishing fixes when `autoCommit=true`.
 
 ## Dogfood Transcript
 

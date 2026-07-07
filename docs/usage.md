@@ -186,7 +186,9 @@ Current notes:
   `run_agent_job` machinery as IMPLEMENT and REVIEW jobs. It is not a daemon and
   no fixer process is kept alive after its single job. The prompt includes the
   phase content, the blocking event message, and the newest phase log tail.
-  Fixer prompts explicitly forbid committing and forbid invoking `autorun`,
+  With `autoCommit=true`, fixer prompts require committing, pushing, and
+  updating the existing PR before the job exits; with `autoCommit=false`, they
+  explicitly forbid committing. All fixer prompts forbid invoking `autorun`,
   `agent-runner`, or nested runner commands because the current `run` process
   holds the project lock.
 - `promptPrefix` is optional. When set, the runner prepends it to every prompt

@@ -23,6 +23,7 @@ from .phase_loop import (
     PhaseLoopResult,
     RESTART_COUNT_ENV,
     extract_pr_number,
+    _publish_instructions,
     restart_count,
     run_phase_loop,
 )
@@ -306,6 +307,7 @@ def _run_autofix_loop(
                 phase=phase,
                 parsed_phase=parsed_phase,
                 blocking_message=blocking_message,
+                require_publish=config.auto_commit,
             ),
             repo_root=repo_root,
             log_dir=Path(phase["log_dir"]),
@@ -407,18 +409,28 @@ def _parsed_phase_for_number(parsed_plan, phase_number: int):
     raise AgentRunnerError(f"registered phase {phase_number} is missing from parsed plan")
 
 
-def _autofix_prompt(*, phase, parsed_phase, blocking_message: str) -> str:
+def _autofix_prompt(
+    *, phase, parsed_phase, blocking_message: str, require_publish: bool
+) -> str:
     log_tail = _newest_phase_log_tail(Path(phase["log_dir"]))
+    publish = _publish_instructions(require_publish, update_existing=True)
+    commit_rule = (
+        "- Publish the fixer changes before exiting, following the publish "
+        "requirements below.\n"
+        if require_publish
+        else "- Do not commit anything.\n"
+    )
     return (
         "Fix the underlying problem that blocked this phase. This is a one-shot "
         "write-capable fixer job.\n\n"
         "Rules:\n"
         "- Fix only the blocker described below.\n"
         "- Do not start future phases or unrelated refactors.\n"
-        "- Do not commit anything.\n"
+        f"{commit_rule}"
         "- Never invoke `autorun`, `agent-runner`, or any nested runner command; "
         "the current process holds the project lock and a nested run would deadlock.\n"
         "- Return a concise summary of the files changed and checks, if any, you ran.\n\n"
+        f"{publish}"
         f"Phase {parsed_phase.phase_number}: {parsed_phase.title}\n\n"
         "Phase body:\n"
         f"{parsed_phase.content}\n\n"
