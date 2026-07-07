@@ -19,8 +19,7 @@ should give all requested updates to the fixer, not only blockers.
 
 ## Phase 1: Reconcile manually merged phase PRs
 Status: COMPLETE
-Evidence: Implemented in this branch; startup reconciliation, tests, and docs added.
-Checks: `python3 -m compileall -q .`; `python3 -m unittest discover -s tests -v`
+Evidence: 19ad51c; manual-merge reconciliation, tests, and docs added; `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` passed.
 
 Teach `agent-runner run` to repair stale SQLite state when a phase PR was
 merged outside the runner but the tracked plan and GitHub PR prove the phase is
