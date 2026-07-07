@@ -1,8 +1,7 @@
 # Using agent-runner
 
-This guide describes the runner as it exists after Phase 5. It is ready for
-dogfooding the start of the loop: plan registration, IMPLEMENT, staging,
-RUN_CHECKS, and checks-triggered FIX queueing. REVIEW, FIX execution,
+This guide describes the runner as it exists after Phase 6. It is ready for
+dogfooding the implementation, check, review, and retry-limited fix loop.
 CLOSE_PHASE, pause/resume, and rich log tailing are still future phases.
 
 ## Current Loop
@@ -12,23 +11,28 @@ CLOSE_PHASE, pause/resume, and rich log tailing are still future phases.
 - `PENDING` or `IMPLEMENTING`: run the configured coder profile with an
   IMPLEMENT prompt for the next phase.
 - Successful IMPLEMENT: stage implementation changes and run configured checks.
-- Passing checks: mark the phase `REVIEWING` and stop. Manual review starts
-  here until Phase 6 lands.
-- Failing checks: mark the phase `FIXING`, create a pending `FIX` job with
-  `trigger="checks"`, write the check output into the fix prompt, and stop.
+- Passing checks with `autoCommit=true`: verify the coder committed, pushed,
+  and opened a PR for the current branch, record the PR metadata, then run the
+  configured reviewer profile against the published PR diff plus phase content
+  and check output.
+- Passing checks with `autoCommit=false`: run the configured reviewer profile
+  with phase content, `git diff --staged`, and check output.
+- Failing checks: run a `FIX` job with `trigger="checks"` if retries remain,
+  then rerun checks.
 - `CHECKING`: resume by running checks without running IMPLEMENT again.
-- `FIXING`: stop with a message that Phase 6 owns fix execution.
-- `REVIEWING` or `CLOSING`: stop with a message that later phases own the next
-  step.
+- `REVIEWING`: run review. `PASS` moves to `CLOSING`; `CHANGES_REQUESTED`
+  runs a `FIX` job with `trigger="review"` if retries remain; `BLOCKED` stops.
+- `FIXING`: resume the last available fix prompt, then rerun checks.
+- `CLOSING`: stop with a message that later phases own the next step.
 - `BLOCKED`: exit non-zero.
 
-The full intended loop is still:
+The automated loop is now:
 
 ```text
 IMPLEMENT -> RUN_CHECKS -> REVIEW -> FIX/RUN_CHECKS/REVIEW -> CLOSE_PHASE
 ```
 
-Only the `IMPLEMENT -> RUN_CHECKS` leg is automated today.
+Only `CLOSE_PHASE` and later operational commands remain manual.
 
 ## Installation
 
@@ -115,17 +119,24 @@ Minimum config shape:
 
 Current notes:
 
-- `roles.coder` is used now. `roles.reviewer` is validated now and used in
-  Phase 6.
+- `roles.coder` is used for IMPLEMENT and FIX. With `autoCommit=true`, the
+  coder/fixer prompt requires committing, pushing, and creating or updating a
+  PR before the job exits. `roles.reviewer` is used for read-only review.
 - `promptPrefix` is optional. When set, the runner prepends it to every prompt
   sent to that agent profile.
 - `checks` run as shell commands from the repo root, in order. The first failure
   stops the check job.
 - `timeoutMinutes` applies per agent/check process.
+- `autoCommit=true` requires the GitHub CLI (`gh`) on `PATH`; after checks pass,
+  the runner verifies `gh pr view` for the current branch before opening the
+  reviewer.
 - `allowDirty=false` is the safest dogfood setting. A dirty worktree blocks
   before an IMPLEMENT job starts.
 - `allowDirty=true` warns and continues; after IMPLEMENT, the runner stages only
   paths that were not already dirty before the job.
+- Review output must be strict JSON with `status`, `summary`, `blockingIssues`,
+  `nonBlockingIssues`, and `recommendedFixPrompt`. Invalid review JSON blocks
+  the phase and leaves the raw output in `review.log`.
 
 ## Plan Format
 
@@ -153,10 +164,11 @@ Rules:
 Useful statuses while dogfooding:
 
 - `PENDING`: ready for the runner to start.
-- `REVIEWING`: implementation and checks passed; do manual review.
-- `FIXING`: checks failed; manual fix is needed until Phase 6 lands.
+- `REVIEWING`: ready to run the reviewer, or retry review after checks pass.
+- `FIXING`: ready to resume a fix prompt after interruption.
+- `CLOSING`: review passed; manual close-phase work is needed until Phase 7 lands.
 - `BLOCKED`: implementation failed or the phase needs human intervention.
-- `COMPLETE`: done; the Phase 5 loop skips it.
+- `COMPLETE`: done; the loop skips it.
 
 ## Running a Phase
 
@@ -172,23 +184,25 @@ If `allowDirty=false`, this must be clean. Then run:
 python3 -m agent_runner run
 ```
 
-Expected Phase 5 success flow:
+Expected Phase 6 success flow:
 
 ```text
 [agent-runner] acquired lock for <project-slug>
 [agent-runner] registered/resumed plan docs/plan.md with N phase(s)
-[agent-runner] phase <n> checks passed; moved to REVIEWING
+[agent-runner] phase <n> review passed; moved to CLOSING
 ```
 
-After that:
+With `autoCommit=true`, after that:
 
 ```sh
-git diff --staged
 python3 -m agent_runner status
 ```
 
-The staged diff is the implementation output that should be manually reviewed
-until Phase 6 is implemented.
+The phase status line includes `branch_name`, `pr_url`, and `published_sha`.
+The reviewer approved the published PR diff. Phase 7 will automate the
+close-phase doc/plan/handoff step; until then, inspect and close manually.
+
+With `autoCommit=false`, the reviewer still works from `git diff --staged`.
 
 If checks fail, inspect:
 
@@ -198,24 +212,19 @@ python3 -m agent_runner logs
 ```
 
 Then open the phase log directory under `~/.agent-runner/logs/.../phase-N/`.
-The generated `fix-checks-prompt.md` contains the check failure context for the
-future FIX job.
+`checks.log`, `fix.log`, `review.log`, and `review.json` show the convergence
+history and outstanding blockers.
 
-## Manual Handoff Until Phase 6-8
+## Manual Handoff Until Phase 7-8
 
-When a phase reaches `REVIEWING`, the runner has stopped at the current
-automation boundary. For dogfooding now:
+When a phase reaches `CLOSING`, the runner has stopped at the current automation
+boundary. For dogfooding now:
 
-1. Review `git diff --staged`.
+1. Inspect the phase PR, `python3 -m agent_runner status`, and the phase logs.
 2. Run any extra checks you need.
-3. If changes are good, commit manually.
-4. Update the plan status manually, usually from `REVIEWING` to `COMPLETE`.
-5. Set the next phase to `PENDING`.
-6. Run `python3 -m agent_runner run` again.
-
-When a phase reaches `FIXING`, Phase 6 is not available yet. Use the generated
-fix prompt and check log as context, fix manually, stage the fix, rerun checks,
-and update the plan status when ready.
+3. Update the plan status manually, usually from `CLOSING` to `COMPLETE`.
+4. Set the next phase to `PENDING`.
+5. Run `python3 -m agent_runner run` again.
 
 When a phase reaches `BLOCKED`, use `python3 -m agent_runner status` and the
 latest events to see why. IMPLEMENT failures are recorded as events and in the
@@ -290,8 +299,10 @@ files outside the repo, modify global git config, or interrupt running agent
 processes.
 
 Before a normal IMPLEMENT job starts, the default dirty gate requires a clean
-worktree. After a successful IMPLEMENT, the runner stages the implementation so
-new files appear in `git diff --staged`.
+worktree. With `autoCommit=true`, the coder/fixer must leave committed and
+pushed work on a PR before review starts. With `autoCommit=false`, after a
+successful IMPLEMENT the runner stages the implementation so new files appear
+in `git diff --staged`.
 
-Reviewer and closer jobs are not automated yet, so commits and PRs are still
-manual after `REVIEWING`.
+Closer jobs are not automated yet, so the final plan/handoff close remains
+manual after a review pass moves the phase to `CLOSING`.

@@ -37,7 +37,7 @@ The toolbelt has no TypeScript to import; the runner is new code. What it reuses
 | Plan-as-state discipline | `skills/dev-lite-workflow/SKILL.md` (Living Plan Rule) | What the plan write-back must keep durable: current phase, evidence, commit hash, blockers, next step, resume instructions. |
 | Phase handoff files | `workflows/phase-context-workflow.md` | `.acc/phases/<room>/phase-NN-handoff.md` as the durable cross-agent handoff written at phase close. |
 | SQLite discipline | `skills/review-queue/references/cli.md` | WAL + busy_timeout, JSON-to-stdout for parseability, attempts→dead-letter thinking, recording the head SHA a job ran against. |
-| Later: PR lane | `phase-gate` / `pr-review` / `review-queue` | When `openPrWhenComplete` lands, the review leg becomes `/pr-review --comment` on a phase PR and this runner is just the dispatcher. |
+| PR lane | `phase-gate` / `pr-review` / `review-queue` | With `autoCommit=true`, the coder/fixer publishes the current branch as a PR, the runner records PR metadata, and the reviewer receives the published PR diff. |
 
 ## Design corrections to the draft spec
 
@@ -45,8 +45,9 @@ These are changes to the draft worked out elsewhere; they fix real failure modes
 
 1. **Untracked files are invisible to `git diff`.** New files a coder creates don't appear in
    `git diff` or `git diff --staged` until staged. The reviewer would review an incomplete
-   diff. Fix: after IMPLEMENT/FIX the runner runs `git add -A` and reviews
-   `git diff --staged` (v1), or commits per phase and reviews `git diff <base>..HEAD`.
+   diff. Fix: with `autoCommit=false`, after IMPLEMENT/FIX the runner runs `git add -A`
+   and reviews `git diff --staged`; with `autoCommit=true`, the coder/fixer commits,
+   pushes, opens or updates the phase PR, and the runner reviews the published PR diff.
 2. **Plan hashing conflicts with plan write-back.** Full-file `content_hash` means the
    runner's own "phase complete" write-back reads as a plan change and triggers the
    SUPERSEDED/block path. Fix: hash **per phase** over the phase body, excluding a
@@ -169,7 +170,4 @@ for repos without the toolbelt installed.
 
 ## Open questions
 
-- **PR lane:** when `openPrWhenComplete` is real, does REVIEW move to `/pr-review --comment`
-  on a phase PR (the reviewer via the installed pack), making this runner converge with
-  `phase-gate-solo-workflow` as its decoupled sibling?
 - **Where the runner lives:** its own repo vs a `tools/` dir here. Currently external.

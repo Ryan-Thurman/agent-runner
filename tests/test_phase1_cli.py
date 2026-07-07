@@ -41,6 +41,37 @@ def git_init(path: Path) -> None:
 
 def write_config(repo: Path, overrides: Optional[dict] = None) -> None:
     data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+    agent_script = repo / "fake_agent.py"
+    agent_script.write_text(
+        """
+import json
+import sys
+
+prompt = sys.argv[-1]
+if "Review the staged phase work independently" in prompt:
+    print(json.dumps({
+        "status": "PASS",
+        "summary": "accepted",
+        "blockingIssues": [],
+        "nonBlockingIssues": [],
+        "recommendedFixPrompt": ""
+    }))
+else:
+    print("fake agent completed")
+""".lstrip(),
+        encoding="utf-8",
+    )
+    data["agents"] = {
+        "fake": {
+            "command": sys.executable,
+            "promptArgs": [str(agent_script)],
+            "writeFlags": [],
+            "readOnlyFlags": [],
+            "outputCapture": "stdout",
+        }
+    }
+    data["roles"] = {"coder": "fake", "reviewer": "fake"}
+    data["autoCommit"] = False
     if overrides:
         data.update(overrides)
     (repo / ".agent-runner.json").write_text(json.dumps(data, indent=2), encoding="utf-8")

@@ -127,9 +127,11 @@ when the toolbelt is installed in the target repo (invoke the installed
 `/dev-implement-task`-style command), embedded fallback template otherwise; both carry
 the scope rules (this phase only, no future work, no unrelated refactors, tests with
 behavior changes) and the phase body. On success: `git add -A` (so untracked files are
-visible to review), phase → CHECKING, enqueue RUN_CHECKS. On checks pass → REVIEWING;
-on checks fail → FIXING with the failing output captured as the fix context. Console
-output in the `[agent-runner]` style from the design doc.
+visible to review in local mode), phase → CHECKING, enqueue RUN_CHECKS. On checks pass,
+`autoCommit=true` requires a committed, pushed PR before REVIEWING; `autoCommit=false`
+keeps the staged local review path. On checks fail → FIXING with the failing output
+captured as the fix context. Console output in the `[agent-runner]` style from the
+design doc.
 
 Acceptance Criteria:
 - End-to-end test with a fake coder that creates a new untracked file: after IMPLEMENT
@@ -140,10 +142,11 @@ Acceptance Criteria:
 - Dirty repo without `allowDirty` blocks before any job starts.
 
 ## Phase 6: REVIEW and FIX convergence loop
-Status: PENDING
+Status: COMPLETE
 
 The reviewer leg and the retry loop, with the four convergence rules from the design
-doc: (1) the review prompt contains phase content + `git diff --staged` + check output —
+doc: (1) the review prompt contains phase content + the published PR diff when
+`autoCommit=true` or `git diff --staged` when `autoCommit=false` + check output —
 **never the coder's summary/log** (independent review); (2) re-reviews receive the
 previous `review.json` with the instruction "verify these blocking issues are resolved;
 only new Blocking findings may block"; (3) only `blockingIssues` drive
