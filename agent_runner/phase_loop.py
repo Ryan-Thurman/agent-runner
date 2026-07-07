@@ -2178,6 +2178,7 @@ def _published_phase_diff_stat(repo_root: Path, phase: sqlite3.Row) -> str:
             result = None
         if result is not None and result.returncode == 0 and result.stdout:
             return result.stdout
+        return _published_phase_file_stat(repo_root, pr_url)
 
     for base_ref in ("origin/main", "main", "origin/master", "master", "HEAD~1"):
         result = subprocess.run(
@@ -2203,6 +2204,71 @@ def _published_phase_diff_stat(repo_root: Path, phase: sqlite3.Row) -> str:
             return diff.stdout
 
     return _git_diff_staged_stat(repo_root)
+
+
+def _published_phase_file_stat(repo_root: Path, pr_url: str) -> str:
+    payload = _gh_pr_view(
+        repo_root,
+        pr_url=pr_url,
+        failure_context=f"could not build published PR diff stat for {pr_url}",
+        fields="files",
+    )
+    files = payload.get("files")
+    if not isinstance(files, list):
+        raise JobError("gh pr view returned invalid files data: expected a list")
+    return _format_pr_files_stat(files)
+
+
+def _format_pr_files_stat(files: list[Any]) -> str:
+    lines: list[str] = []
+    total_additions = 0
+    total_deletions = 0
+    for file_payload in files:
+        if not isinstance(file_payload, dict):
+            raise JobError("gh pr view returned invalid files data: expected objects")
+        path = file_payload.get("path")
+        additions = file_payload.get("additions", 0)
+        deletions = file_payload.get("deletions", 0)
+        if not isinstance(path, str) or not path:
+            raise JobError("gh pr view returned invalid files data: missing path")
+        if not isinstance(additions, int) or not isinstance(deletions, int):
+            raise JobError(
+                "gh pr view returned invalid files data: additions/deletions "
+                "must be integers"
+            )
+        total_additions += additions
+        total_deletions += deletions
+        changes = additions + deletions
+        markers = _stat_change_markers(additions, deletions)
+        line = f" {path} | {changes}"
+        if markers:
+            line = f"{line} {markers}"
+        lines.append(line)
+
+    changed = len(files)
+    summary_parts = [f" {changed} file{'s' if changed != 1 else ''} changed"]
+    if total_additions:
+        summary_parts.append(
+            f"{total_additions} insertion{'s' if total_additions != 1 else ''}(+)"
+        )
+    if total_deletions:
+        summary_parts.append(
+            f"{total_deletions} deletion{'s' if total_deletions != 1 else ''}(-)"
+        )
+    if not total_additions and not total_deletions:
+        summary_parts.append("0 insertions(+), 0 deletions(-)")
+    lines.append(", ".join(summary_parts))
+    return "\n".join(lines) + "\n"
+
+
+def _stat_change_markers(additions: int, deletions: int) -> str:
+    marker_limit = 60
+    markers = "+" * min(additions, marker_limit)
+    remaining = marker_limit - len(markers)
+    markers += "-" * min(deletions, remaining)
+    if additions + deletions > marker_limit:
+        markers += "..."
+    return markers
 
 
 def _phase_has_publish_metadata(phase: sqlite3.Row) -> bool:

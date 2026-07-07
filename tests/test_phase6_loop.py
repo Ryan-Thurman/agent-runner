@@ -357,6 +357,19 @@ if args[:2] == ["pr", "view"]:
     pr_url = "https://example.test/pull/1"
     if len(args) > 2 and not args[2].startswith("--"):
         pr_url = args[2]
+    requested_json = ""
+    if "--json" in args:
+        requested_json = args[args.index("--json") + 1]
+    if "files" in requested_json.split(","):
+        files = json.loads(os.environ.get("GH_PR_FILES_JSON", "null"))
+        if files is None:
+            files = [{
+                "path": "generated.txt",
+                "additions": 1,
+                "deletions": 0,
+            }]
+        print(json.dumps({"files": files}))
+        raise SystemExit(0)
     print(json.dumps({
         "url": pr_url,
         "headRefName": branch,
@@ -367,6 +380,9 @@ if args[:2] == ["pr", "view"]:
 
 if args[:2] == ["pr", "diff"]:
     if "--stat" in args:
+        if os.environ.get("GH_DIFF_STAT_UNSUPPORTED") == "1":
+            print("unknown flag: --stat", file=sys.stderr)
+            raise SystemExit(1)
         subprocess.run(["git", "show", "--format=", "--stat", "HEAD"], check=True)
     else:
         subprocess.run(["git", "show", "--format=", "--patch", "HEAD"], check=True)
@@ -524,6 +540,69 @@ class Phase6LoopTests(unittest.TestCase):
                 (trace / "review-profile-1.txt").read_text(encoding="utf-8"),
                 "complex",
             )
+
+    def test_review_triage_uses_published_pr_file_stat_when_gh_stat_is_unsupported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="REVIEWING")
+            write_config(repo, script, checks=[], auto_commit=True, review_triage=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            (repo / "published.txt").write_text("published\n", encoding="utf-8")
+            commit_all(repo, "published phase")
+            published_sha = seed_reviewing_published_phase(repo, home)
+            (repo / "local-only.txt").write_text(
+                "local checkout drift\n",
+                encoding="utf-8",
+            )
+            commit_all(repo, "local checkout drift")
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "AGENT_MODE": "BLOCKED",
+                    "GH_DIFF_STAT_UNSUPPORTED": "1",
+                    "GH_HEAD_REF_NAME": "dev/test-phase",
+                    "GH_HEAD_REF_OID": published_sha,
+                    "GH_PR_FILES_JSON": json.dumps(
+                        [
+                            {
+                                "path": "published.txt",
+                                "additions": 2,
+                                "deletions": 1,
+                            }
+                        ]
+                    ),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            triage_prompt = (trace / "triage-1.md").read_text(encoding="utf-8")
+            self.assertIn("published PR diff stat", triage_prompt)
+            self.assertIn("published.txt | 3 ++-", triage_prompt)
+            self.assertIn(
+                "1 file changed, 2 insertions(+), 1 deletion(-)",
+                triage_prompt,
+            )
+            self.assertNotIn("local-only.txt", triage_prompt)
 
     def test_review_triage_garbage_routes_to_complex_and_phase_completes(self):
         with tempfile.TemporaryDirectory() as tmp:
