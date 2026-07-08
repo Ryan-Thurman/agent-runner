@@ -1,10 +1,11 @@
 # Agent Runner Loop - design (`agent-runner`)
 
 This is the design doc for the local `agent-runner` CLI. Completed historical
-plans live in `docs/archive/`, and current execution work lives in
-`docs/plan-roadmap.md`. Toolbelt paths in the reuse map below (`commands/...`,
-`skills/...`, `workflows/...`) refer to the [agent-toolbelt](../../agent-toolbelt)
-repo, where the early origin copy of this design lived.
+plans live in `docs/archive/`, and generated execution plans such as
+`docs/plan-roadmap.md` capture roadmap work when active. Toolbelt paths in the
+reuse map below (`commands/...`, `skills/...`, `workflows/...`) refer to the
+[agent-toolbelt](../../agent-toolbelt) repo, where the early origin copy of
+this design lived.
 
 A minimal local CLI (`agent-runner run`, Python 3 stdlib + SQLite) that automates the
 manual bounce between coding agents inside a Supacode project/worktree:

@@ -220,8 +220,9 @@ was set to `Status: COMPLETE`, the phase handoff was written, and
 ## Start Here
 
 - `docs/design.md` is the design source of truth.
-- `docs/plan-roadmap.md` is the current executable plan for upcoming work.
-- `docs/roadmap.md` summarizes completed work and planned follow-ups.
+- `docs/roadmap.md` summarizes completed work and current follow-up posture.
+- `docs/plan-roadmap.md` is the completed executable roadmap plan; generate a
+  new plan with `agent-runner plan-roadmap` when new roadmap work is added.
 - `docs/archive/` contains completed historical plans.
 - `docs/usage.md` has the detailed command and recovery guide.
 - `.agent-runner.json` is this repo's dogfood config.
