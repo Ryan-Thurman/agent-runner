@@ -167,7 +167,7 @@ class Phase4JobTests(unittest.TestCase):
 
         preview = _format_live_preview_line(context, "   \n", color_enabled=False)
 
-        self.assertEqual(preview, "checks checking:")
+        self.assertEqual(preview, "[checks checking]:")
 
     def test_live_preview_color_modes(self):
         class FakeStream:
@@ -203,7 +203,7 @@ class Phase4JobTests(unittest.TestCase):
             )
         )
 
-    def test_live_preview_uses_spinner_on_tty_and_clears_line(self):
+    def test_live_preview_uses_rolling_line_on_tty_and_clears_line(self):
         class FakeTTY(io.StringIO):
             def isatty(self):
                 return True
@@ -221,12 +221,34 @@ class Phase4JobTests(unittest.TestCase):
             preview.finish()
 
         output = stderr.getvalue()
-        self.assertIn("\r- codex coding: first line", output)
-        self.assertIn("\r\\ codex coding: second line", output)
+        self.assertIn("\r\x1b[2K[codex coding]: first line", output)
+        self.assertIn("\r\x1b[2K[codex coding]: second line", output)
+        self.assertNotIn("- [codex coding]", output)
+        self.assertNotIn("\\ [codex coding]", output)
         self.assertNotIn("\n", output)
-        self.assertTrue(output.endswith("\r"))
+        self.assertTrue(output.endswith("\r\x1b[2K"))
 
-    def test_live_preview_lines_mode_skips_spinner_even_on_tty(self):
+    def test_live_preview_uses_rolling_line_on_non_tty(self):
+        stderr = io.StringIO()
+        context = LivePreviewContext(subject="codex", verb="coding")
+
+        with mock.patch("sys.stderr", stderr), mock.patch.dict(
+            os.environ, {"AGENT_RUNNER_COLOR": "never"}, clear=False
+        ):
+            preview = _live_preview_writer(context)
+            self.assertIsNotNone(preview)
+            preview.write("first line\n")
+            preview.write("second line\n")
+            preview.finish()
+
+        self.assertEqual(
+            stderr.getvalue(),
+            "\r\x1b[2K[codex coding]: first line"
+            "\r\x1b[2K[codex coding]: second line"
+            "\r\x1b[2K",
+        )
+
+    def test_live_preview_lines_mode_uses_newline_delimited_previews(self):
         class FakeTTY(io.StringIO):
             def isatty(self):
                 return True
@@ -244,7 +266,7 @@ class Phase4JobTests(unittest.TestCase):
             preview.write("first line\n")
             preview.finish()
 
-        self.assertEqual(stderr.getvalue(), "codex coding: first line\n")
+        self.assertEqual(stderr.getvalue(), "[codex coding]: first line\n")
 
     def test_live_preview_finish_ignores_closed_tty_cleanup(self):
         class ClosingTTY(io.StringIO):
@@ -252,7 +274,7 @@ class Phase4JobTests(unittest.TestCase):
                 return True
 
             def write(self, text):
-                if text.startswith("\r ") and text.endswith("\r"):
+                if text == "\r\x1b[2K":
                     raise OSError("closed")
                 return super().write(text)
 
@@ -354,9 +376,10 @@ class Phase4JobTests(unittest.TestCase):
 
             stderr_text = stderr.getvalue()
             log_text = result.log_path.read_text(encoding="utf-8")
-            self.assertIn("fake coding: fake stdout", stderr_text)
-            self.assertIn("fake coding: fake stderr", stderr_text)
-            self.assertNotIn("\033[", stderr_text)
+            self.assertIn("[fake coding]: fake stdout", stderr_text)
+            self.assertIn("[fake coding]: fake stderr", stderr_text)
+            self.assertIn("\r\x1b[2K", stderr_text)
+            self.assertNotIn("\033[36m", stderr_text)
             self.assertIn("fake stdout", log_text)
             self.assertIn("fake stderr", log_text)
             self.assertEqual(result.output_path.read_text(encoding="utf-8"), "fake stdout\n")
@@ -433,7 +456,7 @@ class Phase4JobTests(unittest.TestCase):
                         timeout_seconds=5,
                     )
 
-            self.assertNotIn("fake coding:", stderr.getvalue())
+            self.assertNotIn("[fake coding]:", stderr.getvalue())
             self.assertIn("fake stdout", result.log_path.read_text(encoding="utf-8"))
 
     def test_checks_job_live_preview_uses_checks_prefix(self):
@@ -464,7 +487,7 @@ class Phase4JobTests(unittest.TestCase):
                     )
 
             self.assertEqual(result.status, "SUCCEEDED")
-            self.assertIn("checks checking: check output", stderr.getvalue())
+            self.assertIn("[checks checking]: check output", stderr.getvalue())
             self.assertIn("check output", result.log_path.read_text(encoding="utf-8"))
 
     def test_live_preview_color_is_forced_when_requested(self):
@@ -591,7 +614,7 @@ class Phase4JobTests(unittest.TestCase):
             self.assertEqual(result.status, "FAILED")
             self.assertEqual(result.exit_code, 7)
             self.assertEqual(result.error, "exit code 7")
-            self.assertIn("fake fixing: fake stdout", stderr.getvalue())
+            self.assertIn("[fake fixing]: fake stdout", stderr.getvalue())
             self.assertIn(
                 f"[agent-runner] FIX job {result.job_id} failed: exit code 7",
                 stderr.getvalue(),

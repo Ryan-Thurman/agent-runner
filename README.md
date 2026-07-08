@@ -138,21 +138,22 @@ rules.
 ## Live Job Previews
 
 `run` streams a compact bounded preview of agent and check output to stderr
-while jobs are active. In an interactive terminal, the preview uses one updating
-spinner line that shows the latest output:
+while jobs are active. By default, the preview uses one rolling line that shows
+the latest child output:
 
 ```text
-- codex coding: edited agent_runner/jobs.py
-\ checks checking: python3 -m unittest discover -s tests -v
-| codex reviewing: {"status": "PASS", ...}
+[codex coding]: edited agent_runner/jobs.py
+[checks checking]: python3 -m unittest discover -s tests -v
+[claude-opus reviewing]: {"status": "PASS", ...}
 ```
 
-When stderr is redirected, the preview stays as plain bounded lines so logs and
-CI output remain readable. The preview is for terminal visibility only. Long
-lines are truncated in the preview with `... [truncated]`, but the full
-stdout/stderr still lands in the phase `.log` file, and profile output capture
-files remain unchanged. Stdout stays reserved for machine-readable command
-payloads such as `status` JSON and `logs` output.
+The default rolling preview uses carriage-return/clear-line control sequences,
+including when stderr is redirected. Use `AGENT_RUNNER_LIVE_LOGS=lines` for
+readable newline-delimited previews in captured stderr or CI logs. The preview
+is for terminal visibility only. Long lines are truncated in the preview with
+`... [truncated]`, but the full stdout/stderr still lands in the phase `.log`
+file, and profile output capture files remain unchanged. Stdout stays reserved
+for machine-readable command payloads such as `status` JSON and `logs` output.
 
 Disable previews for quiet automation:
 
@@ -160,7 +161,7 @@ Disable previews for quiet automation:
 AGENT_RUNNER_LIVE_LOGS=0 python3 -m agent_runner run
 ```
 
-Use the old multiline preview mode in an interactive terminal:
+Use newline-delimited preview mode for readable captured stderr or CI logs:
 
 ```sh
 AGENT_RUNNER_LIVE_LOGS=lines python3 -m agent_runner run

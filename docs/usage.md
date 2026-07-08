@@ -391,20 +391,22 @@ Expected success flow:
 [agent-runner] acquired lock for <project-slug>
 [agent-runner] registered/resumed plan docs/plan.md with N phase(s)
 [agent-runner] starting IMPLEMENT job 1 (role=coder, profile=codex)
-- codex coding: ...
+[codex coding]: ...
 [agent-runner] starting RUN_CHECKS job 2 (role=checks, profile=shell)
-\ checks checking: ...
-[agent-runner] starting REVIEW job 3 (role=reviewer, profile=codex)
-| codex reviewing: ...
+[checks checking]: ...
+[agent-runner] starting REVIEW job 3 (role=reviewer, profile=claude-opus)
+[claude-opus reviewing]: ...
 [agent-runner] phase <n> complete; plan complete
 ```
 
-The `codex coding:`, `checks checking:`, and similar previews show the latest
-child-process output. In an interactive terminal they update one spinner line;
-when stderr is redirected they print as plain bounded lines. Long lines end
-with `... [truncated]` in the preview only. The complete stdout/stderr remains
-in the phase `.log` files under `~/.agent-runner/logs/`, and agent output
-capture files keep their exact configured contents.
+The `[codex coding]:`, `[checks checking]:`, and similar previews show the
+latest child-process output on one rolling line by default. The rolling preview
+uses carriage-return/clear-line control sequences, including when stderr is
+redirected. Set `AGENT_RUNNER_LIVE_LOGS=lines` for readable newline-delimited
+previews in captured stderr or CI logs. Long lines end with `... [truncated]`
+in the preview only. The complete stdout/stderr remains in the phase `.log`
+files under `~/.agent-runner/logs/`, and agent output capture files keep their
+exact configured contents.
 
 With `autoCommit=true`, close-phase changes are committed with:
 
@@ -551,24 +553,25 @@ job, including the role/profile, log path, and child PID.
 During `run`, agent and check jobs also stream compact live previews to stderr
 with labels derived from job metadata:
 
-- `IMPLEMENT` with the coder profile prints `<profile> coding: ...`.
-- `REVIEW` with the reviewer profile prints `<profile> reviewing: ...`.
-- `FIX` with the coder profile prints `<profile> fixing: ...`.
-- `CLOSE_PHASE` with the closer profile prints `<profile> closing: ...`.
-- `RUN_CHECKS` prints `checks checking: ...`.
+- `IMPLEMENT` with the coder profile prints `[<profile> coding]: ...`.
+- `REVIEW` with the reviewer profile prints `[<profile> reviewing]: ...`.
+- `FIX` with the coder profile prints `[<profile> fixing]: ...`.
+- `CLOSE_PHASE` with the closer profile prints `[<profile> closing]: ...`.
+- `RUN_CHECKS` prints `[checks checking]: ...`.
 
-Previews are not a substitute for logs. In an interactive terminal, the preview
-uses one updating spinner line; when stderr is redirected, it remains plain
-line output for readable CI logs. Previews may be truncated and colored, while
-the log files are complete and uncolored child output. Set
+Previews are not a substitute for logs. By default, the preview uses one
+rolling line and may include carriage-return/clear-line control sequences in
+redirected stderr. Set `AGENT_RUNNER_LIVE_LOGS=lines` for readable
+newline-delimited previews in captured stderr or CI logs. Previews may be
+truncated and colored, while the log files are complete and uncolored child
+output. Set
 `AGENT_RUNNER_LIVE_LOGS=0` to disable previews:
 
 ```sh
 AGENT_RUNNER_LIVE_LOGS=0 python3 -m agent_runner run
 ```
 
-Set `AGENT_RUNNER_LIVE_LOGS=lines` to force the old multiline preview mode in
-an interactive terminal.
+Set `AGENT_RUNNER_LIVE_LOGS=lines` to force newline-delimited preview mode.
 
 Color is controlled by `AGENT_RUNNER_COLOR=auto|always|never`. The default
 `auto` emits ANSI color only when stderr is a TTY and `NO_COLOR` is not set.

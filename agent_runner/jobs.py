@@ -35,7 +35,6 @@ _COLOR_RESET = "\033[0m"
 _COLOR_PREFIX = "\033[36m"
 _LIVE_LOGS_DISABLE_VALUES = {"0", "false", "no", "off"}
 _LIVE_LOGS_LINE_VALUE = "lines"
-_ANSI_PATTERN = re.compile(r"\033\[[0-9;]*m")
 
 
 @dataclass(frozen=True)
@@ -46,22 +45,18 @@ class LivePreviewContext:
 
 
 class _LivePreviewRenderer:
-    _SPINNER_FRAMES = ("-", "\\", "|", "/")
-
     def __init__(
         self,
         context: LivePreviewContext,
         *,
         color_enabled: bool,
-        spinner_enabled: bool,
+        line_mode: bool,
         stream,
     ) -> None:
         self._context = context
         self._color_enabled = color_enabled
-        self._spinner_enabled = spinner_enabled
+        self._line_mode = line_mode
         self._stream = stream
-        self._frame_index = 0
-        self._last_width = 0
         self._active = False
 
     def write(self, text: str) -> None:
@@ -69,10 +64,10 @@ class _LivePreviewRenderer:
             preview = _format_live_preview_line(
                 self._context, line, color_enabled=self._color_enabled
             )
-            if self._spinner_enabled:
-                self._write_spinner(preview)
-            else:
+            if self._line_mode:
                 print(preview, file=self._stream, flush=True)
+            else:
+                self._write_rolling(preview)
 
     def finish(self, lock: Optional[threading.Lock] = None) -> None:
         if lock is None:
@@ -82,26 +77,19 @@ class _LivePreviewRenderer:
             self._finish_unlocked()
 
     def _finish_unlocked(self) -> None:
-        if not self._spinner_enabled or not self._active:
+        if self._line_mode or not self._active:
             return
         try:
-            self._stream.write("\r" + (" " * self._last_width) + "\r")
+            self._stream.write("\r\x1b[2K")
             self._stream.flush()
         except OSError:
             pass
         finally:
             self._active = False
-            self._last_width = 0
 
-    def _write_spinner(self, preview: str) -> None:
-        frame = self._SPINNER_FRAMES[self._frame_index % len(self._SPINNER_FRAMES)]
-        self._frame_index += 1
-        line = f"{frame} {preview}"
-        width = _visible_width(line)
-        padding = " " * max(self._last_width - width, 0)
-        self._stream.write(f"\r{line}{padding}")
+    def _write_rolling(self, preview: str) -> None:
+        self._stream.write(f"\r\x1b[2K{preview}")
         self._stream.flush()
-        self._last_width = width
         self._active = True
 
 
@@ -521,7 +509,7 @@ def _live_preview_writer(
     return _LivePreviewRenderer(
         context,
         color_enabled=_resolve_color_enabled(stream=stream),
-        spinner_enabled=_live_logs_spinner_enabled(stream),
+        line_mode=_live_logs_line_mode(),
         stream=stream,
     )
 
@@ -537,7 +525,7 @@ def _format_live_preview_line(
     *,
     color_enabled: bool,
 ) -> str:
-    prefix = f"{context.subject} {context.verb}:"
+    prefix = f"[{context.subject} {context.verb}]:"
     body = text.rstrip("\r\n")
     plain = prefix if not body.strip() else f"{prefix} {body}"
     truncated = _truncate_visible(plain, context.max_chars)
@@ -558,10 +546,6 @@ def _truncate_visible(text: str, max_chars: int) -> str:
     return text[:keep].rstrip() + _TRUNCATION_MARKER
 
 
-def _visible_width(text: str) -> int:
-    return len(_ANSI_PATTERN.sub("", text))
-
-
 def _live_logs_enabled() -> bool:
     value = os.environ.get("AGENT_RUNNER_LIVE_LOGS")
     if value is None:
@@ -570,11 +554,9 @@ def _live_logs_enabled() -> bool:
     return normalized not in _LIVE_LOGS_DISABLE_VALUES
 
 
-def _live_logs_spinner_enabled(stream) -> bool:
+def _live_logs_line_mode() -> bool:
     value = os.environ.get("AGENT_RUNNER_LIVE_LOGS")
-    if value is not None and value.strip().lower() == _LIVE_LOGS_LINE_VALUE:
-        return False
-    return bool(getattr(stream, "isatty", lambda: False)())
+    return value is not None and value.strip().lower() == _LIVE_LOGS_LINE_VALUE
 
 
 def _resolve_color_enabled(
