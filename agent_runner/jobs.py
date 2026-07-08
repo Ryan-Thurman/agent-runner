@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -564,13 +565,43 @@ def _format_live_preview_line(
     return truncated.replace(prefix, colored_prefix, 1)
 
 
-def _truncate_visible(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
+def _char_width(char: str) -> int:
+    # Combining marks and zero-width formatting/control glyphs advance the cursor
+    # by nothing; East-Asian wide/fullwidth glyphs and most emoji take two cells.
+    if unicodedata.combining(char) or unicodedata.category(char) in {
+        "Mn",
+        "Me",
+        "Cf",
+        "Cc",
+    }:
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+
+
+def _display_width(text: str) -> int:
+    return sum(_char_width(char) for char in text)
+
+
+def _cut_to_width(text: str, max_cols: int) -> str:
+    used = 0
+    for index, char in enumerate(text):
+        width = _char_width(char)
+        if used + width > max_cols:
+            return text[:index]
+        used += width
+    return text
+
+
+def _truncate_visible(text: str, max_cols: int) -> str:
+    # max_cols is a terminal-column budget, so measure by rendered display width
+    # (wide/zero-width glyphs) rather than code-point count; otherwise a preview
+    # can still overflow one physical row and reintroduce the wrapping bug.
+    if _display_width(text) <= max_cols:
         return text
-    if max_chars <= len(_TRUNCATION_MARKER):
-        return _TRUNCATION_MARKER[:max_chars]
-    keep = max_chars - len(_TRUNCATION_MARKER)
-    return text[:keep].rstrip() + _TRUNCATION_MARKER
+    marker_cols = _display_width(_TRUNCATION_MARKER)
+    if max_cols <= marker_cols:
+        return _cut_to_width(_TRUNCATION_MARKER, max_cols)
+    return _cut_to_width(text, max_cols - marker_cols).rstrip() + _TRUNCATION_MARKER
 
 
 def _terminal_width(stream) -> int:

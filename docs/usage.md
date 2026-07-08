@@ -578,6 +578,11 @@ Set `AGENT_RUNNER_LIVE_LOGS=lines` to force newline-delimited preview mode, or
 `AGENT_RUNNER_LIVE_LOGS=rolling` to force carriage-return rolling previews in
 an interactive terminal.
 
+To watch the rolling animation by eye, run `python3 scripts/verify_live_logs.py`
+in a real terminal; it streams a slow fake agent so you can confirm the preview
+updates in place. The automated coverage (including a real-pty width guard) runs
+as part of `python3 -m unittest discover -s tests`.
+
 Color is controlled by `AGENT_RUNNER_COLOR=auto|always|never`. The default
 `auto` emits ANSI color only when stderr is a TTY and `NO_COLOR` is not set.
 Use `always` to force color and `never` to suppress raw ANSI escapes even in an

@@ -1,3 +1,4 @@
+import contextlib
 import io
 import json
 import os
@@ -6,6 +7,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,11 +16,15 @@ from agent_runner.config import AgentProfile
 from agent_runner.errors import JobError
 from agent_runner.jobs import (
     LivePreviewContext,
+    _LivePreviewRenderer,
+    _display_width,
     _format_live_preview_line,
     _live_preview_context,
     _live_preview_writer,
     _resolve_color_enabled,
     _run_process,
+    _terminal_width,
+    _truncate_visible,
     run_agent_job,
     run_checks_job,
 )
@@ -253,6 +259,87 @@ class Phase4JobTests(unittest.TestCase):
         self.assertTrue(segments)
         for segment in segments:
             self.assertLessEqual(len(segment), 39)
+
+    @unittest.skipUnless(hasattr(os, "openpty"), "requires pty support")
+    def test_terminal_width_reads_real_pty_winsize(self):
+        # Exercise the primary os.get_terminal_size(fileno) branch (StringIO
+        # fakes only hit the COLUMNS/shutil fallback), so a broken fd lookup is
+        # caught by the suite rather than only by the standalone script.
+        import fcntl
+        import pty
+        import struct
+        import termios
+
+        master_fd, slave_fd = pty.openpty()
+        slave = os.fdopen(slave_fd, "w", encoding="utf-8")
+        try:
+            fcntl.ioctl(
+                slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 57, 0, 0)
+            )
+            self.assertEqual(_terminal_width(slave), 57)
+        finally:
+            slave.close()
+            os.close(master_fd)
+
+    @unittest.skipUnless(hasattr(os, "openpty"), "requires pty support")
+    def test_rolling_preview_fits_real_pty_width(self):
+        import fcntl
+        import pty
+        import struct
+        import termios
+
+        cols = 40
+        master_fd, slave_fd = pty.openpty()
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, cols, 0, 0))
+        chunks: list[bytes] = []
+
+        def reader():
+            while True:
+                try:
+                    data = os.read(master_fd, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                chunks.append(data)
+
+        thread = threading.Thread(target=reader)
+        thread.start()
+        slave = os.fdopen(slave_fd, "w", buffering=1, encoding="utf-8", newline="")
+        try:
+            renderer = _LivePreviewRenderer(
+                LivePreviewContext(subject="codex", verb="coding"),
+                color_enabled=False,
+                line_mode=False,
+                stream=slave,
+            )
+            renderer.write("x" * 200 + "\n")
+            renderer.finish()
+        finally:
+            slave.flush()
+            slave.close()
+            thread.join(timeout=2)
+            with contextlib.suppress(OSError):
+                os.close(master_fd)
+
+        output = b"".join(chunks).decode("utf-8", "replace")
+        segments = [seg for seg in output.split("\r\x1b[2K")[1:] if seg]
+        self.assertTrue(segments)
+        for segment in segments:
+            self.assertLessEqual(len(segment), cols - 1)
+
+    def test_truncate_visible_counts_wide_and_zero_width_glyphs(self):
+        # A wide glyph consumes two columns; combining/zero-width marks consume
+        # none. Truncation must honor that so the result never overflows the row.
+        wide = "\u6f22" * 30  # CJK ideograph (two columns each)
+        self.assertEqual(_display_width("\u6f22" * 5), 10)
+        self.assertLessEqual(_display_width(_truncate_visible(wide, 10)), 10)
+
+        # base letter + combining acute accent renders as one column
+        combining = "e\u0301" * 30
+        self.assertEqual(_display_width(combining), 30)
+        # zero-width space (category Cf) advances the cursor by nothing
+        self.assertEqual(_display_width("\u200b" * 10), 0)
 
     def test_live_preview_uses_rolling_line_when_enabled_and_clears_line(self):
         class FakeTTY(io.StringIO):
@@ -583,6 +670,9 @@ class Phase4JobTests(unittest.TestCase):
 
             self.assertEqual(result.status, "SUCCEEDED")
             self.assertIn("[checks checking]: check output", stderr.getvalue())
+            # Each check command is printed to the terminal above its preview.
+            self.assertIn("[agent-runner] $ ", stderr.getvalue())
+            self.assertIn("print('check output')", stderr.getvalue())
             self.assertIn("check output", result.log_path.read_text(encoding="utf-8"))
 
     def test_live_preview_color_is_forced_when_requested(self):
