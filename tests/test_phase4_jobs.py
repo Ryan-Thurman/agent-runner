@@ -16,6 +16,7 @@ from agent_runner.jobs import (
     LivePreviewContext,
     _format_live_preview_line,
     _live_preview_context,
+    _live_preview_writer,
     _resolve_color_enabled,
     _run_process,
     run_agent_job,
@@ -201,6 +202,89 @@ class Phase4JobTests(unittest.TestCase):
                 mode="auto", stream=FakeStream(True), env={"NO_COLOR": "1"}
             )
         )
+
+    def test_live_preview_uses_spinner_on_tty_and_clears_line(self):
+        class FakeTTY(io.StringIO):
+            def isatty(self):
+                return True
+
+        stderr = FakeTTY()
+        context = LivePreviewContext(subject="codex", verb="coding")
+
+        with mock.patch("sys.stderr", stderr), mock.patch.dict(
+            os.environ, {"AGENT_RUNNER_COLOR": "never"}, clear=False
+        ):
+            preview = _live_preview_writer(context)
+            self.assertIsNotNone(preview)
+            preview.write("first line\n")
+            preview.write("second line\n")
+            preview.finish()
+
+        output = stderr.getvalue()
+        self.assertIn("\r- codex coding: first line", output)
+        self.assertIn("\r\\ codex coding: second line", output)
+        self.assertNotIn("\n", output)
+        self.assertTrue(output.endswith("\r"))
+
+    def test_live_preview_lines_mode_skips_spinner_even_on_tty(self):
+        class FakeTTY(io.StringIO):
+            def isatty(self):
+                return True
+
+        stderr = FakeTTY()
+        context = LivePreviewContext(subject="codex", verb="coding")
+
+        with mock.patch("sys.stderr", stderr), mock.patch.dict(
+            os.environ,
+            {"AGENT_RUNNER_COLOR": "never", "AGENT_RUNNER_LIVE_LOGS": "lines"},
+            clear=False,
+        ):
+            preview = _live_preview_writer(context)
+            self.assertIsNotNone(preview)
+            preview.write("first line\n")
+            preview.finish()
+
+        self.assertEqual(stderr.getvalue(), "codex coding: first line\n")
+
+    def test_live_preview_finish_ignores_closed_tty_cleanup(self):
+        class ClosingTTY(io.StringIO):
+            def isatty(self):
+                return True
+
+            def write(self, text):
+                if text.startswith("\r ") and text.endswith("\r"):
+                    raise OSError("closed")
+                return super().write(text)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            script = root / "ok.py"
+            script.write_text("print('done')\n", encoding="utf-8")
+            log_path = root / "preview.log"
+
+            with mock.patch("sys.stderr", ClosingTTY()), mock.patch.dict(
+                os.environ, {"AGENT_RUNNER_COLOR": "never"}, clear=False
+            ):
+                exit_code, stdout, stderr, error = _run_process(
+                    [sys.executable, str(script)],
+                    repo_root=repo,
+                    timeout_seconds=5,
+                    shell=False,
+                    log_path=log_path,
+                    log_header="$ ok\n",
+                    live_preview_context=LivePreviewContext(
+                        subject="codex", verb="coding"
+                    ),
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(stdout, "done\n")
+            self.assertEqual(stderr, "")
+            self.assertIsNone(error)
+            self.assertIn("done", log_path.read_text(encoding="utf-8"))
 
     def test_agent_job_success_writes_prompt_logs_output_and_shas(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -483,9 +567,10 @@ class Phase4JobTests(unittest.TestCase):
             project, plan, phase = setup_state(home, repo)
             old_environ = os.environ.copy()
             os.environ["FAKE_AGENT_EXIT"] = "7"
+            stderr = io.StringIO()
 
             try:
-                with connect_db(home) as db:
+                with mock.patch("sys.stderr", stderr), connect_db(home) as db:
                     result = run_agent_job(
                         db,
                         project_id=project["id"],
@@ -506,6 +591,12 @@ class Phase4JobTests(unittest.TestCase):
             self.assertEqual(result.status, "FAILED")
             self.assertEqual(result.exit_code, 7)
             self.assertEqual(result.error, "exit code 7")
+            self.assertIn("fake fixing: fake stdout", stderr.getvalue())
+            self.assertIn(
+                f"[agent-runner] FIX job {result.job_id} failed: exit code 7",
+                stderr.getvalue(),
+            )
+            self.assertIn(f"[agent-runner]   log: {result.log_path}", stderr.getvalue())
 
     def test_agent_spawn_failure_marks_job_failed_and_unblocks_project(self):
         with tempfile.TemporaryDirectory() as tmp:
