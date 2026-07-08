@@ -123,7 +123,7 @@ Minimum config shape:
     "codex": {
       "command": "codex",
       "promptArgs": ["exec"],
-      "writeFlags": ["--sandbox", "workspace-write"],
+      "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
       "readOnlyFlags": ["--sandbox", "read-only"],
       "outputCapture": "last-message-file"
     },
@@ -137,16 +137,16 @@ Minimum config shape:
     "claude-opus": {
       "command": "claude",
       "promptArgs": ["--model", "claude-opus-4-8", "-p"],
-      "writeFlags": ["--permission-mode", "acceptEdits"],
-      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "writeFlags": ["--dangerously-skip-permissions"],
+      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"
     },
     "claude-sonnet": {
       "command": "claude",
       "promptArgs": ["--model", "claude-sonnet-5", "-p"],
-      "writeFlags": ["--permission-mode", "acceptEdits"],
-      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "writeFlags": ["--dangerously-skip-permissions"],
+      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"
     }
@@ -183,9 +183,23 @@ Current notes:
   review. `roles.fixer` is optional and used only for one-shot `AUTOFIX` jobs
   when `autoFixAttempts` is greater than zero.
 - `autoFixAttempts` defaults to `0`, which disables auto-fix. Values above zero
-  require `roles.fixer`. Each blocked phase can consume up to that many
-  auto-fix attempts during one `run` invocation; the count is in memory and
-  resets on a later `run`.
+  require `roles.fixer`. Each phase can consume up to that many auto-fix
+  attempts total; the count is derived from the `AUTOFIX` jobs recorded for the
+  phase, so restarting `run` (including the automatic post-merge restart) does
+  not reset the budget.
+- Agent CLI flag pitfalls the runner cannot detect for you: the runner appends
+  the prompt as the final positional argument, and the `claude` CLI's
+  `--allowedTools`/`--disallowedTools` options are variadic — written as
+  separate arguments (`"--disallowedTools", "Edit,Write"`) they swallow the
+  prompt and the job dies with "Input must be provided". Always use the
+  `=`-joined form (`"--disallowedTools=Edit,Write"`). In headless `-p` mode
+  there is no one to answer permission prompts, so a write-role `claude` under
+  `--permission-mode acceptEdits` aborts on the first Bash command outside its
+  allowlist; write roles should use `--dangerously-skip-permissions` (review
+  and checks still gate the result). Similarly, codex's `workspace-write`
+  sandbox disables network by default, which breaks dependency fetches and
+  pushes; the `-c sandbox_workspace_write.network_access=true` override keeps
+  the filesystem sandbox while restoring network.
 - An `AUTOFIX` job is a short-lived subprocess launched through the same
   `run_agent_job` machinery as IMPLEMENT and REVIEW jobs. It is not a daemon and
   no fixer process is kept alive after its single job. The prompt includes the
@@ -250,8 +264,12 @@ Current notes:
   migration, legacy `blockingIssues` and `nonBlockingIssues` payloads are still
   accepted: `blockingIssues` maps to `findings.blocking`, while
   `nonBlockingIssues` maps to `findings.shouldFix`. The runner still writes
-  those legacy fields into normalized `review.json` for compatibility. Invalid
-  review JSON blocks the phase and leaves the raw output in `review.log`.
+  those legacy fields into normalized `review.json` for compatibility. The
+  extractor tolerates common agent framing: prose before or after the JSON, a
+  ```json code fence anywhere in the output (the last parseable block wins),
+  and the `claude -p --output-format json` envelope (the document is read from
+  its `result` field). Output with no parseable JSON document blocks the phase
+  and leaves the raw output in `review.log`.
 - With `autoCommit=true`, the runner mirrors normalized `review.json` back to
   the published PR after extraction. `PASS` posts a whole-PR approval review,
   `CHANGES_REQUESTED` posts a whole-PR request-changes review, and `BLOCKED`
@@ -497,9 +515,10 @@ blocking issues, the phase blocks instead of starting another PR review cycle.
 When auto-fix is enabled, `run` tries the configured `fixer` before returning
 the blocked result, but only for resumable blocks with `blocked_from` recorded.
 It skips blockers that need human intent, such as protected plan-content
-changes. If the fixer process fails or the phase consumes its
-`autoFixAttempts` for the current invocation, the phase remains `BLOCKED` and
-the command exits non-zero as usual.
+changes. If the fixer process fails or the phase has consumed its
+`autoFixAttempts` budget (counted from the phase's recorded `AUTOFIX` jobs, so
+it survives runner restarts), the phase remains `BLOCKED` and the command
+exits non-zero as usual.
 
 ## Logs and State
 

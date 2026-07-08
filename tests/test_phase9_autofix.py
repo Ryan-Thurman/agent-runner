@@ -463,6 +463,33 @@ class AutofixLoopTests(unittest.TestCase):
             phase_jobs = jobs(home, phase["id"])
             self.assertEqual([job["type"] for job in phase_jobs].count("AUTOFIX"), 2)
 
+    def test_autofix_attempt_cap_persists_across_runner_restarts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "autofix_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_plan(repo)
+            write_autofix_agent(script)
+            write_config(repo, script, auto_fix_attempts=2)
+            commit_all(repo)
+            extra_env = {"TRACE_DIR": str(trace), "AUTOFIX_MODE": "NOOP"}
+
+            first = run_cli(repo, home, "run", extra_env=extra_env)
+            self.assertEqual(first.returncode, 1)
+            self.assertIn("auto-fix attempt 2/2 with profile fake", first.stderr)
+
+            second = run_cli(repo, home, "run", extra_env=extra_env)
+            self.assertEqual(second.returncode, 1)
+            self.assertNotIn("auto-fix attempt", second.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            phase_jobs = jobs(home, phase["id"])
+            self.assertEqual([job["type"] for job in phase_jobs].count("AUTOFIX"), 2)
+
     def test_autofix_disabled_or_missing_fixer_keeps_blocking_behavior(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

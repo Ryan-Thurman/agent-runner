@@ -1955,7 +1955,7 @@ def _interpret_review_triage(
 
     raw_output = _review_capture_output(result).strip()
     try:
-        payload = json.loads(raw_output)
+        payload = _unwrap_agent_envelope(json.loads(_review_json_document(raw_output)))
     except json.JSONDecodeError as exc:
         return ReviewTriageResult(
             tier="complex",
@@ -3402,7 +3402,7 @@ def _single_line(text: str, *, limit: int) -> str:
 def _extract_review_json(result: JobResult, log_dir: Path) -> dict[str, Any]:
     raw_output = _review_capture_output(result)
     try:
-        payload = json.loads(_review_json_document(raw_output))
+        payload = _unwrap_agent_envelope(json.loads(_review_json_document(raw_output)))
     except json.JSONDecodeError as exc:
         _append_review_capture_to_log(result, raw_output)
         raise JobError(f"invalid review JSON: {exc}") from exc
@@ -3417,20 +3417,70 @@ def _extract_review_json(result: JobResult, log_dir: Path) -> dict[str, Any]:
 
 def _review_json_document(raw_output: str) -> str:
     stripped = raw_output.strip()
-    if not stripped.startswith("```"):
+    fenced = [
+        match.group(1).strip()
+        for match in _REVIEW_FENCE_PATTERN.finditer(stripped)
+    ]
+    for candidate in reversed(fenced):
+        if _parses_as_json_object(candidate):
+            return candidate
+    if _parses_as_json_object(stripped):
         return stripped
-
-    lines = stripped.splitlines()
-    if not lines:
-        return stripped
-    opener = lines[0].strip().lower()
-    if opener not in {"```", "```json"}:
-        return stripped
-
-    for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "```":
-            return "\n".join(lines[1:index]).strip()
+    bare = _last_json_object(stripped)
+    if bare is not None:
+        return bare
+    if fenced:
+        return fenced[-1]
     return stripped
+
+
+_REVIEW_FENCE_PATTERN = re.compile(
+    r"```(?:json)?[ \t]*\n(.*?)\n[ \t]*```", re.DOTALL | re.IGNORECASE
+)
+
+
+def _parses_as_json_object(text: str) -> bool:
+    try:
+        return isinstance(json.loads(text), dict)
+    except json.JSONDecodeError:
+        return False
+
+
+def _last_json_object(text: str) -> Optional[str]:
+    # Scan for top-level JSON objects embedded in prose; skipping to each
+    # object's end keeps nested objects (e.g. "findings") from matching.
+    decoder = json.JSONDecoder()
+    result: Optional[str] = None
+    index = 0
+    while True:
+        start = text.find("{", index)
+        if start == -1:
+            return result
+        try:
+            payload, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        if isinstance(payload, dict):
+            result = text[start:end]
+            index = end
+        else:
+            index = start + 1
+
+
+def _unwrap_agent_envelope(payload: Any) -> Any:
+    # `claude -p --output-format json` wraps the agent's final text in an
+    # envelope; the review document is inside the string `result` field.
+    if (
+        isinstance(payload, dict)
+        and "status" not in payload
+        and isinstance(payload.get("result"), str)
+    ):
+        try:
+            return json.loads(_review_json_document(payload["result"]))
+        except json.JSONDecodeError:
+            return payload
+    return payload
 
 
 def _review_capture_output(result: JobResult) -> str:

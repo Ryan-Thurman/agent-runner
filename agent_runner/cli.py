@@ -302,7 +302,6 @@ def _run_autofix_loop(
         return initial_result
 
     result = initial_result
-    attempts_by_phase: dict[int, int] = {}
     while result.blocked:
         phase = _blocked_phase_for_plan(db, plan_id)
         if phase is None or not phase["blocked_from"]:
@@ -312,7 +311,10 @@ def _run_autofix_loop(
         if _requires_human_intent(blocking_message):
             return result
 
-        used_attempts = attempts_by_phase.get(phase["id"], 0)
+        # Counted from the jobs table so runner restarts (including the
+        # self-restart after a merge) cannot reset the budget and re-spend
+        # fixer attempts on the same phase.
+        used_attempts = _autofix_attempt_count(db, phase["id"])
         if used_attempts >= config.auto_fix_attempts:
             return result
 
@@ -321,7 +323,6 @@ def _run_autofix_loop(
             return paused
 
         attempt = used_attempts + 1
-        attempts_by_phase[phase["id"]] = attempt
         profile = config.agents[config.roles["fixer"]]
         print(
             "[agent-runner] "
@@ -430,6 +431,14 @@ def _prepare_successful_autofix_resume(
         metadata=metadata,
     )
     return phase
+
+
+def _autofix_attempt_count(db, phase_id: int) -> int:
+    row = db.execute(
+        "SELECT COUNT(*) AS count FROM jobs WHERE phase_id = ? AND type = 'AUTOFIX'",
+        (phase_id,),
+    ).fetchone()
+    return int(row["count"])
 
 
 def _blocked_phase_for_plan(db, plan_id: int):

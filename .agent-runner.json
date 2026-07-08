@@ -19,7 +19,7 @@
     "codex": {
       "command": "codex",
       "promptArgs": ["exec"],
-      "writeFlags": ["--sandbox", "workspace-write"],
+      "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
       "readOnlyFlags": ["--sandbox", "read-only"],
       "outputCapture": "last-message-file"
     },

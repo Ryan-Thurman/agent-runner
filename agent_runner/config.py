@@ -425,10 +425,13 @@ SAMPLE_CONFIG_TEMPLATE = """{{
 
   // Agent profiles are vendor-specific; roles below are vendor-swappable.
   "agents": {{
+    // codex workspace-write disables network by default, which breaks
+    // dependency fetches (cargo/pnpm) and pushes; the -c override re-enables
+    // network while keeping the filesystem sandbox.
     "codex": {{
       "command": "codex",
       "promptArgs": ["exec"],
-      "writeFlags": ["--sandbox", "workspace-write"],
+      "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
       "readOnlyFlags": ["--sandbox", "read-only"],
       "outputCapture": "last-message-file"
     }},
@@ -439,19 +442,25 @@ SAMPLE_CONFIG_TEMPLATE = """{{
       "readOnlyFlags": ["--sandbox"],
       "outputCapture": "stdout"
     }},
+    // claude flag rules: --allowedTools/--disallowedTools are VARIADIC — the
+    // space-separated form ("--disallowedTools", "Edit,Write") swallows the
+    // positional prompt the runner appends last. Always use the =-joined form.
+    // Write roles run headless (-p): unmatched permission prompts are DENIED,
+    // not asked, so writers use --dangerously-skip-permissions to run
+    // builds/tests/git. Reviewers stay read-only via disallowedTools.
     "claude-opus": {{
       "command": "claude",
       "promptArgs": ["--model", "claude-opus-4-8", "-p"],
-      "writeFlags": ["--permission-mode", "acceptEdits"],
-      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "writeFlags": ["--dangerously-skip-permissions"],
+      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"
     }},
     "claude-sonnet": {{
       "command": "claude",
       "promptArgs": ["--model", "claude-sonnet-5", "-p"],
-      "writeFlags": ["--permission-mode", "acceptEdits"],
-      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "writeFlags": ["--dangerously-skip-permissions"],
+      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"
     }}
