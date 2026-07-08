@@ -34,6 +34,8 @@ _TRUNCATION_MARKER = " ... [truncated]"
 _COLOR_RESET = "\033[0m"
 _COLOR_PREFIX = "\033[36m"
 _LIVE_LOGS_DISABLE_VALUES = {"0", "false", "no", "off"}
+_LIVE_LOGS_LINE_VALUE = "lines"
+_ANSI_PATTERN = re.compile(r"\033\[[0-9;]*m")
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,55 @@ class LivePreviewContext:
     subject: str
     verb: str
     max_chars: int = _LIVE_PREVIEW_MAX_CHARS
+
+
+class _LivePreviewRenderer:
+    _SPINNER_FRAMES = ("-", "\\", "|", "/")
+
+    def __init__(
+        self,
+        context: LivePreviewContext,
+        *,
+        color_enabled: bool,
+        spinner_enabled: bool,
+        stream,
+    ) -> None:
+        self._context = context
+        self._color_enabled = color_enabled
+        self._spinner_enabled = spinner_enabled
+        self._stream = stream
+        self._frame_index = 0
+        self._last_width = 0
+        self._active = False
+
+    def write(self, text: str) -> None:
+        for line in _preview_lines(text):
+            preview = _format_live_preview_line(
+                self._context, line, color_enabled=self._color_enabled
+            )
+            if self._spinner_enabled:
+                self._write_spinner(preview)
+            else:
+                print(preview, file=self._stream, flush=True)
+
+    def finish(self) -> None:
+        if not self._spinner_enabled or not self._active:
+            return
+        self._stream.write("\r" + (" " * self._last_width) + "\r")
+        self._stream.flush()
+        self._active = False
+        self._last_width = 0
+
+    def _write_spinner(self, preview: str) -> None:
+        frame = self._SPINNER_FRAMES[self._frame_index % len(self._SPINNER_FRAMES)]
+        self._frame_index += 1
+        line = f"{frame} {preview}"
+        width = _visible_width(line)
+        padding = " " * max(self._last_width - width, 0)
+        self._stream.write(f"\r{line}{padding}")
+        self._stream.flush()
+        self._last_width = width
+        self._active = True
 
 
 @dataclass(frozen=True)
@@ -138,6 +189,13 @@ def run_agent_job(
         error=error,
         finished_sha=_git_sha(repo_root),
     )
+    if status == "FAILED":
+        _print_job_failure(
+            job_id=job["id"],
+            job_type=job_type,
+            error=error,
+            log_path=log_path,
+        )
     row = get_job(connection, job["id"])
     return JobResult(
         job_id=row["id"],
@@ -238,6 +296,13 @@ def run_checks_job(
         error=error,
         finished_sha=_git_sha(repo_root),
     )
+    if status == "FAILED":
+        _print_job_failure(
+            job_id=job["id"],
+            job_type="RUN_CHECKS",
+            error=error,
+            log_path=log_path,
+        )
     if failed_command is not None:
         _record_event(
             connection,
@@ -295,72 +360,76 @@ def _run_process(
     on_spawn: Optional[Callable[[int], None]] = None,
 ) -> tuple[Optional[int], str, str, Optional[str]]:
     live_preview = _live_preview_writer(live_preview_context)
-    with log_path.open("a", encoding="utf-8") as log_file:
-        log_file.write(log_header)
-        log_file.flush()
-        stdout_thread: Optional[threading.Thread] = None
-        stderr_thread: Optional[threading.Thread] = None
-        stdout_chunks: list[str] = []
-        stderr_chunks: list[str] = []
-        lock = threading.Lock()
-        try:
-            process = subprocess.Popen(
-                command,
-                cwd=repo_root,
-                shell=shell,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                start_new_session=True,
-            )
-        except OSError as exc:
-            error = f"failed to start process: {exc}"
-            log_file.write(f"\n[error]\n{error}\n")
-            return None, "", "", error
-        if on_spawn is not None:
+    try:
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(log_header)
+            log_file.flush()
+            stdout_thread: Optional[threading.Thread] = None
+            stderr_thread: Optional[threading.Thread] = None
+            stdout_chunks: list[str] = []
+            stderr_chunks: list[str] = []
+            lock = threading.Lock()
             try:
-                on_spawn(process.pid)
-            except Exception as exc:
+                process = subprocess.Popen(
+                    command,
+                    cwd=repo_root,
+                    shell=shell,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                error = f"failed to start process: {exc}"
+                log_file.write(f"\n[error]\n{error}\n")
+                return None, "", "", error
+            if on_spawn is not None:
+                try:
+                    on_spawn(process.pid)
+                except Exception as exc:
+                    with lock:
+                        log_file.write(
+                            f"\n[warning]\nfailed to report spawned process: {exc}\n"
+                        )
+                        log_file.flush()
+            error = None
+            try:
+                stdout_thread = threading.Thread(
+                    target=_pump_stream,
+                    args=(process.stdout, stdout_chunks, log_file, lock, live_preview),
+                )
+                stderr_thread = threading.Thread(
+                    target=_pump_stream,
+                    args=(process.stderr, stderr_chunks, log_file, lock, live_preview),
+                )
+                stdout_thread.start()
+                stderr_thread.start()
+                exit_code = process.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                exit_code, signal_name = _kill_process_group(process)
+                error = f"timeout after {timeout_seconds:g}s; killed with {signal_name}"
+            except KeyboardInterrupt:
+                if process.poll() is None:
+                    _kill_process_group(process)
+                error = "interrupted"
                 with lock:
-                    log_file.write(
-                        f"\n[warning]\nfailed to report spawned process: {exc}\n"
-                    )
+                    log_file.write(f"\n[error]\n{error}\n")
                     log_file.flush()
-        error = None
-        try:
-            stdout_thread = threading.Thread(
-                target=_pump_stream,
-                args=(process.stdout, stdout_chunks, log_file, lock, live_preview),
-            )
-            stderr_thread = threading.Thread(
-                target=_pump_stream,
-                args=(process.stderr, stderr_chunks, log_file, lock, live_preview),
-            )
-            stdout_thread.start()
-            stderr_thread.start()
-            exit_code = process.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
-            exit_code, signal_name = _kill_process_group(process)
-            error = f"timeout after {timeout_seconds:g}s; killed with {signal_name}"
-        except KeyboardInterrupt:
-            if process.poll() is None:
-                _kill_process_group(process)
-            error = "interrupted"
-            with lock:
-                log_file.write(f"\n[error]\n{error}\n")
-                log_file.flush()
-            raise
-        finally:
-            _close_stream_without_thread(process.stdout, stdout_thread)
-            _close_stream_without_thread(process.stderr, stderr_thread)
-            _join_thread(stdout_thread, timeout=2)
-            _join_thread(stderr_thread, timeout=2)
-        if error is not None:
-            with lock:
-                log_file.write(f"\n[error]\n{error}\n")
-                log_file.flush()
-        return exit_code, "".join(stdout_chunks), "".join(stderr_chunks), error
+                raise
+            finally:
+                _close_stream_without_thread(process.stdout, stdout_thread)
+                _close_stream_without_thread(process.stderr, stderr_thread)
+                _join_thread(stdout_thread, timeout=2)
+                _join_thread(stderr_thread, timeout=2)
+            if error is not None:
+                with lock:
+                    log_file.write(f"\n[error]\n{error}\n")
+                    log_file.flush()
+            return exit_code, "".join(stdout_chunks), "".join(stderr_chunks), error
+    finally:
+        if live_preview is not None:
+            live_preview.finish()
 
 
 def _print_job_start(
@@ -387,6 +456,22 @@ def _print_job_spawned(job_id: int, job_type: str, pid: int) -> None:
         file=sys.stderr,
         flush=True,
     )
+
+
+def _print_job_failure(
+    *,
+    job_id: int,
+    job_type: str,
+    error: Optional[str],
+    log_path: Path,
+) -> None:
+    detail = error or "job failed"
+    print(
+        f"[agent-runner] {job_type} job {job_id} failed: {detail}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(f"[agent-runner]   log: {log_path}", file=sys.stderr, flush=True)
 
 
 def _record_job_spawn(
@@ -417,22 +502,16 @@ def _live_preview_context(
 
 def _live_preview_writer(
     context: Optional[LivePreviewContext],
-) -> Optional[Callable[[str], None]]:
+) -> Optional[_LivePreviewRenderer]:
     if context is None or not _live_logs_enabled():
         return None
-    color_enabled = _resolve_color_enabled()
-
-    def write(text: str) -> None:
-        for line in _preview_lines(text):
-            print(
-                _format_live_preview_line(
-                    context, line, color_enabled=color_enabled
-                ),
-                file=sys.stderr,
-                flush=True,
-            )
-
-    return write
+    stream = sys.stderr
+    return _LivePreviewRenderer(
+        context,
+        color_enabled=_resolve_color_enabled(stream=stream),
+        spinner_enabled=_live_logs_spinner_enabled(stream),
+        stream=stream,
+    )
 
 
 def _preview_lines(text: str) -> list[str]:
@@ -467,11 +546,23 @@ def _truncate_visible(text: str, max_chars: int) -> str:
     return text[:keep].rstrip() + _TRUNCATION_MARKER
 
 
+def _visible_width(text: str) -> int:
+    return len(_ANSI_PATTERN.sub("", text))
+
+
 def _live_logs_enabled() -> bool:
     value = os.environ.get("AGENT_RUNNER_LIVE_LOGS")
     if value is None:
         return True
-    return value.strip().lower() not in _LIVE_LOGS_DISABLE_VALUES
+    normalized = value.strip().lower()
+    return normalized not in _LIVE_LOGS_DISABLE_VALUES
+
+
+def _live_logs_spinner_enabled(stream) -> bool:
+    value = os.environ.get("AGENT_RUNNER_LIVE_LOGS")
+    if value is not None and value.strip().lower() == _LIVE_LOGS_LINE_VALUE:
+        return False
+    return bool(getattr(stream, "isatty", lambda: False)())
 
 
 def _resolve_color_enabled(
@@ -500,7 +591,7 @@ def _pump_stream(
     chunks: list[str],
     log_file,
     lock: threading.Lock,
-    live_preview: Optional[Callable[[str], None]] = None,
+    live_preview: Optional[_LivePreviewRenderer] = None,
 ) -> None:
     if stream is None:
         return
@@ -512,7 +603,7 @@ def _pump_stream(
                 log_file.flush()
                 if live_preview is not None:
                     try:
-                        live_preview(text)
+                        live_preview.write(text)
                     except OSError:
                         pass
 
