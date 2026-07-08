@@ -74,13 +74,24 @@ class _LivePreviewRenderer:
             else:
                 print(preview, file=self._stream, flush=True)
 
-    def finish(self) -> None:
+    def finish(self, lock: Optional[threading.Lock] = None) -> None:
+        if lock is None:
+            self._finish_unlocked()
+            return
+        with lock:
+            self._finish_unlocked()
+
+    def _finish_unlocked(self) -> None:
         if not self._spinner_enabled or not self._active:
             return
-        self._stream.write("\r" + (" " * self._last_width) + "\r")
-        self._stream.flush()
-        self._active = False
-        self._last_width = 0
+        try:
+            self._stream.write("\r" + (" " * self._last_width) + "\r")
+            self._stream.flush()
+        except OSError:
+            pass
+        finally:
+            self._active = False
+            self._last_width = 0
 
     def _write_spinner(self, preview: str) -> None:
         frame = self._SPINNER_FRAMES[self._frame_index % len(self._SPINNER_FRAMES)]
@@ -360,6 +371,7 @@ def _run_process(
     on_spawn: Optional[Callable[[int], None]] = None,
 ) -> tuple[Optional[int], str, str, Optional[str]]:
     live_preview = _live_preview_writer(live_preview_context)
+    lock: Optional[threading.Lock] = None
     try:
         with log_path.open("a", encoding="utf-8") as log_file:
             log_file.write(log_header)
@@ -429,7 +441,7 @@ def _run_process(
             return exit_code, "".join(stdout_chunks), "".join(stderr_chunks), error
     finally:
         if live_preview is not None:
-            live_preview.finish()
+            live_preview.finish(lock)
 
 
 def _print_job_start(

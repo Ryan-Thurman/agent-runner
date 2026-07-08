@@ -246,6 +246,46 @@ class Phase4JobTests(unittest.TestCase):
 
         self.assertEqual(stderr.getvalue(), "codex coding: first line\n")
 
+    def test_live_preview_finish_ignores_closed_tty_cleanup(self):
+        class ClosingTTY(io.StringIO):
+            def isatty(self):
+                return True
+
+            def write(self, text):
+                if text.startswith("\r ") and text.endswith("\r"):
+                    raise OSError("closed")
+                return super().write(text)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            git_init_with_commit(repo)
+            script = root / "ok.py"
+            script.write_text("print('done')\n", encoding="utf-8")
+            log_path = root / "preview.log"
+
+            with mock.patch("sys.stderr", ClosingTTY()), mock.patch.dict(
+                os.environ, {"AGENT_RUNNER_COLOR": "never"}, clear=False
+            ):
+                exit_code, stdout, stderr, error = _run_process(
+                    [sys.executable, str(script)],
+                    repo_root=repo,
+                    timeout_seconds=5,
+                    shell=False,
+                    log_path=log_path,
+                    log_header="$ ok\n",
+                    live_preview_context=LivePreviewContext(
+                        subject="codex", verb="coding"
+                    ),
+                )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(stdout, "done\n")
+            self.assertEqual(stderr, "")
+            self.assertIsNone(error)
+            self.assertIn("done", log_path.read_text(encoding="utf-8"))
+
     def test_agent_job_success_writes_prompt_logs_output_and_shas(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
