@@ -93,18 +93,18 @@ does not.
   approving or requesting changes.
 - Include an idempotency marker containing plan path, phase number, review job
   id, and reviewed SHA.
-- Posting failures should record `review.github_post_failed` and continue by
-  default; the SQLite/log review result remains authoritative.
+- Posting failures should record `review.github_post_failed` and block the
+  phase before any review-triggered fix or close job runs.
 
 Acceptance Criteria:
 - Fake-`gh` tests assert approval, request-changes, and blocked-comment bodies
   are posted for the right review statuses.
-- Tests assert GitHub post failure records an event and does not change the
-  review outcome.
+- Tests assert GitHub post failure records an event and blocks before the
+  workflow moves on.
 - Tests assert the body includes all finding buckets and the idempotency
   marker.
-- Docs explain that GitHub posting mirrors `review.json` and is non-fatal by
-  default.
+- Docs explain that GitHub posting mirrors `review.json` and gates published PR
+  review progression.
 - `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v`
   pass.
 

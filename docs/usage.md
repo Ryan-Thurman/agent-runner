@@ -290,9 +290,11 @@ Current notes:
   posts a PR comment instead of a review decision. The body is mechanical: it
   includes the review status, summary, all finding buckets, the recommended fix
   prompt, and an idempotency marker with the plan path, phase number, review job
-  id, and reviewed SHA. GitHub posting is non-fatal by default; failures record
-  a `review.github_post_failed` event, while the SQLite state and `review.json`
-  remain the authoritative review result.
+  id, and reviewed SHA. GitHub posting is a workflow gate for published PRs:
+  failures record a `review.github_post_failed` event and block the phase before
+  the runner starts any review-triggered fix or close job. The normalized
+  `review.json` remains available in the phase log directory for retry or
+  operator recovery.
 - The closer uses the configured coder profile with write flags. It must update
   docs or record a `not doc-impacting` reason, set the phase plan marker to
   `Status: COMPLETE`, add an `Evidence:` line, and write the phase handoff.

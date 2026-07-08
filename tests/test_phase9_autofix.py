@@ -229,6 +229,18 @@ sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 branch = os.environ.get("GH_HEAD_REF_NAME", branch)
 sha = os.environ.get("GH_HEAD_REF_OID", sha)
 
+def write_post(kind, pr_url, action, body_file):
+    state_dir = os.environ.get("GH_STATE_DIR")
+    if state_dir:
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, f"github-{kind}.json"), "w", encoding="utf-8") as fh:
+            json.dump({"kind": kind, "prUrl": pr_url, "action": action}, fh)
+        with open(body_file, encoding="utf-8") as fh:
+            body = fh.read()
+        with open(os.path.join(state_dir, f"github-{kind}-body.md"), "w", encoding="utf-8") as fh:
+            fh.write(body)
+    raise SystemExit(0)
+
 if args[:2] == ["pr", "view"]:
     pr_url = "https://example.test/pull/1"
     if len(args) > 2 and not args[2].startswith("--"):
@@ -244,6 +256,15 @@ if args[:2] == ["pr", "view"]:
 if args[:2] == ["pr", "diff"]:
     subprocess.run(["git", "show", "--format=", "--patch", "HEAD"], check=True)
     raise SystemExit(0)
+
+if args[:2] == ["pr", "review"]:
+    action = "--approve" if "--approve" in args else "--request-changes"
+    body_file = args[args.index("--body-file") + 1]
+    write_post("review", args[2], action, body_file)
+
+if args[:2] == ["pr", "comment"]:
+    body_file = args[args.index("--body-file") + 1]
+    write_post("comment", args[2], "comment", body_file)
 
 if args[:2] == ["issue", "create"]:
     if os.environ.get("GH_ISSUE_FAIL"):

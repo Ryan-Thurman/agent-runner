@@ -221,6 +221,18 @@ def merge_marker(pr_url):
     return Path(state_dir) / f"merged-{safe}"
 
 
+def write_post(kind, pr_url, action, body_file):
+    if state_dir:
+        Path(state_dir).mkdir(parents=True, exist_ok=True)
+        with open(Path(state_dir) / f"github-{kind}.json", "w", encoding="utf-8") as fh:
+            json.dump({"kind": kind, "prUrl": pr_url, "action": action}, fh)
+        with open(body_file, encoding="utf-8") as fh:
+            body = fh.read()
+        with open(Path(state_dir) / f"github-{kind}-body.md", "w", encoding="utf-8") as fh:
+            fh.write(body)
+    raise SystemExit(0)
+
+
 if args[:2] == ["pr", "merge"] and state_dir:
     pr_url = args[2]
     subprocess.run(["git", "push", "-q", "origin", "HEAD:main"], check=True)
@@ -263,6 +275,15 @@ if args[:2] == ["pr", "view"]:
 if args[:2] == ["pr", "diff"]:
     subprocess.run(["git", "show", "--format=", "--patch", "HEAD"], check=True)
     raise SystemExit(0)
+
+if args[:2] == ["pr", "review"]:
+    action = "--approve" if "--approve" in args else "--request-changes"
+    body_file = args[args.index("--body-file") + 1]
+    write_post("review", args[2], action, body_file)
+
+if args[:2] == ["pr", "comment"]:
+    body_file = args[args.index("--body-file") + 1]
+    write_post("comment", args[2], "comment", body_file)
 
 print(f"unsupported gh args: {args}", file=sys.stderr)
 raise SystemExit(2)
