@@ -850,7 +850,7 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertIn("generated.txt", review_prompt)
             self.assertNotIn("fake coder completed", review_prompt)
 
-    def test_published_pr_pass_posts_approval_review_body(self):
+    def test_published_pr_pass_skips_github_review_decision(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -887,20 +887,15 @@ class Phase6LoopTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(phase_row(home, repo)["status"], "COMPLETE")
-            post = json.loads((gh_state / "github-review.json").read_text())
-            self.assertEqual(post["action"], "--approve")
-            self.assertEqual(post["prUrl"], "https://example.test/pull/1")
-            body = (gh_state / "github-review-body.md").read_text(encoding="utf-8")
-            self.assertIn("# Phase 6 Review: PASS", body)
-            self.assertIn("summary", body.lower())
-            self.assertIn("accepted", body)
-            self.assertIn("### blocking", body)
-            self.assertIn("### shouldFix", body)
-            self.assertIn("### nitpick", body)
-            self.assertIn("plan=docs/plan.md", body)
-            self.assertIn("phase=6", body)
-            self.assertIn(f"reviewed_sha={published_sha}", body)
-            self.assertRegex(body, r"review_job=\d+")
+            self.assertFalse((gh_state / "github-review.json").exists())
+            self.assertFalse((gh_state / "github-comment.json").exists())
+            review = json.loads(
+                (Path(phase_row(home, repo)["log_dir"]) / "review.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(review["status"], "PASS")
+            self.assertEqual(published_sha, phase_row(home, repo)["published_sha"])
 
     def test_published_pr_requested_updates_posts_request_changes_body(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1010,7 +1005,7 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertIn(f"reviewed_sha={published_sha}", body)
             self.assertRegex(body, r"review_job=\d+")
 
-    def test_github_post_failure_blocks_before_moving_on(self):
+    def test_pass_review_skips_github_post_failure_and_moves_on(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -1046,19 +1041,16 @@ class Phase6LoopTests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("could not be posted to GitHub", result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
             phase = phase_row(home, repo)
-            self.assertEqual(phase["status"], "BLOCKED")
+            self.assertEqual(phase["status"], "COMPLETE")
             self.assertFalse((gh_state / "github-review.json").exists())
             github_events = [
                 event
                 for event in events(home, phase["id"])
                 if event["event_type"] == "review.github_post_failed"
             ]
-            self.assertEqual(len(github_events), 1)
-            event_data = json.loads(github_events[0]["data_json"])
-            self.assertIn("simulated gh post failure", event_data["error"])
+            self.assertEqual(github_events, [])
             review = json.loads(
                 (Path(phase["log_dir"]) / "review.json").read_text(encoding="utf-8")
             )
@@ -1068,10 +1060,9 @@ class Phase6LoopTests(unittest.TestCase):
                 for event in events(home, phase["id"])
                 if event["event_type"] == "phase.blocked"
             ]
-            self.assertEqual(len(phase_events), 1)
-            self.assertIn("review GitHub post failed", phase_events[0]["message"])
+            self.assertEqual(phase_events, [])
             phase_jobs = jobs(home, phase["id"])
-            self.assertNotIn("CLOSE_PHASE", [job["type"] for job in phase_jobs])
+            self.assertIn("CLOSE_PHASE", [job["type"] for job in phase_jobs])
 
     def test_github_request_changes_post_failure_blocks_before_fixing(self):
         with tempfile.TemporaryDirectory() as tmp:
