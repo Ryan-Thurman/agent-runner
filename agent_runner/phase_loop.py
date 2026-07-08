@@ -953,6 +953,9 @@ def _post_review_to_github(
     repo_root: Path,
     log_dir: Path,
 ) -> None:
+    if review["status"] == "PASS":
+        return
+
     pr_url = phase["pr_url"]
     reviewed_sha = phase["published_sha"]
     if not pr_url or not reviewed_sha:
@@ -1082,8 +1085,6 @@ def _run_gh_review_post(
     status = review["status"]
     if status == "BLOCKED":
         command = ["gh", "pr", "comment", pr_url, "--body-file", str(body_path)]
-    elif status == "PASS":
-        command = ["gh", "pr", "review", pr_url, "--approve", "--body-file", str(body_path)]
     else:
         command = [
             "gh",

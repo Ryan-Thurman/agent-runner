@@ -86,21 +86,23 @@ does not.
 
 - After `review.json` is extracted for a published PR, render it into a
   whole-PR Markdown review body without adding new reasoning.
-- For `PASS`, call `gh pr review <url> --approve --body-file <file>`.
+- For `PASS`, do not post a GitHub approval; the runner can close and merge
+  the reviewed PR itself when `mergeOnClose=true`.
 - For requested updates, call
   `gh pr review <url> --request-changes --body-file <file>`.
 - For `BLOCKED`, call `gh pr comment <url> --body-file <file>` instead of
   approving or requesting changes.
 - Include an idempotency marker containing plan path, phase number, review job
   id, and reviewed SHA.
-- Posting failures should record `review.github_post_failed` and block the
-  phase before any review-triggered fix or close job runs.
+- Posting failures for non-passing reviews should record
+  `review.github_post_failed` and block the phase before any review-triggered
+  fix runs.
 
 Acceptance Criteria:
-- Fake-`gh` tests assert approval, request-changes, and blocked-comment bodies
-  are posted for the right review statuses.
-- Tests assert GitHub post failure records an event and blocks before the
-  workflow moves on.
+- Fake-`gh` tests assert PASS skips GitHub posting while request-changes and
+  blocked-comment bodies are posted for the right review statuses.
+- Tests assert non-passing GitHub post failure records an event and blocks
+  before the workflow moves on.
 - Tests assert the body includes all finding buckets and the idempotency
   marker.
 - Docs explain that GitHub posting mirrors `review.json` and gates published PR

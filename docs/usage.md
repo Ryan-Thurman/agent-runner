@@ -284,17 +284,18 @@ Current notes:
   and the `claude -p --output-format json` envelope (the document is read from
   its `result` field). Output with no parseable JSON document blocks the phase
   and leaves the raw output in `review.log`.
-- With `autoCommit=true`, the runner mirrors normalized `review.json` back to
-  the published PR after extraction. `PASS` posts a whole-PR approval review,
-  `CHANGES_REQUESTED` posts a whole-PR request-changes review, and `BLOCKED`
-  posts a PR comment instead of a review decision. The body is mechanical: it
-  includes the review status, summary, all finding buckets, the recommended fix
-  prompt, and an idempotency marker with the plan path, phase number, review job
-  id, and reviewed SHA. GitHub posting is a workflow gate for published PRs:
+- With `autoCommit=true`, the runner mirrors non-passing normalized
+  `review.json` results back to the published PR after extraction. `PASS` does
+  not post a GitHub approval; it advances directly to `CLOSE_PHASE`, and
+  `mergeOnClose=true` merges after close validation. `CHANGES_REQUESTED` posts
+  a whole-PR request-changes review, and `BLOCKED` posts a PR comment instead
+  of a review decision. The body is mechanical: it includes the review status,
+  summary, all finding buckets, the recommended fix prompt, and an idempotency
+  marker with the plan path, phase number, review job id, and reviewed SHA.
+  GitHub posting is a workflow gate for non-passing published PR reviews:
   failures record a `review.github_post_failed` event and block the phase before
-  the runner starts any review-triggered fix or close job. The normalized
-  `review.json` remains available in the phase log directory for retry or
-  operator recovery.
+  the runner starts any review-triggered fix. The normalized `review.json`
+  remains available in the phase log directory for retry or operator recovery.
 - The closer uses the configured coder profile with write flags. It must update
   docs or record a `not doc-impacting` reason, set the phase plan marker to
   `Status: COMPLETE`, add an `Evidence:` line, and write the phase handoff.
