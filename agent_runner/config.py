@@ -235,7 +235,21 @@ def detect_default_checks(repo_root: Path) -> list[str]:
 
 
 def sample_config_for_checks(checks: list[str]) -> str:
-    return SAMPLE_CONFIG_TEMPLATE.format(checks=_format_checks(checks))
+    return SAMPLE_CONFIG_TEMPLATE.format(
+        checks=_format_checks(checks),
+        claude_allowed_tools=claude_write_allowed_tools(checks),
+    )
+
+
+def claude_write_allowed_tools(checks: list[str]) -> str:
+    """Bash allowlist for headless claude write roles: git/gh plus the leading
+    command of each configured check, as =-joined --allowedTools rules."""
+    commands = ["git", "gh"]
+    for check in checks:
+        tokens = check.split()
+        if tokens and tokens[0] not in commands:
+            commands.append(tokens[0])
+    return ",".join(f"Bash({command}:*)" for command in commands)
 
 
 def _repo_has_python_files(repo_root: Path) -> bool:
@@ -446,12 +460,15 @@ SAMPLE_CONFIG_TEMPLATE = """{{
     // space-separated form ("--disallowedTools", "Edit,Write") swallows the
     // positional prompt the runner appends last. Always use the =-joined form.
     // Write roles run headless (-p): unmatched permission prompts are DENIED,
-    // not asked, so writers use --dangerously-skip-permissions to run
-    // builds/tests/git. Reviewers stay read-only via disallowedTools.
+    // not asked, so writers pre-allow the Bash commands they need (git/gh and
+    // the configured checks) alongside acceptEdits. Widen the allowlist if a
+    // fixer job dies on a denied command; --dangerously-skip-permissions works
+    // as a last resort but removes all gating on autonomous write jobs.
+    // Reviewers stay read-only via disallowedTools.
     "claude-opus": {{
       "command": "claude",
       "promptArgs": ["--model", "claude-opus-4-8", "-p"],
-      "writeFlags": ["--dangerously-skip-permissions"],
+      "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools={claude_allowed_tools}"],
       "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"
@@ -459,7 +476,7 @@ SAMPLE_CONFIG_TEMPLATE = """{{
     "claude-sonnet": {{
       "command": "claude",
       "promptArgs": ["--model", "claude-sonnet-5", "-p"],
-      "writeFlags": ["--dangerously-skip-permissions"],
+      "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools={claude_allowed_tools}"],
       "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"

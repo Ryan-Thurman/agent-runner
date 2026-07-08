@@ -11,7 +11,7 @@
     "claude": {
       "command": "claude",
       "promptArgs": ["-p"],
-      "writeFlags": ["--permission-mode", "acceptEdits"],
+      "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools=Bash(git:*),Bash(gh:*),Bash(python3:*)"],
       "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "use a sonnet 5 or opus agent for this PR. If its simple code never use the opus agent. Reserve opus for complex PR reviews",
       "outputCapture": "stdout"

@@ -81,16 +81,16 @@ Minimum `.agent-runner.json` shape:
     "claude-opus": {
       "command": "claude",
       "promptArgs": ["--model", "claude-opus-4-8", "-p"],
-      "writeFlags": ["--permission-mode", "acceptEdits"],
-      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools=Bash(git:*),Bash(gh:*),Bash(python3:*)"],
+      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"
     },
     "claude-sonnet": {
       "command": "claude",
       "promptArgs": ["--model", "claude-sonnet-5", "-p"],
-      "writeFlags": ["--permission-mode", "acceptEdits"],
-      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools=Bash(git:*),Bash(gh:*),Bash(python3:*)"],
+      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"
     }

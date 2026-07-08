@@ -137,7 +137,7 @@ Minimum config shape:
     "claude-opus": {
       "command": "claude",
       "promptArgs": ["--model", "claude-opus-4-8", "-p"],
-      "writeFlags": ["--dangerously-skip-permissions"],
+      "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools=Bash(git:*),Bash(gh:*),Bash(python3:*)"],
       "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"
@@ -145,7 +145,7 @@ Minimum config shape:
     "claude-sonnet": {
       "command": "claude",
       "promptArgs": ["--model", "claude-sonnet-5", "-p"],
-      "writeFlags": ["--dangerously-skip-permissions"],
+      "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools=Bash(git:*),Bash(gh:*),Bash(python3:*)"],
       "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"
@@ -187,6 +187,15 @@ Current notes:
   attempts total; the count is derived from the `AUTOFIX` jobs recorded for the
   phase, so restarting `run` (including the automatic post-merge restart) does
   not reset the budget.
+- When the fixer gives up — the budget is exhausted or an `AUTOFIX` job fails —
+  the runner escalates by filing a GitHub issue on the repo (`gh issue create`)
+  containing the phase, the blocking message, the give-up reason, and the
+  newest phase log tail (the fixer's diagnosis), so a human can review and fix
+  it. A successful post is recorded as a `phase.autofix_escalated` event, which
+  also prevents duplicate issues for the same blocking message across restarts.
+  A failed post (no `gh`, no remote, not authenticated) only prints a warning
+  and is retried on the next run. The issue body is also written to
+  `autofix-escalation.md` in the phase log directory.
 - Agent CLI flag pitfalls the runner cannot detect for you: the runner appends
   the prompt as the final positional argument, and the `claude` CLI's
   `--allowedTools`/`--disallowedTools` options are variadic — written as
@@ -194,9 +203,14 @@ Current notes:
   prompt and the job dies with "Input must be provided". Always use the
   `=`-joined form (`"--disallowedTools=Edit,Write"`). In headless `-p` mode
   there is no one to answer permission prompts, so a write-role `claude` under
-  `--permission-mode acceptEdits` aborts on the first Bash command outside its
-  allowlist; write roles should use `--dangerously-skip-permissions` (review
-  and checks still gate the result). Similarly, codex's `workspace-write`
+  bare `--permission-mode acceptEdits` aborts on the first Bash command outside
+  its allowlist. Write roles should therefore pre-allow the commands they are
+  expected to run — `init` generates
+  `--allowedTools=Bash(git:*),Bash(gh:*),...` covering git, gh, and the leading
+  command of each configured check. If a fixer job still dies on a denied
+  command, add that command to the allowlist; `--dangerously-skip-permissions`
+  also works but removes all permission gating from an autonomous write agent,
+  so treat it as a last resort. Similarly, codex's `workspace-write`
   sandbox disables network by default, which breaks dependency fetches and
   pushes; the `-c sandbox_workspace_write.network_access=true` override keeps
   the filesystem sandbox while restoring network.

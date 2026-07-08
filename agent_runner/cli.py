@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -23,11 +24,13 @@ from .phase_loop import (
     PhaseLoopResult,
     RESTART_COUNT_ENV,
     extract_pr_number,
+    _count_jobs,
     _git_add_all,
     _publish_instructions,
     _record_phase_published,
     _profiles_for_role,
     _run_agent_job_with_fallbacks,
+    _single_line,
     _verify_published_phase,
     reconcile_manually_merged_phase_prs,
     restart_count,
@@ -316,6 +319,18 @@ def _run_autofix_loop(
         # fixer attempts on the same phase.
         used_attempts = _autofix_attempt_count(db, phase["id"])
         if used_attempts >= config.auto_fix_attempts:
+            _post_autofix_escalation_issue(
+                db,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase=phase,
+                repo_root=repo_root,
+                blocking_message=blocking_message,
+                reason=(
+                    "auto-fix budget exhausted "
+                    f"({used_attempts}/{config.auto_fix_attempts} attempts used)"
+                ),
+            )
             return result
 
         paused = _autofix_paused_result_if_needed(db, project_id)
@@ -352,6 +367,18 @@ def _run_autofix_loop(
             timeout_seconds=config.timeout_minutes * 60,
         )
         if fix_result.status != "SUCCEEDED":
+            _post_autofix_escalation_issue(
+                db,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase=phase,
+                repo_root=repo_root,
+                blocking_message=blocking_message,
+                reason=(
+                    f"auto-fix attempt {attempt}/{config.auto_fix_attempts} "
+                    f"failed: {fix_result.error or 'agent job failed'}"
+                ),
+            )
             return result
 
         phase = _prepare_successful_autofix_resume(
@@ -434,11 +461,117 @@ def _prepare_successful_autofix_resume(
 
 
 def _autofix_attempt_count(db, phase_id: int) -> int:
-    row = db.execute(
-        "SELECT COUNT(*) AS count FROM jobs WHERE phase_id = ? AND type = 'AUTOFIX'",
+    return _count_jobs(db, phase_id, "AUTOFIX")
+
+
+def _post_autofix_escalation_issue(
+    db,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase,
+    repo_root: Path,
+    blocking_message: str,
+    reason: str,
+) -> None:
+    """File a GitHub issue when the auto-fixer gives up on a blocked phase, so
+    a human can review the fixer's diagnosis. Best-effort: a failed post only
+    warns (and is retried on the next run); success is recorded as a
+    phase.autofix_escalated event, which also dedupes reposts of the same
+    blocking message across runs."""
+    if _autofix_escalation_already_posted(db, phase["id"], blocking_message):
+        return
+
+    title = (
+        f"[agent-runner] phase {phase['phase_number']} blocked: "
+        f"{_single_line(blocking_message, limit=80)}"
+    )
+    log_dir = Path(phase["log_dir"])
+    body = (
+        "The auto-fixer could not unblock this phase.\n\n"
+        f"- Phase: {phase['phase_number']} — {phase['title']}\n"
+        f"- Reason: {reason}\n"
+        + (f"- Branch: `{phase['branch_name']}`\n" if phase["branch_name"] else "")
+        + (f"- PR: {phase['pr_url']}\n" if phase["pr_url"] else "")
+        + "\nBlocking event message:\n\n"
+        f"> {blocking_message}\n\n"
+        "Newest phase log tail:\n\n"
+        f"{_newest_phase_log_tail(log_dir)}\n\n"
+        "Posted automatically by agent-runner. After fixing the underlying "
+        "problem, resume with `agent-runner unblock` and close this issue.\n"
+    )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    body_path = log_dir / "autofix-escalation.md"
+    body_path.write_text(body, encoding="utf-8")
+
+    try:
+        gh_result = subprocess.run(
+            ["gh", "issue", "create", "--title", title, "--body-file", str(body_path)],
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        _warn_escalation_failed("gh is not installed or not on PATH")
+        return
+    if gh_result.returncode != 0:
+        detail = (
+            gh_result.stderr.strip()
+            or gh_result.stdout.strip()
+            or "gh issue create failed"
+        )
+        _warn_escalation_failed(detail)
+        return
+
+    issue_url = gh_result.stdout.strip().splitlines()[-1] if gh_result.stdout.strip() else ""
+    print(
+        f"[agent-runner] posted blocked-phase issue: {issue_url}",
+        file=sys.stderr,
+        flush=True,
+    )
+    record_event(
+        db,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        event_type="phase.autofix_escalated",
+        message=(
+            f"posted blocked-phase issue for phase {phase['phase_number']}: "
+            f"{issue_url}"
+        ),
+        data={
+            "issueUrl": issue_url,
+            "blockingMessage": blocking_message,
+            "reason": reason,
+        },
+    )
+
+
+def _autofix_escalation_already_posted(db, phase_id: int, blocking_message: str) -> bool:
+    rows = db.execute(
+        """
+        SELECT data_json FROM events
+        WHERE phase_id = ? AND event_type = 'phase.autofix_escalated'
+        """,
         (phase_id,),
-    ).fetchone()
-    return int(row["count"])
+    ).fetchall()
+    for row in rows:
+        try:
+            data = json.loads(row["data_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if data.get("blockingMessage") == blocking_message:
+            return True
+    return False
+
+
+def _warn_escalation_failed(detail: str) -> None:
+    print(
+        f"[agent-runner] warning: could not post blocked-phase issue: {detail}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _blocked_phase_for_plan(db, plan_id: int):
