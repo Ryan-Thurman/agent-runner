@@ -400,14 +400,16 @@ Expected success flow:
 [agent-runner] phase <n> complete; plan complete
 ```
 
-The `[codex coding]:`, `[checks checking]:`, and similar previews show the
-latest child-process output on one rolling line by default. The rolling preview
-uses carriage-return/clear-line control sequences, including when stderr is
-redirected. Set `AGENT_RUNNER_LIVE_LOGS=lines` for readable newline-delimited
-previews in captured stderr or CI logs. Long lines end with `... [truncated]`
-in the preview only. The complete stdout/stderr remains in the phase `.log`
-files under `~/.agent-runner/logs/`, and agent output capture files keep their
-exact configured contents.
+`run` prints each command it launches (`[agent-runner] $ <cmd>`) and shows
+`[codex coding]:`, `[checks checking]:`, and similar previews of the latest
+child-process output. The preview animates on one rolling line by default
+(everywhere, including redirected stderr), fit to the terminal width so it
+overwrites a single row in place.
+Set `AGENT_RUNNER_LIVE_LOGS=lines` for readable newline previews in CI/logs or
+`AGENT_RUNNER_LIVE_LOGS=0` to disable them. Long lines end with `... [truncated]`
+in the preview only. The complete stdout/stderr remains in the phase `.log` files
+under `~/.agent-runner/logs/`, and agent output capture files keep their exact
+configured contents.
 
 With `autoCommit=true`, close-phase changes are committed with:
 
@@ -560,19 +562,26 @@ with labels derived from job metadata:
 - `CLOSE_PHASE` with the closer profile prints `[<profile> closing]: ...`.
 - `RUN_CHECKS` prints `[checks checking]: ...`.
 
-Previews are not a substitute for logs. By default, the preview uses one
-rolling line and may include carriage-return/clear-line control sequences in
-redirected stderr. Set `AGENT_RUNNER_LIVE_LOGS=lines` for readable
-newline-delimited previews in captured stderr or CI logs. Previews may be
-truncated and colored, while the log files are complete and uncolored child
-output. Set
-`AGENT_RUNNER_LIVE_LOGS=0` to disable previews:
+Previews are not a substitute for logs. By default they animate on one rolling
+line (fit to the terminal width so the carriage-return/clear-line sequence
+overwrites a single physical row), including when stderr is redirected. Set
+`AGENT_RUNNER_LIVE_LOGS=lines` for readable newline-delimited previews in
+captured stderr or CI logs. Previews may be truncated and colored, while the log
+files are complete and uncolored child output. Disable previews for quiet
+automation:
 
 ```sh
 AGENT_RUNNER_LIVE_LOGS=0 python3 -m agent_runner run
 ```
 
-Set `AGENT_RUNNER_LIVE_LOGS=lines` to force newline-delimited preview mode.
+Set `AGENT_RUNNER_LIVE_LOGS=lines` to force newline-delimited preview mode, or
+`AGENT_RUNNER_LIVE_LOGS=rolling` to force carriage-return rolling previews in
+an interactive terminal.
+
+To watch the rolling animation by eye, run `python3 scripts/verify_live_logs.py`
+in a real terminal; it streams a slow fake agent so you can confirm the preview
+updates in place. The automated coverage (including a real-pty width guard) runs
+as part of `python3 -m unittest discover -s tests`.
 
 Color is controlled by `AGENT_RUNNER_COLOR=auto|always|never`. The default
 `auto` emits ANSI color only when stderr is a TTY and `NO_COLOR` is not set.

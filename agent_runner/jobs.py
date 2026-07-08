@@ -1,10 +1,13 @@
 import os
 import re
+import shlex
+import shutil
 import signal
 import sqlite3
 import subprocess
 import sys
 import threading
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -35,6 +38,7 @@ _COLOR_RESET = "\033[0m"
 _COLOR_PREFIX = "\033[36m"
 _LIVE_LOGS_DISABLE_VALUES = {"0", "false", "no", "off"}
 _LIVE_LOGS_LINE_VALUE = "lines"
+_LIVE_LOGS_ROLLING_VALUE = "rolling"
 
 
 @dataclass(frozen=True)
@@ -60,14 +64,27 @@ class _LivePreviewRenderer:
         self._active = False
 
     def write(self, text: str) -> None:
+        max_chars = self._effective_max_chars()
         for line in _preview_lines(text):
             preview = _format_live_preview_line(
-                self._context, line, color_enabled=self._color_enabled
+                self._context,
+                line,
+                color_enabled=self._color_enabled,
+                max_chars=max_chars,
             )
             if self._line_mode:
                 print(preview, file=self._stream, flush=True)
             else:
                 self._write_rolling(preview)
+
+    def _effective_max_chars(self) -> int:
+        # Line mode goes to logs/CI, so a generous fixed cap is fine. Rolling
+        # mode overwrites one physical row with \r\x1b[2K, so the preview must
+        # fit the terminal width; anything wider wraps and defeats the animation.
+        if self._line_mode:
+            return self._context.max_chars
+        width = _terminal_width(self._stream)
+        return max(1, min(self._context.max_chars, width - 1))
 
     def finish(self, lock: Optional[threading.Lock] = None) -> None:
         if lock is None:
@@ -162,6 +179,7 @@ def run_agent_job(
             shell=False,
             log_path=log_path,
             log_header="$ " + " ".join(argv) + "\n",
+            command_display=shlex.join(argv[:-1]),
             live_preview_context=_live_preview_context(job_type, role, profile.name),
             on_spawn=lambda pid: _record_job_spawn(
                 connection, job["id"], job_type, pid
@@ -266,6 +284,7 @@ def run_checks_job(
                 shell=True,
                 log_path=log_path,
                 log_header=f"$ {command}\n",
+                command_display=command,
                 live_preview_context=_live_preview_context(
                     "RUN_CHECKS", "checks", "checks"
                 ),
@@ -355,10 +374,15 @@ def _run_process(
     shell: bool,
     log_path: Path,
     log_header: str,
+    command_display: Optional[str] = None,
     live_preview_context: Optional[LivePreviewContext] = None,
     on_spawn: Optional[Callable[[int], None]] = None,
 ) -> tuple[Optional[int], str, str, Optional[str]]:
     live_preview = _live_preview_writer(live_preview_context)
+    if live_preview is not None and command_display:
+        # Print the command on its own line so it persists while the rolling
+        # preview animates (and is later cleared) on the line below it.
+        print(f"[agent-runner] $ {command_display}", file=sys.stderr, flush=True)
     lock: Optional[threading.Lock] = None
     try:
         with log_path.open("a", encoding="utf-8") as log_file:
@@ -503,13 +527,16 @@ def _live_preview_context(
 def _live_preview_writer(
     context: Optional[LivePreviewContext],
 ) -> Optional[_LivePreviewRenderer]:
-    if context is None or not _live_logs_enabled():
+    if context is None:
         return None
     stream = sys.stderr
+    mode = _live_logs_mode()
+    if mode is None:
+        return None
     return _LivePreviewRenderer(
         context,
         color_enabled=_resolve_color_enabled(stream=stream),
-        line_mode=_live_logs_line_mode(),
+        line_mode=mode == _LIVE_LOGS_LINE_VALUE,
         stream=stream,
     )
 
@@ -524,11 +551,12 @@ def _format_live_preview_line(
     text: str,
     *,
     color_enabled: bool,
+    max_chars: int,
 ) -> str:
     prefix = f"[{context.subject} {context.verb}]:"
     body = text.rstrip("\r\n")
     plain = prefix if not body.strip() else f"{prefix} {body}"
-    truncated = _truncate_visible(plain, context.max_chars)
+    truncated = _truncate_visible(plain, max_chars)
     if not color_enabled:
         return truncated
     if truncated == prefix:
@@ -537,26 +565,64 @@ def _format_live_preview_line(
     return truncated.replace(prefix, colored_prefix, 1)
 
 
-def _truncate_visible(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
+def _char_width(char: str) -> int:
+    # Combining marks and zero-width formatting/control glyphs advance the cursor
+    # by nothing; East-Asian wide/fullwidth glyphs and most emoji take two cells.
+    if unicodedata.combining(char) or unicodedata.category(char) in {
+        "Mn",
+        "Me",
+        "Cf",
+        "Cc",
+    }:
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+
+
+def _display_width(text: str) -> int:
+    return sum(_char_width(char) for char in text)
+
+
+def _cut_to_width(text: str, max_cols: int) -> str:
+    used = 0
+    for index, char in enumerate(text):
+        width = _char_width(char)
+        if used + width > max_cols:
+            return text[:index]
+        used += width
+    return text
+
+
+def _truncate_visible(text: str, max_cols: int) -> str:
+    # max_cols is a terminal-column budget, so measure by rendered display width
+    # (wide/zero-width glyphs) rather than code-point count; otherwise a preview
+    # can still overflow one physical row and reintroduce the wrapping bug.
+    if _display_width(text) <= max_cols:
         return text
-    if max_chars <= len(_TRUNCATION_MARKER):
-        return _TRUNCATION_MARKER[:max_chars]
-    keep = max_chars - len(_TRUNCATION_MARKER)
-    return text[:keep].rstrip() + _TRUNCATION_MARKER
+    marker_cols = _display_width(_TRUNCATION_MARKER)
+    if max_cols <= marker_cols:
+        return _cut_to_width(_TRUNCATION_MARKER, max_cols)
+    return _cut_to_width(text, max_cols - marker_cols).rstrip() + _TRUNCATION_MARKER
 
 
-def _live_logs_enabled() -> bool:
+def _terminal_width(stream) -> int:
+    try:
+        return os.get_terminal_size(stream.fileno()).columns
+    except (OSError, ValueError, AttributeError):
+        # StringIO/pipes have no real fileno; fall back to COLUMNS or 80.
+        return shutil.get_terminal_size((80, 24)).columns
+
+
+def _live_logs_mode() -> Optional[str]:
+    # Rolling (the width-fit one-line animation) is the default everywhere.
+    # Opt into `lines` for readable captured/CI stderr, or 0/false/no/off to
+    # silence previews entirely.
     value = os.environ.get("AGENT_RUNNER_LIVE_LOGS")
-    if value is None:
-        return True
-    normalized = value.strip().lower()
-    return normalized not in _LIVE_LOGS_DISABLE_VALUES
-
-
-def _live_logs_line_mode() -> bool:
-    value = os.environ.get("AGENT_RUNNER_LIVE_LOGS")
-    return value is not None and value.strip().lower() == _LIVE_LOGS_LINE_VALUE
+    normalized = value.strip().lower() if value is not None else ""
+    if normalized in _LIVE_LOGS_DISABLE_VALUES:
+        return None
+    if normalized == _LIVE_LOGS_LINE_VALUE:
+        return _LIVE_LOGS_LINE_VALUE
+    return _LIVE_LOGS_ROLLING_VALUE
 
 
 def _resolve_color_enabled(

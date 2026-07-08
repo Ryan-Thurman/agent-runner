@@ -137,34 +137,35 @@ rules.
 
 ## Live Job Previews
 
-`run` streams a compact bounded preview of agent and check output to stderr
-while jobs are active. By default, the preview uses one rolling line that shows
-the latest child output:
+`run` prints each command it launches to stderr and then streams a compact,
+bounded preview of that command's child output while it is active. In an
+interactive terminal the preview animates on a single rolling line — the latest
+child output overwrites the previous line in place rather than scrolling past:
 
 ```text
+[agent-runner] $ codex --write-flag
 [codex coding]: edited agent_runner/jobs.py
-[checks checking]: python3 -m unittest discover -s tests -v
-[claude-opus reviewing]: {"status": "PASS", ...}
+[agent-runner] $ python3 -m unittest discover -s tests -v
+[checks checking]: ..........
 ```
 
-The default rolling preview uses carriage-return/clear-line control sequences,
-including when stderr is redirected. Use `AGENT_RUNNER_LIVE_LOGS=lines` for
-readable newline-delimited previews in captured stderr or CI logs. The preview
-is for terminal visibility only. Long lines are truncated in the preview with
-`... [truncated]`, but the full stdout/stderr still lands in the phase `.log`
-file, and profile output capture files remain unchanged. Stdout stays reserved
-for machine-readable command payloads such as `status` JSON and `logs` output.
+The complete stdout/stderr always lands in the phase log files under
+`~/.agent-runner/logs/`; profile output capture files remain unchanged; and
+stdout stays reserved for machine-readable command payloads such as `status`
+JSON and `logs` output.
 
-Disable previews for quiet automation:
+The rolling preview is **fit to the terminal width** (and truncated with
+`... [truncated]`) so its carriage-return/clear-line control sequence overwrites
+exactly one physical row — a preview wider than the terminal would wrap and leave
+stale rows on screen.
 
-```sh
-AGENT_RUNNER_LIVE_LOGS=0 python3 -m agent_runner run
-```
-
-Use newline-delimited preview mode for readable captured stderr or CI logs:
+Rolling is the default everywhere, including when stderr is redirected. For
+captured stderr or CI logs, opt into newline-delimited previews so the log stays
+free of control sequences:
 
 ```sh
-AGENT_RUNNER_LIVE_LOGS=lines python3 -m agent_runner run
+AGENT_RUNNER_LIVE_LOGS=lines python3 -m agent_runner run   # newline-delimited previews
+AGENT_RUNNER_LIVE_LOGS=0 python3 -m agent_runner run       # disable previews (quiet automation)
 ```
 
 Color is controlled with `AGENT_RUNNER_COLOR=auto|always|never`. The default
