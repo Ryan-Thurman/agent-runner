@@ -956,7 +956,7 @@ def _post_review_to_github(
     pr_url = phase["pr_url"]
     reviewed_sha = phase["published_sha"]
     if not pr_url or not reviewed_sha:
-        message = "review GitHub post skipped because PR metadata is missing"
+        message = "review GitHub post failed because PR metadata is missing"
         _record_github_post_failed(
             connection,
             project_id=project_id,
@@ -987,19 +987,7 @@ def _post_review_to_github(
             review=review,
             body_path=body_path,
         )
-    except OSError as exc:
-        message = f"review GitHub post failed for phase {phase['phase_number']}"
-        _record_github_post_failed(
-            connection,
-            project_id=project_id,
-            plan_id=plan_id,
-            phase=phase,
-            source_job=source_job,
-            message=message,
-            data={"error": str(exc), "bodyPath": str(body_path), "prUrl": pr_url},
-        )
-        raise JobError(f"{message}: {exc}") from exc
-    except JobError as exc:
+    except (OSError, JobError) as exc:
         message = f"review GitHub post failed for phase {phase['phase_number']}"
         _record_github_post_failed(
             connection,
