@@ -1,8 +1,8 @@
 # Using agent-runner
 
-This guide describes the runner as it exists after Phase 8. It is ready for
-dogfooding the implementation, check, review, retry-limited fix, close-phase,
-pause/resume, crash recovery, and log-tailing loop.
+This guide describes the current runner. It is ready for dogfooding the
+implementation, check, review, retry-limited fix, close-phase, pause/resume,
+crash recovery, log-tailing, and roadmap-to-plan loops.
 
 ## Current Loop
 
@@ -198,11 +198,12 @@ Current notes:
 - `promptPrefix` is optional. When set, the runner prepends it to every prompt
   sent to that agent profile.
 - `roleFallbacks` is optional and maps a role to an ordered list of agent
-  profiles. When a coder IMPLEMENT/FIX job or reviewer REVIEW job fails with a
-  quota/rate-limit error (429, "usage limit", "quota exceeded", and similar),
-  the runner reruns the job with the next profile and records a
-  `<jobtype>.fallback` event such as `implement.fallback`, `fix.fallback`, or
-  `review.fallback`. Any other failure blocks the phase without falling back.
+  profiles. When a coder IMPLEMENT/FIX job, planner ROADMAP_PLAN job, or
+  reviewer REVIEW job fails with a quota/rate-limit error (429, "usage limit",
+  "quota exceeded", and similar), the runner reruns the job with the next
+  profile and records a `<jobtype>.fallback` event such as
+  `implement.fallback`, `roadmap_plan.fallback`, `fix.fallback`, or
+  `review.fallback`. Any other failure blocks the job without falling back.
   Other roles are accepted but warned about. The sample config includes an
   `antigravity` profile (the `agy` CLI) suitable as a fallback on a separate
   quota pool.
@@ -308,6 +309,33 @@ Useful statuses while dogfooding:
 - `MERGING`: close commit landed; ready to retry the phase PR merge.
 - `BLOCKED`: implementation failed or the phase needs human intervention.
 - `COMPLETE`: done; the loop skips it.
+
+## Roadmap Planning
+
+`agent-runner` can ask a configured agent to translate unfinished roadmap items
+into an executable plan without starting implementation:
+
+```sh
+python3 -m agent_runner plan-roadmap
+```
+
+By default, this reads `docs/roadmap.md` and writes the configured `planPath`
+from `.agent-runner.json`, which is commonly `docs/plan-roadmap.md`. Override
+those paths when needed:
+
+```sh
+python3 -m agent_runner plan-roadmap \
+  --roadmap docs/roadmap.md \
+  --output docs/plan-roadmap.md
+```
+
+The command uses `roles.planner` when configured, otherwise `roles.coder`, with
+write flags because the agent edits the output plan file. It records a
+`ROADMAP_PLAN` job and a `roadmap.plan_generated` event, validates that the
+result is parseable markdown with `## Phase N: Title` headings, explicit
+`Status:` markers, and at least one `Status: PENDING` phase, then stops. It
+does not register the generated plan, run phases, commit changes, push, open a
+PR, or merge anything. Run `agent-runner run` later to execute the plan.
 
 ## Running a Phase
 

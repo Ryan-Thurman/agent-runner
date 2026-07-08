@@ -13,6 +13,7 @@ from .lock import utc_now_iso
 DB_FILENAME = "runner.sqlite"
 
 JOB_TYPES = {
+    "ROADMAP_PLAN",
     "IMPLEMENT",
     "RUN_CHECKS",
     "REVIEW",
@@ -51,6 +52,14 @@ class StoragePaths:
     logs_dir: Path
 
 
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def storage_paths(home: Path) -> StoragePaths:
     return StoragePaths(db_path=home / DB_FILENAME, logs_dir=home / "logs")
 
@@ -58,7 +67,7 @@ def storage_paths(home: Path) -> StoragePaths:
 def connect_db(home: Path) -> sqlite3.Connection:
     paths = storage_paths(home)
     paths.db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(paths.db_path)
+    connection = sqlite3.connect(paths.db_path, factory=ClosingConnection)
     connection.row_factory = sqlite3.Row
     configure_connection(connection)
     ensure_schema(connection)

@@ -134,7 +134,7 @@ def run_phase_loop(
 
     phase = _next_action_phase(connection, plan_id)
     if phase is None:
-        return PhaseLoopResult("no phase is ready for Phase 5 work")
+        return PhaseLoopResult("no phase is ready for work")
 
     phase_number = phase["phase_number"]
     parsed_phase = _parsed_phase(parsed_plan, phase_number)

@@ -26,13 +26,15 @@ from .phase_loop import (
     _git_add_all,
     _publish_instructions,
     _record_phase_published,
+    _profiles_for_role,
+    _run_agent_job_with_fallbacks,
     _verify_published_phase,
     reconcile_manually_merged_phase_prs,
     restart_count,
     run_phase_loop,
 )
 from .jobs import run_agent_job
-from .plan import parse_plan_file, register_or_resume_plan
+from .plan import STATUS_RE, parse_plan_file, register_or_resume_plan
 from .storage import (
     PHASE_STATUSES,
     connect_db,
@@ -119,6 +121,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="number of lines to tail from the newest log file",
     )
     logs_parser.set_defaults(func=cmd_logs)
+
+    roadmap_parser = subcommands.add_parser(
+        "plan-roadmap",
+        help="ask a configured agent to turn roadmap items into an executable plan",
+    )
+    roadmap_parser.add_argument(
+        "--roadmap",
+        default="docs/roadmap.md",
+        help="roadmap markdown path to read (default: docs/roadmap.md)",
+    )
+    roadmap_parser.add_argument(
+        "--output",
+        default=None,
+        help=(
+            "plan path to create or update (default: configured planPath, "
+            "usually docs/plan-roadmap.md)"
+        ),
+    )
+    roadmap_parser.set_defaults(func=cmd_plan_roadmap)
 
     reset_parser = subcommands.add_parser("reset-lock", help="clear this project lock")
     reset_parser.set_defaults(func=cmd_reset_lock)
@@ -758,6 +779,77 @@ def cmd_logs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan_roadmap(args: argparse.Namespace) -> int:
+    repo_root = find_git_root()
+    config = load_config(repo_root)
+    emit_config_warnings(config.warnings)
+    home = ensure_runner_layout()
+    slug = project_slug(repo_root)
+    roadmap_path = _repo_relative_cli_path(
+        repo_root, args.roadmap, label="roadmap path"
+    )
+    output_path = _repo_relative_cli_path(
+        repo_root, args.output or config.plan_path, label="output plan path"
+    )
+    if not (repo_root / roadmap_path).is_file():
+        raise AgentRunnerError(f"missing roadmap file {roadmap_path}")
+
+    role = "planner" if "planner" in config.roles else "coder"
+    profiles = _profiles_for_role(config, role)
+    lock = ProjectLock(home / "locks", slug, repo_root)
+
+    try:
+        with lock, SignalLockRelease(lock):
+            print(f"[agent-runner] acquired lock for {slug}", file=sys.stderr)
+            with connect_db(home) as db:
+                project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+                result, _profile = _run_agent_job_with_fallbacks(
+                    db,
+                    project_id=project["id"],
+                    plan_id=None,
+                    phase_id=None,
+                    job_type="ROADMAP_PLAN",
+                    role=role,
+                    profiles=profiles,
+                    prompt=_roadmap_plan_prompt(
+                        roadmap_path=roadmap_path,
+                        output_path=output_path,
+                    ),
+                    repo_root=repo_root,
+                    log_dir=home / "logs" / slug / "roadmap-plan",
+                    timeout_seconds=config.timeout_minutes * 60,
+                )
+                if result.status != "SUCCEEDED":
+                    raise AgentRunnerError(
+                        "roadmap planning job failed; inspect "
+                        f"{result.log_path}"
+                    )
+                parsed_plan = parse_plan_file(repo_root, output_path)
+                _validate_roadmap_plan_file(parsed_plan)
+                record_event(
+                    db,
+                    project_id=project["id"],
+                    job_id=result.job_id,
+                    event_type="roadmap.plan_generated",
+                    message=f"generated executable plan {output_path} from {roadmap_path}",
+                    data={
+                        "roadmapPath": roadmap_path,
+                        "outputPath": output_path,
+                        "phaseCount": len(parsed_plan.phases),
+                    },
+                )
+    except KeyboardInterrupt:
+        print("[agent-runner] interrupted; lock released", file=sys.stderr)
+        return 130
+
+    print(
+        f"[agent-runner] roadmap plan ready: {output_path}; "
+        "run `agent-runner run` later to execute it",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def cmd_reset_lock(args: argparse.Namespace) -> int:
     repo_root = find_git_root()
     home = ensure_runner_layout()
@@ -811,3 +903,63 @@ def _format_running_job(job: dict) -> str:
     log = f" log={job['log_path']}" if job.get("log_path") else ""
     started = f" started={job['started_at']}" if job.get("started_at") else ""
     return f"job {job['id']}: {job['type']}{phase}{started}{log}"
+
+
+def _repo_relative_cli_path(repo_root: Path, value: str, *, label: str) -> str:
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = repo_root / candidate
+    try:
+        relative = candidate.resolve().relative_to(repo_root.resolve())
+    except ValueError as exc:
+        raise AgentRunnerError(f"{label} escapes repository: {value}") from exc
+    return relative.as_posix()
+
+
+def _roadmap_plan_prompt(*, roadmap_path: str, output_path: str) -> str:
+    return (
+        "Generate or update an executable agent-runner plan from the project "
+        "roadmap.\n\n"
+        "Scope rules:\n"
+        "- Read the roadmap file listed below and identify unfinished roadmap items.\n"
+        "- Create or update only the output plan file listed below unless a "
+        "parent directory is needed.\n"
+        "- Do not implement roadmap items, run `agent-runner run`, open PRs, "
+        "merge branches, or change source code.\n"
+        "- Be conservative: propose phases with concrete acceptance criteria and "
+        "leave implementation for a later runner invocation.\n\n"
+        f"Roadmap path: `{roadmap_path}`\n"
+        f"Output plan path: `{output_path}`\n\n"
+        "Output requirements:\n"
+        "- Use normal markdown phase headings: `## Phase N: Title`.\n"
+        "- Put `Status: PENDING` directly under each unfinished phase heading.\n"
+        "- Include acceptance criteria for every generated phase.\n"
+        "- Preserve useful plan-level context before the first phase heading.\n"
+        "- Make the plan executable by `agent-runner run` without starting that run."
+    )
+
+
+def _validate_roadmap_plan_file(parsed_plan) -> None:
+    if not parsed_plan.phases:
+        raise AgentRunnerError(f"generated plan has no phases: {parsed_plan.path}")
+
+    pending_count = 0
+    marker_errors: list[str] = []
+    for phase in parsed_plan.phases:
+        status_line = next(
+            (line for line in phase.content.splitlines() if line.strip()),
+            None,
+        )
+        status_match = STATUS_RE.match(status_line) if status_line else None
+        if status_match is None:
+            marker_errors.append(
+                f"phase {phase.phase_number} is missing a Status marker"
+            )
+            continue
+        if phase.status == "PENDING":
+            pending_count += 1
+
+    if marker_errors:
+        raise AgentRunnerError("; ".join(marker_errors))
+    if pending_count == 0:
+        raise AgentRunnerError("generated plan has no `Status: PENDING` phases")
