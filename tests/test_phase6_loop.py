@@ -1472,6 +1472,58 @@ class Phase6LoopTests(unittest.TestCase):
             first_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("Make one comprehensive pass", first_prompt)
 
+    def test_review_fix_limit_posts_final_review_to_github(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            gh_state = root / "gh-state"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="REVIEWING")
+            write_config(repo, script, checks=[], max_retries=3, auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            seed_reviewing_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "AGENT_MODE": "REVIEW_DRIP_FEED",
+                    "AGENT_PUBLISH": "1",
+                    "GH_STATE_DIR": str(gh_state),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("review fix limit exhausted", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            phase_jobs = jobs(home, phase["id"])
+            self.assertEqual([job["type"] for job in phase_jobs].count("REVIEW"), 2)
+            self.assertEqual([job["type"] for job in phase_jobs].count("FIX"), 1)
+            post = json.loads((gh_state / "github-review.json").read_text())
+            self.assertEqual(post["action"], "--request-changes")
+            self.assertEqual(post["prUrl"], "https://example.test/pull/1")
+            body = (gh_state / "github-review-body.md").read_text(encoding="utf-8")
+            self.assertIn("# Phase 6 Review: CHANGES_REQUESTED", body)
+            self.assertIn("second review found a new blocker", body)
+            self.assertIn("Create second-marker.txt", body)
+
     def test_review_blocked_stops_without_fix(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

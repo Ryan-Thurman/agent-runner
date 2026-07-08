@@ -803,6 +803,12 @@ def cmd_plan_roadmap(args: argparse.Namespace) -> int:
             print(f"[agent-runner] acquired lock for {slug}", file=sys.stderr)
             with connect_db(home) as db:
                 project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+                reaped_jobs = reap_orphaned_jobs(db, project["id"])
+                if reaped_jobs:
+                    print(
+                        f"[agent-runner] reaped {len(reaped_jobs)} orphaned job(s)",
+                        file=sys.stderr,
+                    )
                 result, _profile = _run_agent_job_with_fallbacks(
                     db,
                     project_id=project["id"],
