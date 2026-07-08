@@ -1,7 +1,6 @@
 import argparse
 import json
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -27,13 +26,15 @@ from .phase_loop import (
     _git_add_all,
     _publish_instructions,
     _record_phase_published,
+    _profiles_for_role,
+    _run_agent_job_with_fallbacks,
     _verify_published_phase,
     reconcile_manually_merged_phase_prs,
     restart_count,
     run_phase_loop,
 )
 from .jobs import run_agent_job
-from .plan import parse_plan_file, register_or_resume_plan
+from .plan import STATUS_RE, parse_plan_file, register_or_resume_plan
 from .storage import (
     PHASE_STATUSES,
     connect_db,
@@ -50,10 +51,6 @@ from .storage import (
     update_phase_status,
     update_project_status,
 )
-
-
-_ROADMAP_PHASE_HEADING_RE = re.compile(r"^## Phase\s+(\d+):\s*(.+?)\s*$")
-_ROADMAP_STATUS_RE = re.compile(r"^Status:\s*([A-Z_]+)\s*$")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -798,7 +795,7 @@ def cmd_plan_roadmap(args: argparse.Namespace) -> int:
         raise AgentRunnerError(f"missing roadmap file {roadmap_path}")
 
     role = "planner" if "planner" in config.roles else "coder"
-    profile = config.agents[config.roles[role]]
+    profiles = _profiles_for_role(config, role)
     lock = ProjectLock(home / "locks", slug, repo_root)
 
     try:
@@ -806,14 +803,14 @@ def cmd_plan_roadmap(args: argparse.Namespace) -> int:
             print(f"[agent-runner] acquired lock for {slug}", file=sys.stderr)
             with connect_db(home) as db:
                 project = get_or_create_project(db, slug=slug, repo_path=repo_root)
-                result = run_agent_job(
+                result, _profile = _run_agent_job_with_fallbacks(
                     db,
                     project_id=project["id"],
                     plan_id=None,
                     phase_id=None,
                     job_type="ROADMAP_PLAN",
                     role=role,
-                    profile=profile,
+                    profiles=profiles,
                     prompt=_roadmap_plan_prompt(
                         roadmap_path=roadmap_path,
                         output_path=output_path,
@@ -828,7 +825,7 @@ def cmd_plan_roadmap(args: argparse.Namespace) -> int:
                         f"{result.log_path}"
                     )
                 parsed_plan = parse_plan_file(repo_root, output_path)
-                _validate_roadmap_plan_file(repo_root / output_path, parsed_plan)
+                _validate_roadmap_plan_file(parsed_plan)
                 record_event(
                     db,
                     project_id=project["id"],
@@ -942,30 +939,24 @@ def _roadmap_plan_prompt(*, roadmap_path: str, output_path: str) -> str:
     )
 
 
-def _validate_roadmap_plan_file(path: Path, parsed_plan) -> None:
+def _validate_roadmap_plan_file(parsed_plan) -> None:
     if not parsed_plan.phases:
         raise AgentRunnerError(f"generated plan has no phases: {parsed_plan.path}")
 
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
     pending_count = 0
     marker_errors: list[str] = []
-    for index, line in enumerate(lines):
-        match = _ROADMAP_PHASE_HEADING_RE.match(line)
-        if match is None:
-            continue
-        phase_number = int(match.group(1))
-        status_index = index + 1
-        while status_index < len(lines) and not lines[status_index].strip():
-            status_index += 1
-        if status_index >= len(lines):
-            marker_errors.append(f"phase {phase_number} is missing a Status marker")
-            continue
-        status_match = _ROADMAP_STATUS_RE.match(lines[status_index])
+    for phase in parsed_plan.phases:
+        status_line = next(
+            (line for line in phase.content.splitlines() if line.strip()),
+            None,
+        )
+        status_match = STATUS_RE.match(status_line) if status_line else None
         if status_match is None:
-            marker_errors.append(f"phase {phase_number} is missing a Status marker")
+            marker_errors.append(
+                f"phase {phase.phase_number} is missing a Status marker"
+            )
             continue
-        if status_match.group(1) == "PENDING":
+        if phase.status == "PENDING":
             pending_count += 1
 
     if marker_errors:

@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import sqlite3
@@ -5,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -53,6 +55,23 @@ def write_config(repo: Path) -> None:
 
 
 class Phase2StorageTests(unittest.TestCase):
+    def test_connect_db_context_manager_closes_without_resource_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ResourceWarning)
+                with connect_db(home) as db:
+                    db.execute("SELECT 1").fetchone()
+                gc.collect()
+
+            resource_warnings = [
+                warning
+                for warning in caught
+                if issubclass(warning.category, ResourceWarning)
+            ]
+            self.assertEqual(resource_warnings, [])
+
     def test_fresh_db_is_created_lazily_with_pragmas_and_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"

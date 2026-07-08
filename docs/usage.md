@@ -198,11 +198,12 @@ Current notes:
 - `promptPrefix` is optional. When set, the runner prepends it to every prompt
   sent to that agent profile.
 - `roleFallbacks` is optional and maps a role to an ordered list of agent
-  profiles. When a coder IMPLEMENT/FIX job or reviewer REVIEW job fails with a
-  quota/rate-limit error (429, "usage limit", "quota exceeded", and similar),
-  the runner reruns the job with the next profile and records a
-  `<jobtype>.fallback` event such as `implement.fallback`, `fix.fallback`, or
-  `review.fallback`. Any other failure blocks the phase without falling back.
+  profiles. When a coder IMPLEMENT/FIX job, planner ROADMAP_PLAN job, or
+  reviewer REVIEW job fails with a quota/rate-limit error (429, "usage limit",
+  "quota exceeded", and similar), the runner reruns the job with the next
+  profile and records a `<jobtype>.fallback` event such as
+  `implement.fallback`, `roadmap_plan.fallback`, `fix.fallback`, or
+  `review.fallback`. Any other failure blocks the job without falling back.
   Other roles are accepted but warned about. The sample config includes an
   `antigravity` profile (the `agy` CLI) suitable as a fallback on a separate
   quota pool.

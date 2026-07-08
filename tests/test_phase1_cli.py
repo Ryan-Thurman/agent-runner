@@ -443,8 +443,7 @@ class Phase1CliTests(unittest.TestCase):
 
             config = load_config(repo)
             self.assertEqual(config.role_fallbacks, {"planner": ["antigravity"]})
-            self.assertEqual(len(config.warnings), 1)
-            self.assertIn("only the coder and reviewer roles", config.warnings[0])
+            self.assertEqual(config.warnings, [])
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
             data["mergeStrategy"] = "octopus"

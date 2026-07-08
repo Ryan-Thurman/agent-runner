@@ -35,7 +35,15 @@ def git_init(path: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
 
 
-def write_config(repo: Path, agent_script: Path) -> None:
+def write_config(
+    repo: Path,
+    agent_script: Path,
+    *,
+    include_planner: bool = True,
+    planner_profile: str = "fake",
+    role_fallbacks: Optional[dict[str, list[str]]] = None,
+    extra_agents: Optional[dict[str, dict[str, object]]] = None,
+) -> None:
     data = json.loads(strip_json_comments(SAMPLE_CONFIG))
     data["planPath"] = "docs/plan-roadmap.md"
     data["checks"] = []
@@ -48,12 +56,15 @@ def write_config(repo: Path, agent_script: Path) -> None:
             "outputCapture": "stdout",
         }
     }
+    if extra_agents:
+        data["agents"].update(extra_agents)
     data["roles"] = {
         "coder": "fake",
         "reviewer": "fake",
-        "planner": "fake",
     }
-    data["roleFallbacks"] = {}
+    if include_planner:
+        data["roles"]["planner"] = planner_profile
+    data["roleFallbacks"] = role_fallbacks or {}
     data.pop("reviewTriage", None)
     data["autoFixAttempts"] = 0
     data["autoCommit"] = False
@@ -123,6 +134,18 @@ print("planned roadmap")
     )
 
 
+def write_failing_planner(path: Path, *, message: str = "planner failed") -> None:
+    path.write_text(
+        f"""
+import sys
+
+print({message!r}, file=sys.stderr)
+raise SystemExit(1)
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+
 class RoadmapPlanCommandTests(unittest.TestCase):
     def test_plan_roadmap_generates_executable_plan_without_registering_phases(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,6 +184,118 @@ class RoadmapPlanCommandTests(unittest.TestCase):
             self.assertEqual(jobs[0]["phase_id"], None)
             self.assertEqual(plans, [])
             self.assertEqual(events[-1]["event_type"], "roadmap.plan_generated")
+
+    def test_plan_roadmap_rejects_paths_that_escape_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "fake_planner.py"
+            repo.mkdir()
+            git_init(repo)
+            write_roadmap(repo)
+            write_fake_planner(script)
+            write_config(repo, script)
+
+            result = run_cli(repo, home, "plan-roadmap", "--roadmap", "../outside.md")
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("roadmap path escapes repository", result.stderr)
+
+            result = run_cli(repo, home, "plan-roadmap", "--output", "../outside.md")
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("output plan path escapes repository", result.stderr)
+
+    def test_plan_roadmap_uses_coder_role_when_planner_role_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "fake_planner.py"
+            repo.mkdir()
+            git_init(repo)
+            write_roadmap(repo)
+            write_fake_planner(script)
+            write_config(repo, script, include_planner=False)
+
+            result = run_cli(repo, home, "plan-roadmap", extra_env={"TRACE_DIR": str(trace)})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("starting ROADMAP_PLAN job", result.stderr)
+            self.assertIn("(role=coder, profile=fake)", result.stderr)
+
+    def test_plan_roadmap_reports_planner_job_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "failing_planner.py"
+            repo.mkdir()
+            git_init(repo)
+            write_roadmap(repo)
+            write_failing_planner(script)
+            write_config(repo, script)
+
+            result = run_cli(repo, home, "plan-roadmap")
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("roadmap planning job failed", result.stderr)
+
+    def test_plan_roadmap_reports_missing_roadmap_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            script = root / "fake_planner.py"
+            repo.mkdir()
+            git_init(repo)
+            write_fake_planner(script)
+            write_config(repo, script)
+
+            result = run_cli(repo, home, "plan-roadmap")
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("missing roadmap file docs/roadmap.md", result.stderr)
+
+    def test_plan_roadmap_falls_back_after_quota_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            planner = root / "fake_planner.py"
+            quota = root / "quota_planner.py"
+            repo.mkdir()
+            git_init(repo)
+            write_roadmap(repo)
+            write_fake_planner(planner)
+            write_failing_planner(quota, message="quota exceeded")
+            write_config(
+                repo,
+                planner,
+                planner_profile="quota",
+                role_fallbacks={"planner": ["fake"]},
+                extra_agents={
+                    "quota": {
+                        "command": sys.executable,
+                        "promptArgs": [str(quota)],
+                        "writeFlags": [],
+                        "readOnlyFlags": [],
+                        "outputCapture": "stdout",
+                    }
+                },
+            )
+
+            result = run_cli(repo, home, "plan-roadmap", extra_env={"TRACE_DIR": str(trace)})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("ROADMAP_PLAN hit a quota/rate limit", result.stderr)
+            self.assertIn("(role=planner, profile=fake)", result.stderr)
+            with connect_db(home) as db:
+                events = db.execute("SELECT * FROM events ORDER BY id").fetchall()
+            self.assertIn("roadmap_plan.fallback", [event["event_type"] for event in events])
 
     def test_plan_roadmap_rejects_generated_phase_without_status_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
