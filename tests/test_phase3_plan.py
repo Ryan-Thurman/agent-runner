@@ -243,6 +243,29 @@ class Phase3PlanTests(unittest.TestCase):
         )
         self.assertEqual(without_metadata.content_hash, with_metadata.content_hash)
 
+    def test_wrapped_evidence_without_checks_does_not_change_phase_hash(self):
+        one_line = parse_plan_markdown(
+            "## Phase 1: CLI\n"
+            "Status: COMPLETE\n"
+            "Evidence: closeout docs/memory/roadmap sync; `ruff` green; `pytest` green.\n\n"
+            "Build CLI.\n",
+            path="docs/plan.md",
+        )
+        wrapped = parse_plan_markdown(
+            "## Phase 1: CLI\n"
+            "Status: COMPLETE\n"
+            "Evidence: closeout docs/memory/roadmap sync; `ruff` green;\n"
+            "`pytest` green.\n\n"
+            "Build CLI.\n",
+            path="docs/plan.md",
+        )
+
+        self.assertEqual(
+            one_line.phases[0].content_hash,
+            wrapped.phases[0].content_hash,
+        )
+        self.assertEqual(one_line.content_hash, wrapped.content_hash)
+
     def test_status_marker_can_follow_blank_lines(self):
         direct = parse_plan_markdown(
             "## Phase 1: CLI\n"

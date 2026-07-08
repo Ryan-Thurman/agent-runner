@@ -328,11 +328,14 @@ Rules:
   requirements.
 - Add `Status: <STATE>` directly under the phase heading.
 - If the status line is missing, the runner treats the phase as `PENDING`.
-- The status line and the runner-owned `Evidence:` line immediately after it are
-  excluded from the phase content hash, so close-phase write-back does not count
-  as a plan body change. For compatibility with earlier write-backs, a wrapped
-  evidence block that contains a `Checks:` line is also treated as runner-owned
-  metadata.
+- The status line and the runner-owned `Evidence:` block immediately after it
+  are excluded from the phase content hash, so close-phase write-back does not
+  count as a plan body change. The evidence block runs from the `Evidence:` line
+  up to the next blank line, so a wrapped multi-line evidence note (and an
+  optional `Checks:` line) is all treated as runner-owned metadata. This means
+  rewriting the evidence -- for example collapsing a wrapped note down to one
+  line during close -- never trips the protected-body check. Keep a blank line
+  between the evidence block and the phase body.
 - Duplicate phase numbers and invalid status values are rejected.
 
 Useful statuses while dogfooding:
