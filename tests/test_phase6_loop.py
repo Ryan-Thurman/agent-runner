@@ -1010,7 +1010,7 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertIn(f"reviewed_sha={published_sha}", body)
             self.assertRegex(body, r"review_job=\d+")
 
-    def test_github_post_failure_records_event_without_changing_review_outcome(self):
+    def test_github_post_failure_blocks_before_moving_on(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -1046,9 +1046,10 @@ class Phase6LoopTests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("could not be posted to GitHub", result.stderr)
             phase = phase_row(home, repo)
-            self.assertEqual(phase["status"], "COMPLETE")
+            self.assertEqual(phase["status"], "BLOCKED")
             self.assertFalse((gh_state / "github-review.json").exists())
             github_events = [
                 event
@@ -1062,6 +1063,68 @@ class Phase6LoopTests(unittest.TestCase):
                 (Path(phase["log_dir"]) / "review.json").read_text(encoding="utf-8")
             )
             self.assertEqual(review["status"], "PASS")
+            phase_events = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "phase.blocked"
+            ]
+            self.assertEqual(len(phase_events), 1)
+            self.assertIn("review GitHub post failed", phase_events[0]["message"])
+            phase_jobs = jobs(home, phase["id"])
+            self.assertNotIn("CLOSE_PHASE", [job["type"] for job in phase_jobs])
+
+    def test_github_request_changes_post_failure_blocks_before_fixing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            gh_state = root / "gh-state"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo, status="REVIEWING")
+            write_config(repo, script, checks=[], max_retries=3, auto_commit=True)
+            commit_all(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"],
+                cwd=repo,
+                check=True,
+            )
+            seed_reviewing_published_phase(repo, home)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "AGENT_MODE": "BUCKETED_REVIEW_FIX",
+                    "GH_POST_FAIL": "1",
+                    "GH_STATE_DIR": str(gh_state),
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("could not be posted to GitHub", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            self.assertFalse((gh_state / "github-review.json").exists())
+            phase_jobs = jobs(home, phase["id"])
+            self.assertEqual([job["type"] for job in phase_jobs].count("REVIEW"), 1)
+            self.assertNotIn("FIX", [job["type"] for job in phase_jobs])
+            self.assertFalse((trace / "fix-1.md").exists())
+            github_events = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "review.github_post_failed"
+            ]
+            self.assertEqual(len(github_events), 1)
 
     def test_auto_commit_blocks_unpublished_work_before_review(self):
         with tempfile.TemporaryDirectory() as tmp:

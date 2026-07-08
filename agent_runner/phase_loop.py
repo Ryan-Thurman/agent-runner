@@ -818,17 +818,42 @@ def _run_review(
         )
 
     if config.auto_commit:
-        _post_review_to_github(
-            connection,
-            project_id=project_id,
-            plan_id=plan_id,
-            phase=phase,
-            parsed_phase=parsed_phase,
-            review=review,
-            source_job=result,
-            repo_root=repo_root,
-            log_dir=log_dir,
-        )
+        try:
+            _post_review_to_github(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase=phase,
+                parsed_phase=parsed_phase,
+                review=review,
+                source_job=result,
+                repo_root=repo_root,
+                log_dir=log_dir,
+            )
+        except JobError as exc:
+            update_phase_status(connection, phase["id"], "BLOCKED")
+            record_event(
+                connection,
+                project_id=project_id,
+                plan_id=plan_id,
+                phase_id=phase["id"],
+                job_id=result.job_id,
+                event_type="phase.blocked",
+                message=(
+                    f"review GitHub post failed for phase "
+                    f"{phase['phase_number']}"
+                ),
+                data={
+                    "error": str(exc),
+                    "reviewStatus": review["status"],
+                    "summary": review["summary"],
+                },
+            )
+            return PhaseLoopResult(
+                f"phase {phase['phase_number']} BLOCKED because review could "
+                f"not be posted to GitHub: {exc}",
+                blocked=True,
+            )
 
     status = review["status"]
     findings = review["findings"]
@@ -931,16 +956,17 @@ def _post_review_to_github(
     pr_url = phase["pr_url"]
     reviewed_sha = phase["published_sha"]
     if not pr_url or not reviewed_sha:
+        message = "review GitHub post failed because PR metadata is missing"
         _record_github_post_failed(
             connection,
             project_id=project_id,
             plan_id=plan_id,
             phase=phase,
             source_job=source_job,
-            message="review GitHub post skipped because PR metadata is missing",
+            message=message,
             data={"prUrl": pr_url, "reviewedSha": reviewed_sha},
         )
-        return
+        raise JobError(message)
 
     plan_path = _plan_path_for_id(connection, plan_id)
     body_path = log_dir / f"review-{source_job.job_id}-github.md"
@@ -961,26 +987,18 @@ def _post_review_to_github(
             review=review,
             body_path=body_path,
         )
-    except OSError as exc:
+    except (OSError, JobError) as exc:
+        message = f"review GitHub post failed for phase {phase['phase_number']}"
         _record_github_post_failed(
             connection,
             project_id=project_id,
             plan_id=plan_id,
             phase=phase,
             source_job=source_job,
-            message=f"review GitHub post failed for phase {phase['phase_number']}",
+            message=message,
             data={"error": str(exc), "bodyPath": str(body_path), "prUrl": pr_url},
         )
-    except JobError as exc:
-        _record_github_post_failed(
-            connection,
-            project_id=project_id,
-            plan_id=plan_id,
-            phase=phase,
-            source_job=source_job,
-            message=f"review GitHub post failed for phase {phase['phase_number']}",
-            data={"error": str(exc), "bodyPath": str(body_path), "prUrl": pr_url},
-        )
+        raise JobError(f"{message}: {exc}") from exc
 
 
 def _plan_path_for_id(connection: sqlite3.Connection, plan_id: int) -> str:
