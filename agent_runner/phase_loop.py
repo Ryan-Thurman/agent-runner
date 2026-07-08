@@ -1955,7 +1955,7 @@ def _interpret_review_triage(
 
     raw_output = _review_capture_output(result).strip()
     try:
-        payload = json.loads(raw_output)
+        payload = _parse_review_document(raw_output)
     except json.JSONDecodeError as exc:
         return ReviewTriageResult(
             tier="complex",
@@ -2943,14 +2943,22 @@ def _block_review_fix_limit_exhausted(
 
 
 def _review_fix_attempt_count(connection: sqlite3.Connection, phase_id: int) -> int:
-    row = connection.execute(
-        """
-        SELECT COUNT(*) AS count
-        FROM jobs
-        WHERE phase_id = ? AND type = 'FIX' AND trigger = 'review'
-        """,
-        (phase_id,),
-    ).fetchone()
+    return _count_jobs(connection, phase_id, "FIX", trigger="review")
+
+
+def _count_jobs(
+    connection: sqlite3.Connection,
+    phase_id: int,
+    job_type: str,
+    *,
+    trigger: Optional[str] = None,
+) -> int:
+    query = "SELECT COUNT(*) AS count FROM jobs WHERE phase_id = ? AND type = ?"
+    params: list[Any] = [phase_id, job_type]
+    if trigger is not None:
+        query += " AND trigger = ?"
+        params.append(trigger)
+    row = connection.execute(query, params).fetchone()
     return int(row["count"])
 
 
@@ -3401,8 +3409,15 @@ def _single_line(text: str, *, limit: int) -> str:
 
 def _extract_review_json(result: JobResult, log_dir: Path) -> dict[str, Any]:
     raw_output = _review_capture_output(result)
+    # The review prompt embeds the previous review.json verbatim; treat any
+    # candidate byte-identical to it as an echo of that quote, never as the
+    # reviewer's new verdict.
+    previous_review_path = log_dir / "review.json"
+    stale_document = None
+    if previous_review_path.exists():
+        stale_document = previous_review_path.read_text(encoding="utf-8")
     try:
-        payload = json.loads(_review_json_document(raw_output))
+        payload = _parse_review_document(raw_output, stale_document=stale_document)
     except json.JSONDecodeError as exc:
         _append_review_capture_to_log(result, raw_output)
         raise JobError(f"invalid review JSON: {exc}") from exc
@@ -3415,22 +3430,101 @@ def _extract_review_json(result: JobResult, log_dir: Path) -> dict[str, Any]:
     return review
 
 
-def _review_json_document(raw_output: str) -> str:
+def _parse_review_document(
+    raw_output: str, *, stale_document: Optional[str] = None
+) -> Any:
+    # Single extraction pipeline shared by review and triage: pick the JSON
+    # document out of prose/fences, then unwrap a `claude -p --output-format
+    # json` envelope if present.
+    return _unwrap_agent_envelope(
+        json.loads(_review_json_document(raw_output, stale_document=stale_document)),
+        stale_document=stale_document,
+    )
+
+
+def _review_json_document(
+    raw_output: str, *, stale_document: Optional[str] = None
+) -> str:
     stripped = raw_output.strip()
-    if not stripped.startswith("```"):
-        return stripped
+    stale = stale_document.strip() if stale_document else None
 
-    lines = stripped.splitlines()
-    if not lines:
-        return stripped
-    opener = lines[0].strip().lower()
-    if opener not in {"```", "```json"}:
-        return stripped
+    def is_stale(candidate: str) -> bool:
+        return stale is not None and candidate == stale
 
-    for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "```":
-            return "\n".join(lines[1:index]).strip()
+    fenced = [
+        match.group(1).strip()
+        for match in _REVIEW_FENCE_PATTERN.finditer(stripped)
+    ]
+    for candidate in reversed(fenced):
+        if not is_stale(candidate) and _parses_as_json_object(candidate):
+            return candidate
+    if not is_stale(stripped) and _parses_as_json_object(stripped):
+        return stripped
+    bare = _last_json_object(stripped, skip=stale)
+    if bare is not None:
+        return bare
+    if stale is not None and stale in stripped:
+        raise json.JSONDecodeError(
+            "review output only echoed the previous review.json", stripped, 0
+        )
+    if fenced:
+        return fenced[-1]
     return stripped
+
+
+_REVIEW_FENCE_PATTERN = re.compile(
+    r"```(?:json)?[ \t]*\n(.*?)\n[ \t]*```", re.DOTALL | re.IGNORECASE
+)
+
+
+def _parses_as_json_object(text: str) -> bool:
+    try:
+        return isinstance(json.loads(text), dict)
+    except json.JSONDecodeError:
+        return False
+
+
+def _last_json_object(text: str, *, skip: Optional[str] = None) -> Optional[str]:
+    # Scan for top-level JSON objects embedded in prose; skipping to each
+    # object's end keeps nested objects (e.g. "findings") from matching.
+    decoder = json.JSONDecoder()
+    result: Optional[str] = None
+    index = 0
+    while True:
+        start = text.find("{", index)
+        if start == -1:
+            return result
+        try:
+            payload, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        if isinstance(payload, dict):
+            candidate = text[start:end]
+            if skip is None or candidate != skip:
+                result = candidate
+            index = end
+        else:
+            index = start + 1
+
+
+def _unwrap_agent_envelope(payload: Any, *, stale_document: Optional[str] = None) -> Any:
+    # `claude -p --output-format json` wraps the agent's final text in an
+    # envelope; the review document is inside the string `result` field.
+    if (
+        isinstance(payload, dict)
+        and "status" not in payload
+        and isinstance(payload.get("result"), str)
+    ):
+        try:
+            return json.loads(
+                _review_json_document(
+                    payload["result"], stale_document=stale_document
+                )
+            )
+        except json.JSONDecodeError:
+            return payload
+    return payload
 
 
 def _review_capture_output(result: JobResult) -> str:

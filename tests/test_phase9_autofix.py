@@ -124,6 +124,9 @@ if "Fix the underlying problem that blocked this phase" in prompt:
     if os.environ.get("AUTOFIX_MODE") == "NOOP":
         print("auto-fix intentionally did nothing")
         raise SystemExit(0)
+    if os.environ.get("AUTOFIX_MODE") == "CRASH":
+        print("auto-fix crashed for test", file=sys.stderr)
+        raise SystemExit(1)
     Path("fixed.txt").write_text("fixed by auto-fix\n", encoding="utf-8")
     if "Publish requirements before you finish" in prompt:
         subprocess.run(["git", "add", "-A"], check=True)
@@ -240,6 +243,22 @@ if args[:2] == ["pr", "view"]:
 
 if args[:2] == ["pr", "diff"]:
     subprocess.run(["git", "show", "--format=", "--patch", "HEAD"], check=True)
+    raise SystemExit(0)
+
+if args[:2] == ["issue", "create"]:
+    if os.environ.get("GH_ISSUE_FAIL"):
+        print("issue create failed for test", file=sys.stderr)
+        raise SystemExit(1)
+    title = args[args.index("--title") + 1]
+    with open(args[args.index("--body-file") + 1]) as fh:
+        body = fh.read()
+    trace_dir = os.environ.get("TRACE_DIR")
+    if trace_dir:
+        os.makedirs(trace_dir, exist_ok=True)
+        count = len([n for n in os.listdir(trace_dir) if n.startswith("issue-")]) + 1
+        with open(os.path.join(trace_dir, f"issue-{count}.md"), "w") as fh:
+            fh.write(title + "\n---\n" + body)
+    print("https://example.test/issues/1")
     raise SystemExit(0)
 
 print(f"unsupported gh args: {args}", file=sys.stderr)
@@ -434,6 +453,40 @@ class AutofixLoopTests(unittest.TestCase):
             )
             self.assertIn("fixed.txt", published_files)
 
+    def test_autofix_budget_carries_across_separate_blocking_episodes(self):
+        # The budget is cumulative for the phase's lifetime: an attempt spent
+        # unblocking a checks failure must count against a later, unrelated
+        # review block (episode two resumes at attempt 2/2, not 1/2).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "autofix_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_plan(repo)
+            write_autofix_agent(script)
+            write_config(repo, script, auto_fix_attempts=2)
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "REVIEW_BLOCK_ONCE": "1"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("auto-fix attempt 1/2 with profile fake", result.stderr)
+            self.assertIn("auto-fix attempt 2/2 with profile fake", result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            phase_jobs = jobs(home, phase["id"])
+            job_types = [job["type"] for job in phase_jobs]
+            self.assertEqual(job_types.count("AUTOFIX"), 2)
+            self.assertEqual(job_types.count("REVIEW"), 2)
+
     def test_autofix_attempt_cap_leaves_phase_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -462,6 +515,166 @@ class AutofixLoopTests(unittest.TestCase):
             self.assertEqual(phase["status"], "BLOCKED")
             phase_jobs = jobs(home, phase["id"])
             self.assertEqual([job["type"] for job in phase_jobs].count("AUTOFIX"), 2)
+
+    def test_autofix_attempt_cap_persists_across_runner_restarts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "autofix_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_plan(repo)
+            write_autofix_agent(script)
+            write_config(repo, script, auto_fix_attempts=2)
+            commit_all(repo)
+            extra_env = {"TRACE_DIR": str(trace), "AUTOFIX_MODE": "NOOP"}
+
+            first = run_cli(repo, home, "run", extra_env=extra_env)
+            self.assertEqual(first.returncode, 1)
+            self.assertIn("auto-fix attempt 2/2 with profile fake", first.stderr)
+
+            second = run_cli(repo, home, "run", extra_env=extra_env)
+            self.assertEqual(second.returncode, 1)
+            self.assertNotIn("auto-fix attempt", second.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            phase_jobs = jobs(home, phase["id"])
+            self.assertEqual([job["type"] for job in phase_jobs].count("AUTOFIX"), 2)
+
+    def test_autofix_exhausted_budget_posts_escalation_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "autofix_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_plan(repo)
+            write_autofix_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_config(repo, script, auto_fix_attempts=2)
+            commit_all(repo)
+            extra_env = {
+                "TRACE_DIR": str(trace),
+                "AUTOFIX_MODE": "NOOP",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            }
+
+            first = run_cli(repo, home, "run", extra_env=extra_env)
+
+            self.assertEqual(first.returncode, 1)
+            self.assertIn(
+                "posted blocked-phase issue: https://example.test/issues/1",
+                first.stderr,
+            )
+            issue = (trace / "issue-1.md").read_text(encoding="utf-8")
+            self.assertIn("[agent-runner] phase 9 blocked:", issue)
+            self.assertIn("auto-fix budget exhausted (2/2 attempts used)", issue)
+            self.assertIn("Blocking event message:", issue)
+            self.assertIn("Newest phase log tail", issue)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            escalated = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "phase.autofix_escalated"
+            ]
+            self.assertEqual(len(escalated), 1)
+            self.assertEqual(
+                json.loads(escalated[0]["data_json"])["issueUrl"],
+                "https://example.test/issues/1",
+            )
+
+            # A restart sees the same exhausted budget and blocking message;
+            # the recorded event must prevent a duplicate issue.
+            second = run_cli(repo, home, "run", extra_env=extra_env)
+            self.assertEqual(second.returncode, 1)
+            self.assertNotIn("posted blocked-phase issue", second.stderr)
+            self.assertFalse((trace / "issue-2.md").exists())
+
+    def test_failed_autofix_job_posts_escalation_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "autofix_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_plan(repo)
+            write_autofix_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_config(repo, script, auto_fix_attempts=2)
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "AUTOFIX_MODE": "CRASH",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("posted blocked-phase issue", result.stderr)
+            issue = (trace / "issue-1.md").read_text(encoding="utf-8")
+            self.assertIn("auto-fix attempt 1/2", issue)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            phase_jobs = jobs(home, phase["id"])
+            self.assertEqual([job["type"] for job in phase_jobs].count("AUTOFIX"), 1)
+
+    def test_escalation_post_failure_warns_without_recording_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "autofix_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            write_plan(repo)
+            write_autofix_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_config(repo, script, auto_fix_attempts=1)
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "AUTOFIX_MODE": "NOOP",
+                    "GH_ISSUE_FAIL": "1",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(
+                "warning: could not post blocked-phase issue", result.stderr
+            )
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "BLOCKED")
+            escalated = [
+                event
+                for event in events(home, phase["id"])
+                if event["event_type"] == "phase.autofix_escalated"
+            ]
+            self.assertEqual(escalated, [])
 
     def test_autofix_disabled_or_missing_fixer_keeps_blocking_behavior(self):
         with tempfile.TemporaryDirectory() as tmp:
