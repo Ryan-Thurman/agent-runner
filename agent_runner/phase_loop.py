@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import AgentProfile, RunnerConfig
+from .diffs import elide_diff
 from .errors import AgentRunnerError, JobError
 from .jobs import JobResult, is_quota_failure, run_agent_job, run_checks_job
 from .plan import PLAN_CONTEXT_CHAR_LIMIT, ParsedPhase, ParsedPlan, parse_plan_file
@@ -3258,6 +3259,7 @@ def _review_prompt(
         review_subject = "Review the staged phase work independently. Do not edit files.\n\n"
         diff_label = "git diff --staged"
         diff_text = _git_diff_staged(repo_root)
+    diff_text = elide_diff(diff_text)
 
     return (
         review_subject

@@ -95,6 +95,16 @@ These are changes to the draft worked out elsewhere; they fix real failure modes
     the registered phase body hash against the plan on that base. Stacking phase N+1 on
     phase N's branch is how PRs snowball and how a stale base silently diverges from
     main.
+13. **An unbounded diff cannot fit in argv.** The prompt is one argv entry and `execve`
+    caps argv plus environ at ARG_MAX (1 MiB on macOS), so a phase that rebuilds a
+    committed minified bundle fails REVIEW with "[Errno 7] Argument list too long"
+    before the agent starts. A repo's `.gitattributes -diff` does not help: `gh pr diff`
+    reads GitHub's diff endpoint, which ignores it. Fix: `diffs.elide_diff` drops the
+    body of any file section over a per-file budget while keeping every file header, so
+    the reviewer still sees the full set of touched paths and every hand-written hunk,
+    and `jobs._bounded_prompt` is the last-resort cap on the whole prompt. Both announce
+    themselves in-band and point at the untruncated prompt on disk — a silently
+    truncated review is worse than a loud one.
 
 ## Full-circle closure: `CLOSE_PHASE`
 
