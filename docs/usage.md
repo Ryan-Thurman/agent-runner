@@ -22,6 +22,14 @@ crash recovery, log-tailing, and roadmap-to-plan loops.
 - `CHECKING`: resume by running checks without running IMPLEMENT again.
 - `REVIEWING`: run review. `PASS` runs `CLOSE_PHASE`; `CHANGES_REQUESTED`
   runs a `FIX` job with `trigger="review"` if retries remain; `BLOCKED` stops.
+  The runner allows up to `REVIEW_FIX_ATTEMPT_LIMIT` (2) review-triggered `FIX`
+  attempts, each followed by a re-review, before it blocks; the review-fix
+  prompt is built to make each attempt count: it carries the reviewed baseline
+  SHA and requires
+  the coder to confirm HEAD advanced (guarding against no-op "pushed but
+  byte-identical" rounds), to fix the root cause rather than re-patch a
+  recurring symptom, and to keep the existing suite green (widening any adjacent
+  guard test) so a fix cannot introduce a regression.
 - `FIXING`: resume the last available fix prompt, then rerun checks.
 - `CLOSING`: run the closer profile with write flags, validate the plan
   write-back and handoff, optionally commit, and mark the phase `COMPLETE`.
@@ -456,13 +464,18 @@ work. For blocked registered phases with PR metadata, the runner checks
 `MERGED`, it verifies that the configured `baseBranch` contains the merge
 commit, fetching `origin/<baseBranch>` once if needed.
 
-The phase is marked `COMPLETE` only when the plan also marks that phase
-`Status: COMPLETE` and the protected phase body hash still matches the
-registered SQLite hash. On success, `blocked_from` is cleared, `published_sha`
-is refreshed from the PR head SHA, and a `phase.reconciled` event is recorded.
-If the merged PR lacks matching plan evidence, the runner leaves the phase
-blocked with a message explaining which proof is missing instead of guessing.
-Open or otherwise unmerged PRs are not reconciled.
+If the plan already marks that phase `Status: COMPLETE` and the protected phase
+body hash still matches the registered SQLite hash, the phase is marked
+`COMPLETE` directly. If the PR was merged before `CLOSE_PHASE` wrote the marker,
+but the protected phase body hash still matches, the runner checks out and
+fast-forwards the configured `baseBranch`, writes only runner-owned close
+metadata (`Status: COMPLETE`, evidence, and a handoff), commits and pushes that
+repair to the base branch, then marks the phase `COMPLETE`. On success,
+`blocked_from` is cleared, `published_sha` is refreshed from the PR head SHA,
+and a `phase.reconciled` event is recorded. If the merged PR's phase body no
+longer matches the registered phase, the runner leaves the phase blocked with a
+message explaining which proof is missing instead of guessing. Open or otherwise
+unmerged PRs are not reconciled.
 
 To pause at the next job boundary while a run is active:
 

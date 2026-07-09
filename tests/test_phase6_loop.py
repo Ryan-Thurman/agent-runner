@@ -310,16 +310,18 @@ if "Fix only" in prompt:
     Path("fix-marker.txt").write_text("fixed\n", encoding="utf-8")
     if os.environ.get("AGENT_PUBLISH") == "1":
         subprocess.run(["git", "add", "-A"], check=True)
-        subprocess.run([
-            "git",
-            "-c",
-            "user.email=test@example.com",
-            "-c",
-            "user.name=Test User",
-            "commit",
-            "-qm",
-            "fix phase",
-        ], check=True)
+        staged = subprocess.run(["git", "diff", "--cached", "--quiet"])
+        if staged.returncode != 0:
+            subprocess.run([
+                "git",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test User",
+                "commit",
+                "-qm",
+                "fix phase",
+            ], check=True)
     print("fake fixer completed")
     raise SystemExit(0)
 
@@ -1494,7 +1496,7 @@ class Phase6LoopTests(unittest.TestCase):
             fix_prompt = (trace / "fix-1.md").read_text(encoding="utf-8")
             self.assertIn("Create fix-marker.txt", fix_prompt)
 
-    def test_review_fix_limit_blocks_after_one_rereview_without_second_fix(self):
+    def test_review_fix_limit_blocks_after_two_fixes_without_third(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -1519,10 +1521,10 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertIn("review fix limit exhausted", result.stderr)
             phase = phase_row(home, repo)
             self.assertEqual(phase["status"], "BLOCKED")
-            self.assertEqual(phase["retry_count"], 1)
+            self.assertEqual(phase["retry_count"], 2)
             phase_jobs = jobs(home, phase["id"])
-            self.assertEqual([job["type"] for job in phase_jobs].count("REVIEW"), 2)
-            self.assertEqual([job["type"] for job in phase_jobs].count("FIX"), 1)
+            self.assertEqual([job["type"] for job in phase_jobs].count("REVIEW"), 3)
+            self.assertEqual([job["type"] for job in phase_jobs].count("FIX"), 2)
             first_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("Make one comprehensive pass", first_prompt)
 
@@ -1568,8 +1570,8 @@ class Phase6LoopTests(unittest.TestCase):
             phase = phase_row(home, repo)
             self.assertEqual(phase["status"], "BLOCKED")
             phase_jobs = jobs(home, phase["id"])
-            self.assertEqual([job["type"] for job in phase_jobs].count("REVIEW"), 2)
-            self.assertEqual([job["type"] for job in phase_jobs].count("FIX"), 1)
+            self.assertEqual([job["type"] for job in phase_jobs].count("REVIEW"), 3)
+            self.assertEqual([job["type"] for job in phase_jobs].count("FIX"), 2)
             # The runner posts every non-PASS review as a plain comment: it
             # never issues a formal review verdict on its own PR.
             self.assertFalse((gh_state / "github-review.json").exists())

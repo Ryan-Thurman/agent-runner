@@ -796,7 +796,7 @@ class Phase7CloseTests(unittest.TestCase):
             self.assertIn("phase.reconciled", event_types)
             self.assertIn("plan.complete", event_types)
 
-    def test_manually_merged_phase_blocks_when_plan_marker_is_missing(self):
+    def test_manually_merged_phase_repairs_missing_plan_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -809,8 +809,11 @@ class Phase7CloseTests(unittest.TestCase):
             git_init(repo)
             write_phase7_agent(script)
             write_fake_gh(bin_dir / "gh")
-            write_plan(repo, status="PENDING")
+            write_plan(repo, phase_count=2, status="PENDING")
             write_config(repo, script, auto_commit=True, merge_on_close=True)
+            before_phase_hash = parse_plan_file(repo, "docs/plan.md").phases[
+                0
+            ].content_hash
             commit_all(repo)
             add_origin_remote(repo, root)
             merge_commit = subprocess.check_output(
@@ -832,11 +835,26 @@ class Phase7CloseTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn(
-                "plan marker does not prove completion: phase status is PENDING",
+                "reconciled phase 1 from manually merged PR #1",
                 result.stderr,
             )
+            self.assertIn("BLOCKED after IMPLEMENT failure", result.stderr)
             rows = phase_rows(home, repo)
-            self.assertEqual(rows[0]["status"], "BLOCKED")
+            self.assertEqual(rows[0]["status"], "COMPLETE")
+            self.assertIsNone(rows[0]["blocked_from"])
+            self.assertEqual(rows[0]["published_sha"], merge_commit)
+            self.assertEqual(rows[1]["status"], "BLOCKED")
+            parsed = parse_plan_file(repo, "docs/plan.md")
+            self.assertEqual(parsed.phases[0].status, "COMPLETE")
+            self.assertEqual(parsed.phases[0].content_hash, before_phase_hash)
+            handoff = repo / ".acc/phases/docs-plan.md/phase-01-handoff.md"
+            self.assertTrue(handoff.exists())
+            origin_plan = subprocess.check_output(
+                ["git", "show", "origin/main:docs/plan.md"],
+                cwd=repo,
+                text=True,
+            )
+            self.assertIn("## Phase 1: First phase\nStatus: COMPLETE", origin_plan)
             with connect_db(home) as db:
                 event_types = [
                     row["event_type"]
@@ -844,7 +862,7 @@ class Phase7CloseTests(unittest.TestCase):
                         "SELECT event_type FROM events ORDER BY id"
                     ).fetchall()
                 ]
-            self.assertNotIn("phase.reconciled", event_types)
+            self.assertIn("phase.reconciled", event_types)
 
     def test_manually_merged_phase_blocks_when_plan_body_hash_mismatches(self):
         with tempfile.TemporaryDirectory() as tmp:
