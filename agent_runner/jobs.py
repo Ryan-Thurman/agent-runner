@@ -40,6 +40,10 @@ _LIVE_LOGS_DISABLE_VALUES = {"0", "false", "no", "off"}
 _LIVE_LOGS_LINE_VALUE = "lines"
 _LIVE_LOGS_ROLLING_VALUE = "rolling"
 
+# Half of the 1 MiB macOS ARG_MAX, which covers argv *and* environ. The rest is
+# headroom for the flags, the environment, and the kernel's pointer table.
+MAX_PROMPT_BYTES = 512 * 1024
+
 
 @dataclass(frozen=True)
 class LivePreviewContext:
@@ -161,7 +165,9 @@ def run_agent_job(
         started_at=utc_now_iso(),
     )
 
-    argv = _agent_argv(profile, role, effective_prompt, output_path)
+    argv = _agent_argv(
+        profile, role, _bounded_prompt(effective_prompt, prompt_path), output_path
+    )
     exit_code: Optional[int]
     error: Optional[str]
     _print_job_start(
@@ -364,6 +370,27 @@ def _effective_prompt(profile: AgentProfile, prompt: str) -> str:
     if not profile.prompt_prefix:
         return prompt
     return f"{profile.prompt_prefix.rstrip()}\n\n{prompt}"
+
+
+def _bounded_prompt(prompt: str, prompt_path: Path) -> str:
+    """Keep the prompt argv under ARG_MAX.
+
+    `execve` caps argv plus environ at 1 MiB on macOS, and the prompt is one
+    argv entry, so an oversized prompt fails the job with "Argument list too
+    long" before the agent starts. Callers should avoid embedding unbounded
+    content; this is the last resort that keeps a job runnable when one of them
+    grows unexpectedly. The untruncated prompt is on disk already, so point the
+    agent at it.
+    """
+    encoded = prompt.encode("utf-8")
+    if len(encoded) <= MAX_PROMPT_BYTES:
+        return prompt
+    # Cut on a byte budget, then drop any partial character at the seam.
+    kept = encoded[:MAX_PROMPT_BYTES].decode("utf-8", errors="ignore")
+    return (
+        f"{kept}\n\n[agent-runner] prompt truncated at {MAX_PROMPT_BYTES} bytes "
+        f"to stay under ARG_MAX. Full prompt: {prompt_path}\n"
+    )
 
 
 def _run_process(

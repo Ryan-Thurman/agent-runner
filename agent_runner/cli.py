@@ -634,7 +634,8 @@ def _parsed_phase_for_number(parsed_plan, phase_number: int):
 def _autofix_prompt(
     *, phase, parsed_phase, blocking_message: str, require_publish: bool
 ) -> str:
-    log_tail = _newest_phase_log_tail(Path(phase["log_dir"]))
+    log_dir = Path(phase["log_dir"])
+    log_tail = _newest_phase_log_tail(log_dir)
     publish = _publish_instructions(require_publish, update_existing=True)
     commit_rule = (
         "- Publish the fixer changes before exiting, following the publish "
@@ -642,6 +643,7 @@ def _autofix_prompt(
         if require_publish
         else "- Do not commit anything.\n"
     )
+    review_context = _autofix_review_context(phase, log_dir)
     return (
         "Fix the underlying problem that blocked this phase. This is a one-shot "
         "write-capable fixer job.\n\n"
@@ -656,11 +658,25 @@ def _autofix_prompt(
         f"Phase {parsed_phase.phase_number}: {parsed_phase.title}\n\n"
         "Phase body:\n"
         f"{parsed_phase.content}\n\n"
+        f"{review_context}"
         "Blocking event message:\n"
         f"{blocking_message}\n\n"
         "Newest phase log tail:\n"
         f"{log_tail}"
     )
+
+
+def _autofix_review_context(phase, log_dir: Path) -> str:
+    lines: list[str] = []
+    pr_url = phase["pr_url"]
+    if pr_url:
+        lines.append(f"Phase PR URL: {pr_url}")
+    review_json_path = log_dir / "review.json"
+    if review_json_path.exists():
+        lines.append(f"Review JSON path: {review_json_path}")
+    if not lines:
+        return ""
+    return "Review context:\n" + "\n".join(lines) + "\n\n"
 
 
 def _newest_phase_log_tail(log_dir: Path) -> str:

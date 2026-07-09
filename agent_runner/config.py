@@ -238,6 +238,7 @@ def sample_config_for_checks(checks: list[str]) -> str:
     return SAMPLE_CONFIG_TEMPLATE.format(
         checks=_format_checks(checks),
         claude_allowed_tools=claude_write_allowed_tools(checks),
+        claude_read_only_allowed_tools=claude_read_only_allowed_tools(),
     )
 
 
@@ -249,6 +250,20 @@ def claude_write_allowed_tools(checks: list[str]) -> str:
         tokens = check.split()
         if tokens and tokens[0] not in commands:
             commands.append(tokens[0])
+    return ",".join(f"Bash({command}:*)" for command in commands)
+
+
+def claude_read_only_allowed_tools() -> str:
+    """Bash allowlist for headless claude read-only review roles."""
+    commands = [
+        "gh pr diff",
+        "gh pr view",
+        "gh pr checks",
+        "gh api",
+        "git diff",
+        "git log",
+        "git show",
+    ]
     return ",".join(f"Bash({command}:*)" for command in commands)
 
 
@@ -451,9 +466,9 @@ SAMPLE_CONFIG_TEMPLATE = """{{
     }},
     "antigravity": {{
       "command": "agy",
-      "promptArgs": ["-p", "--print-timeout", "40m"],
-      "writeFlags": ["--dangerously-skip-permissions"],
-      "readOnlyFlags": ["--sandbox"],
+      "promptArgs": ["--print-timeout", "40m"],
+      "writeFlags": ["--dangerously-skip-permissions", "-p"],
+      "readOnlyFlags": ["--sandbox", "-p"],
       "outputCapture": "stdout"
     }},
     // claude flag rules: --allowedTools/--disallowedTools are VARIADIC — the
@@ -464,12 +479,13 @@ SAMPLE_CONFIG_TEMPLATE = """{{
     // the configured checks) alongside acceptEdits. Widen the allowlist if a
     // fixer job dies on a denied command; --dangerously-skip-permissions works
     // as a last resort but removes all gating on autonomous write jobs.
-    // Reviewers stay read-only via disallowedTools.
+    // Reviewers stay read-only via disallowedTools and can run narrowly
+    // allowlisted read-only gh/git commands to inspect PRs.
     "claude-opus": {{
       "command": "claude",
       "promptArgs": ["--model", "claude-opus-4-8", "-p"],
       "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools={claude_allowed_tools}"],
-      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
+      "readOnlyFlags": ["--allowedTools={claude_read_only_allowed_tools}", "--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"
     }},
@@ -477,7 +493,7 @@ SAMPLE_CONFIG_TEMPLATE = """{{
       "command": "claude",
       "promptArgs": ["--model", "claude-sonnet-5", "-p"],
       "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools={claude_allowed_tools}"],
-      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
+      "readOnlyFlags": ["--allowedTools={claude_read_only_allowed_tools}", "--disallowedTools=Edit,Write,NotebookEdit"],
       "promptPrefix": "",
       "outputCapture": "stdout"
     }}

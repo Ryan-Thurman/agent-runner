@@ -122,9 +122,7 @@ if "Review the staged phase work independently" in prompt:
     print(json.dumps({{
         "status": "PASS",
         "summary": "accepted",
-        "blockingIssues": [],
-        "nonBlockingIssues": [],
-        "recommendedFixPrompt": ""
+        "findings": {{"blocking": [], "shouldFix": [], "nitpick": []}}
     }}))
     raise SystemExit(0)
 if "Close the accepted phase" in prompt:
