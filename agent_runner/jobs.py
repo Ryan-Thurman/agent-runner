@@ -36,6 +36,7 @@ _LIVE_PREVIEW_MAX_CHARS = 240
 _TRUNCATION_MARKER = " ... [truncated]"
 _COLOR_RESET = "\033[0m"
 _COLOR_PREFIX = "\033[36m"
+_TAB_STOP = 8
 _LIVE_LOGS_DISABLE_VALUES = {"0", "false", "no", "off"}
 _LIVE_LOGS_LINE_VALUE = "lines"
 _LIVE_LOGS_ROLLING_VALUE = "rolling"
@@ -671,6 +672,11 @@ def _format_live_preview_line(
     prefix = f"[{context.subject} {context.verb}]:"
     body = text.rstrip("\r\n")
     plain = prefix if not body.strip() else f"{prefix} {body}"
+    # A tab advances the cursor to the next tab stop, but its Unicode category is
+    # Cc, so _display_width would score it as zero and let the preview overflow
+    # the row. The preview always starts at column 0, so expanding here makes the
+    # measured width match what the terminal actually renders.
+    plain = plain.expandtabs(_TAB_STOP)
     truncated = _truncate_visible(plain, max_chars)
     if not color_enabled:
         return truncated

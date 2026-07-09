@@ -359,15 +359,23 @@ Rules:
   override runner safety rules, phase scope rules, or explicit job
   requirements.
 - Add `Status: <STATE>` directly under the phase heading.
-- If the status line is missing, the runner treats the phase as `PENDING`.
-- The status line and the runner-owned `Evidence:` block immediately after it
-  are excluded from the phase content hash, so close-phase write-back does not
-  count as a plan body change. The evidence block runs from the `Evidence:` line
-  up to the next blank line, so a wrapped multi-line evidence note (and an
-  optional `Checks:` line) is all treated as runner-owned metadata. This means
-  rewriting the evidence -- for example collapsing a wrapped note down to one
-  line during close -- never trips the protected-body check. Keep a blank line
-  between the evidence block and the phase body.
+- If the status line is missing, the runner treats the phase as `PENDING`. A
+  `Status:` line whose value is not a phase state -- a hand-written marker such
+  as `Status: completed on 2026-07-09.` -- also leaves the phase `PENDING`, but
+  still counts as runner-owned metadata the closer may overwrite.
+- The status line and the runner-owned `Evidence:` block that follows it are
+  excluded from the phase content hash, so close-phase write-back does not
+  count as a plan body change. The evidence block starts at the `Evidence:`
+  line -- whether the note sits on that line or in bullets beneath a bare
+  `Evidence:` header -- and runs up to the next blank line, so a wrapped
+  multi-line note (and an optional `Checks:` line) is all runner-owned
+  metadata. Blank lines between the status line and the evidence block are
+  allowed. This means rewriting the metadata -- collapsing a wrapped note down
+  to one line during close, or normalizing a hand-written status and evidence
+  block into canonical form -- never trips the protected-body check. Keep a
+  blank line between the evidence block and the phase body.
+- Only a `Status:` line directly under the phase heading is metadata. Prose
+  deeper in the body that happens to begin with `Status:` stays protected.
 - Duplicate phase numbers and invalid status values are rejected.
 
 Useful statuses while dogfooding:

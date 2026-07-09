@@ -264,6 +264,77 @@ class Phase3PlanTests(unittest.TestCase):
         )
         self.assertEqual(one_line.content_hash, wrapped.content_hash)
 
+    def test_handwritten_status_and_evidence_block_are_runner_metadata(self):
+        # A human closing a phase by hand writes prose in the status marker and
+        # bullets under a bare `Evidence:` header. The closer later rewrites both
+        # into canonical form; that write-back must not read as a body edit.
+        handwritten = parse_plan_markdown(
+            "## Phase 1: CLI\n\n"
+            "Status: completed on 2026-07-09.\n\n"
+            "Evidence:\n"
+            "- `cargo test` passed.\n"
+            "- `cargo check` passed.\n\n"
+            "Build CLI.\n",
+            path="docs/plan.md",
+        )
+        closed = parse_plan_markdown(
+            "## Phase 1: CLI\n"
+            "Status: COMPLETE\n"
+            "Evidence: 252b04a; review PASS; `cargo test` passed.\n\n"
+            "Build CLI.\n",
+            path="docs/plan.md",
+        )
+
+        # The prose marker names no phase status, so the phase is still PENDING.
+        self.assertEqual(handwritten.phases[0].status, "PENDING")
+        self.assertEqual(closed.phases[0].status, "COMPLETE")
+        self.assertEqual(
+            handwritten.phases[0].content_hash, closed.phases[0].content_hash
+        )
+        self.assertEqual(handwritten.content_hash, closed.content_hash)
+
+    def test_bare_evidence_header_block_does_not_change_phase_hash(self):
+        without_evidence = parse_plan_markdown(
+            "## Phase 1: CLI\nStatus: COMPLETE\n\nBuild CLI.\n",
+            path="docs/plan.md",
+        )
+        bare_header = parse_plan_markdown(
+            "## Phase 1: CLI\n"
+            "Status: COMPLETE\n"
+            "Evidence:\n"
+            "- `pytest` green.\n"
+            "- docs updated.\n\n"
+            "Build CLI.\n",
+            path="docs/plan.md",
+        )
+
+        self.assertEqual(
+            without_evidence.phases[0].content_hash,
+            bare_header.phases[0].content_hash,
+        )
+
+    def test_body_line_starting_with_status_word_stays_protected(self):
+        # Only a `Status:` line directly under the heading is metadata; prose
+        # deeper in the body must keep contributing to the protected hash.
+        original = parse_plan_markdown(
+            "## Phase 1: CLI\n"
+            "Status: COMPLETE\n\n"
+            "Build CLI.\n"
+            "Status: reporting is out of scope.\n",
+            path="docs/plan.md",
+        )
+        edited = parse_plan_markdown(
+            "## Phase 1: CLI\n"
+            "Status: COMPLETE\n\n"
+            "Build CLI.\n"
+            "Status: reporting is now in scope.\n",
+            path="docs/plan.md",
+        )
+
+        self.assertNotEqual(
+            original.phases[0].content_hash, edited.phases[0].content_hash
+        )
+
     def test_status_marker_can_follow_blank_lines(self):
         direct = parse_plan_markdown(
             "## Phase 1: CLI\n"

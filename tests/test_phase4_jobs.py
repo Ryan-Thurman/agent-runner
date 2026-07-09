@@ -341,6 +341,20 @@ class Phase4JobTests(unittest.TestCase):
         # zero-width space (category Cf) advances the cursor by nothing
         self.assertEqual(_display_width("\u200b" * 10), 0)
 
+    def test_live_preview_expands_tabs_so_rolling_row_never_overflows(self):
+        # Agents that echo source lines (codex) emit tabs. A tab advances the
+        # cursor to the next tab stop, so an unexpanded preview wraps onto a
+        # second row that \r\x1b[2K never clears, stranding it on screen.
+        context = LivePreviewContext(subject="codex", verb="fixing")
+        tabbed = "\t".join("word" for _ in range(20))
+
+        preview = _format_live_preview_line(
+            context, tabbed, color_enabled=False, max_chars=60
+        )
+
+        self.assertNotIn("\t", preview)
+        self.assertLessEqual(_display_width(preview), 60)
+
     def test_live_preview_uses_rolling_line_when_enabled_and_clears_line(self):
         class FakeTTY(io.StringIO):
             def isatty(self):

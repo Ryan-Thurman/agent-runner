@@ -13,7 +13,15 @@ from .storage import PHASE_STATUSES, phase_log_dir
 
 PHASE_HEADING_RE = re.compile(r"^## Phase\s+(\d+):\s*(.+?)\s*$")
 STATUS_RE = re.compile(r"^Status:\s*([A-Z_]+)\s*$")
-EVIDENCE_RE = re.compile(r"^Evidence:\s*(.+?)\s*$")
+# Any `Status:` line under the heading is a runner-owned marker, even when its
+# value is hand-written prose ("Status: completed on 2026-07-09."). Only the
+# canonical STATUS_RE form carries a phase status; the rest is still metadata
+# and must stay out of the protected body hash, or the closer's rewrite of it
+# reads as a body edit.
+STATUS_LINE_RE = re.compile(r"^Status:\s*\S.*$")
+# The value may sit on the `Evidence:` line or in the block beneath it, so a
+# bare header counts as the start of the runner-owned evidence block.
+EVIDENCE_RE = re.compile(r"^Evidence:\s*(.*?)\s*$")
 PROTECTED_CHANGE_STATUSES = {
     "IMPLEMENTING",
     "CHECKING",
@@ -285,17 +293,32 @@ def _extract_status_and_hash_lines(lines: list[str]) -> tuple[str, list[str]]:
     if status_index == len(lines):
         return "PENDING", list(lines)
 
-    match = STATUS_RE.match(lines[status_index].rstrip("\r\n"))
-    if not match:
+    status_line = lines[status_index].rstrip("\r\n")
+    if not STATUS_LINE_RE.match(status_line):
         return "PENDING", list(lines)
-    status = match.group(1)
-    if status not in PHASE_STATUSES:
-        raise PlanError(f"invalid phase status marker: {status}")
+
+    match = STATUS_RE.match(status_line)
+    if match is None:
+        # A hand-written marker ("Status: completed on 2026-07-09.") names no
+        # phase status, so the phase is still PENDING to the runner -- but the
+        # line is metadata the closer owns and may overwrite.
+        status = "PENDING"
+    else:
+        status = match.group(1)
+        if status not in PHASE_STATUSES:
+            raise PlanError(f"invalid phase status marker: {status}")
+
     hash_start_index = status_index + 1
-    if hash_start_index < len(lines):
-        evidence_match = EVIDENCE_RE.match(lines[hash_start_index].rstrip("\r\n"))
-        if evidence_match:
-            hash_start_index = _skip_runner_metadata(lines, hash_start_index)
+    # Hand-written markers often separate the status from its evidence with a
+    # blank line; the canonical write-back does not. Look past blanks so both
+    # shapes hash to the same protected body.
+    evidence_index = hash_start_index
+    while evidence_index < len(lines) and not lines[evidence_index].strip():
+        evidence_index += 1
+    if evidence_index < len(lines) and EVIDENCE_RE.match(
+        lines[evidence_index].rstrip("\r\n")
+    ):
+        hash_start_index = _skip_runner_metadata(lines, evidence_index)
     return status, list(lines[hash_start_index:])
 
 
