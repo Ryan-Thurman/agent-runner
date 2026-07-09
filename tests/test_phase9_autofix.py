@@ -355,6 +355,8 @@ class AutofixLoopTests(unittest.TestCase):
             self.assertIn("retries exhausted", autofix_prompt)
             self.assertIn("Newest phase log tail", autofix_prompt)
             self.assertIn("Never invoke `autorun`, `agent-runner`", autofix_prompt)
+            self.assertNotIn("Phase PR URL:", autofix_prompt)
+            self.assertNotIn("Review JSON path:", autofix_prompt)
             review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("fixed.txt", review_prompt)
             self.assertIn("git diff --staged", review_prompt)
@@ -412,6 +414,7 @@ class AutofixLoopTests(unittest.TestCase):
             autofix_prompt = (trace / "autofix-1.md").read_text(encoding="utf-8")
             self.assertIn("Publish requirements before you finish", autofix_prompt)
             self.assertIn("update the existing PR", autofix_prompt)
+            self.assertNotIn("Phase PR URL:", autofix_prompt)
             self.assertNotIn("- Do not commit anything.", autofix_prompt)
             status = subprocess.check_output(
                 ["git", "status", "--porcelain"],
@@ -467,6 +470,9 @@ class AutofixLoopTests(unittest.TestCase):
             phase_jobs = jobs(home, phase["id"])
             self.assertEqual([job["type"] for job in phase_jobs].count("REVIEW"), 2)
             self.assertEqual([job["type"] for job in phase_jobs].count("AUTOFIX"), 1)
+            autofix_prompt = (trace / "autofix-1.md").read_text(encoding="utf-8")
+            self.assertIn("Phase PR URL: https://example.test/pull/1", autofix_prompt)
+            self.assertIn("Review JSON path:", autofix_prompt)
             second_review = (trace / "review-2.md").read_text(encoding="utf-8")
             self.assertIn(f"Reviewed SHA: {phase['published_sha']}", second_review)
             self.assertIn("Previous review.json path:", second_review)

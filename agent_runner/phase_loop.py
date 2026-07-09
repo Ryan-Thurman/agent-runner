@@ -27,6 +27,7 @@ from .storage import (
 
 REVIEW_FINDING_BUCKETS = ("blocking", "shouldFix", "nitpick")
 REVIEW_GATING_BUCKETS = ("blocking", "shouldFix")
+DIFF_STAT_FILE_LIMIT = 200
 REVIEW_RESOLVED_INSTRUCTION = (
     "On re-review, verify each prior finding is resolved. Raise a new finding "
     "only if it is blocking; do not introduce new shouldFix or nitpick findings "
@@ -2881,7 +2882,7 @@ def _published_phase_diff_stat(repo_root: Path, phase: sqlite3.Row) -> str:
         except FileNotFoundError:
             result = None
         if result is not None and result.returncode == 0 and result.stdout:
-            return result.stdout
+            return _truncate_diff_stat_text(result.stdout)
         return _published_phase_file_stat(repo_root, pr_url)
 
     for base_ref in ("origin/main", "main", "origin/master", "master", "HEAD~1"):
@@ -2927,7 +2928,8 @@ def _format_pr_files_stat(files: list[Any]) -> str:
     lines: list[str] = []
     total_additions = 0
     total_deletions = 0
-    for file_payload in files:
+    displayed_files = files[:DIFF_STAT_FILE_LIMIT]
+    for file_payload in displayed_files:
         if not isinstance(file_payload, dict):
             raise JobError("gh pr view returned invalid files data: expected objects")
         path = file_payload.get("path")
@@ -2949,6 +2951,26 @@ def _format_pr_files_stat(files: list[Any]) -> str:
             line = f"{line} {markers}"
         lines.append(line)
 
+    for file_payload in files[DIFF_STAT_FILE_LIMIT:]:
+        if not isinstance(file_payload, dict):
+            raise JobError("gh pr view returned invalid files data: expected objects")
+        path = file_payload.get("path")
+        additions = file_payload.get("additions", 0)
+        deletions = file_payload.get("deletions", 0)
+        if not isinstance(path, str) or not path:
+            raise JobError("gh pr view returned invalid files data: missing path")
+        if not isinstance(additions, int) or not isinstance(deletions, int):
+            raise JobError(
+                "gh pr view returned invalid files data: additions/deletions "
+                "must be integers"
+            )
+        total_additions += additions
+        total_deletions += deletions
+
+    omitted_count = len(files) - len(displayed_files)
+    if omitted_count > 0:
+        lines.append(f"… +{omitted_count} more files")
+
     changed = len(files)
     summary_parts = [f" {changed} file{'s' if changed != 1 else ''} changed"]
     if total_additions:
@@ -2963,6 +2985,16 @@ def _format_pr_files_stat(files: list[Any]) -> str:
         summary_parts.append("0 insertions(+), 0 deletions(-)")
     lines.append(", ".join(summary_parts))
     return "\n".join(lines) + "\n"
+
+
+def _truncate_diff_stat_text(diff_stat: str) -> str:
+    lines = diff_stat.splitlines()
+    if len(lines) <= DIFF_STAT_FILE_LIMIT:
+        return diff_stat
+    omitted_count = len(lines) - DIFF_STAT_FILE_LIMIT
+    truncated = lines[:DIFF_STAT_FILE_LIMIT]
+    truncated.append(f"… +{omitted_count} more files")
+    return "\n".join(truncated) + "\n"
 
 
 def _stat_change_markers(additions: int, deletions: int) -> str:

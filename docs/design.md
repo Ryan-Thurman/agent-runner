@@ -5,7 +5,8 @@ plans live in `docs/archive/`, and generated execution plans such as
 `docs/plan-roadmap.md` capture roadmap work when active. Toolbelt paths in the
 reuse map below (`commands/...`, `skills/...`, `workflows/...`) refer to the
 [agent-toolbelt](../../agent-toolbelt) repo, where the early origin copy of
-this design lived.
+this design lived. The current REVIEW prompt and JSON contract are specified in
+[`docs/review-contract.md`](review-contract.md).
 
 A minimal local CLI (`agent-runner run`, Python 3 stdlib + SQLite) that automates the
 manual bounce between coding agents inside a Supacode project/worktree:
@@ -57,12 +58,12 @@ These are changes to the draft worked out elsewhere; they fix real failure modes
    `CHANGES_REQUESTED`; a checks-fail → FIX → checks-fail cycle never touches it and loops
    forever. Fix: increment on **every FIX enqueue**, whatever triggered it.
 4. **Review never converges without memory.** A fresh reviewer each round finds fresh nits.
-   Fix: feed the previous `review.json` into re-reviews and ask the reviewer to verify
-   all prior requested updates before reporting any remaining or new findings. Review
-   findings are grouped under `findings` buckets such as `blocking`, `shouldFix`, and
-   `nitpick`; `PASS` is valid only when every bucket is empty. Legacy
-   `blockingIssues` and `nonBlockingIssues` are normalized during migration, and any
-   non-empty bucket drives `CHANGES_REQUESTED`.
+   Fix: pass the previous `review.json` path into re-reviews, ask the reviewer to verify
+   each prior finding, and allow new re-review findings only when they are `blocking`.
+   Review output is `status`, `summary`, and `findings`; findings are grouped under
+   `blocking`, `shouldFix`, and `nitpick`. Only `blocking` and `shouldFix` gate
+   `CHANGES_REQUESTED` and review-triggered FIX jobs. `nitpick` is advisory and is
+   shown to a human without churning the loop.
 5. **Reviewer must be unable to edit.** Run Codex with a read-only sandbox
    (`codex exec --sandbox read-only` or equivalent). Report-first is an invariant across the
    whole review family (`phase-gate`: "the reviewer never edits").
@@ -97,14 +98,11 @@ These are changes to the draft worked out elsewhere; they fix real failure modes
     main.
 13. **An unbounded diff cannot fit in argv.** The prompt is one argv entry and `execve`
     caps argv plus environ at ARG_MAX (1 MiB on macOS), so a phase that rebuilds a
-    committed minified bundle fails REVIEW with "[Errno 7] Argument list too long"
-    before the agent starts. A repo's `.gitattributes -diff` does not help: `gh pr diff`
-    reads GitHub's diff endpoint, which ignores it. Fix: `diffs.elide_diff` drops the
-    body of any file section over a per-file budget while keeping every file header, so
-    the reviewer still sees the full set of touched paths and every hand-written hunk,
-    and `jobs._bounded_prompt` is the last-resort cap on the whole prompt. Both announce
-    themselves in-band and point at the untruncated prompt on disk — a silently
-    truncated review is worse than a loud one.
+    committed minified bundle can fail REVIEW before the reviewer starts. Fix: REVIEW
+    prompts carry PR metadata, the PR URL, check-log paths, and the previous
+    `review.json` path; agents fetch their own diff with `gh pr diff <url>`. When
+    `autoCommit=false`, the reviewer runs `git diff --staged` itself. `jobs._bounded_prompt`
+    remains as a last-resort cap for prompt sections such as phase body and plan context.
 
 ## Full-circle closure: `CLOSE_PHASE`
 
@@ -172,16 +170,19 @@ describes each agent as a profile, and roles reference a profile:
     "claude": {
       "command": "claude",
       "promptArgs": ["-p"],
-      "writeFlags": ["--permission-mode", "acceptEdits"],
-      "readOnlyFlags": ["--disallowedTools", "Edit,Write,NotebookEdit"],
+      "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools=Bash(git:*),Bash(gh:*)"],
+      "readOnlyFlags": [
+        "--allowedTools=Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr checks:*),Bash(gh api:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*)",
+        "--disallowedTools=Edit,Write,NotebookEdit"
+      ],
       "promptPrefix": "",
       "outputCapture": "stdout"
     },
     "codex": {
       "command": "codex",
       "promptArgs": ["exec"],
-      "writeFlags": ["--sandbox", "workspace-write"],
-      "readOnlyFlags": ["--sandbox", "read-only"],
+      "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
+      "readOnlyFlags": ["--sandbox", "read-only", "-c", "sandbox_read_only.network_access=true"],
       "outputCapture": "last-message-file"
     }
   },

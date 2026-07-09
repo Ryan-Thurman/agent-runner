@@ -4,6 +4,7 @@ from pathlib import Path
 
 from agent_runner.errors import JobError
 from agent_runner.phase_loop import (
+    _format_pr_files_stat,
     _render_github_review_body,
     _review_fix_prompt,
     _review_prompt,
@@ -167,6 +168,20 @@ class ReviewContractTests(unittest.TestCase):
         self.assertIn("- [ ] Shorten the marker comment", prompt)
         self.assertNotIn("recommendedFixPrompt", prompt)
         self.assertNotIn("```json", prompt)
+
+    def test_pr_file_stat_is_truncated_with_omitted_file_count(self):
+        files = [
+            {"path": f"file-{index}.py", "additions": 1, "deletions": 0}
+            for index in range(205)
+        ]
+
+        stat = _format_pr_files_stat(files)
+
+        self.assertIn("file-0.py | 1 +", stat)
+        self.assertIn("file-199.py | 1 +", stat)
+        self.assertNotIn("file-200.py", stat)
+        self.assertIn("… +5 more files", stat)
+        self.assertIn("205 files changed, 205 insertions(+)", stat)
 
 
 if __name__ == "__main__":

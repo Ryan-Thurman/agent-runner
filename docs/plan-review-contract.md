@@ -210,7 +210,14 @@ Acceptance Criteria:
 - `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` pass.
 
 ## Phase 4: Sweep the remaining prompts and reconcile the docs
-Status: PENDING
+Status: COMPLETE
+Evidence: commit pending; `python3 -m compileall -q .` passed;
+`python3 -m unittest discover -s tests -v` passed (211 tests); `rg -n
+"recommendedFixPrompt|blockingIssues|nonBlockingIssues|elide_diff" docs/design.md
+docs/usage.md` returned no matches. Added diff-stat truncation coverage in
+`tests/test_review_contract.py`, autofix PR/review context coverage in
+`tests/test_phase9_autofix.py`, updated `docs/design.md`, `docs/usage.md`, and
+`docs/review-contract.md`.
 
 Finish the smaller prompts the earlier phases did not touch, and bring the design
 and usage docs in line with the contract that now exists.

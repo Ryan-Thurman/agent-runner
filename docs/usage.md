@@ -13,10 +13,11 @@ crash recovery, log-tailing, and roadmap-to-plan loops.
 - Successful IMPLEMENT: stage implementation changes and run configured checks.
 - Passing checks with `autoCommit=true`: verify the coder committed, pushed,
   and opened a PR for the current branch, record the PR metadata, then run the
-  configured reviewer profile against the published PR diff plus phase content
-  and check output.
+  configured reviewer profile with the PR URL, branch, reviewed SHA, phase
+  content, and paths to check/review logs. The reviewer fetches its own diff
+  with `gh pr diff <url>`.
 - Passing checks with `autoCommit=false`: run the configured reviewer profile
-  with phase content, `git diff --staged`, and check output.
+  with phase content and instructions to inspect `git diff --staged` itself.
 - Failing checks: run a `FIX` job with `trigger="checks"` if retries remain,
   then rerun checks.
 - `CHECKING`: resume by running checks without running IMPLEMENT again.
@@ -132,21 +133,24 @@ Minimum config shape:
       "command": "codex",
       "promptArgs": ["exec"],
       "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
-      "readOnlyFlags": ["--sandbox", "read-only"],
+      "readOnlyFlags": ["--sandbox", "read-only", "-c", "sandbox_read_only.network_access=true"],
       "outputCapture": "last-message-file"
     },
     "antigravity": {
       "command": "agy",
-      "promptArgs": ["-p", "--print-timeout", "40m"],
-      "writeFlags": ["--dangerously-skip-permissions"],
-      "readOnlyFlags": ["--sandbox"],
+      "promptArgs": ["--print-timeout", "40m"],
+      "writeFlags": ["--dangerously-skip-permissions", "-p"],
+      "readOnlyFlags": ["--sandbox", "-p"],
       "outputCapture": "stdout"
     },
     "claude-opus": {
       "command": "claude",
       "promptArgs": ["--model", "claude-opus-4-8", "-p"],
       "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools=Bash(git:*),Bash(gh:*),Bash(python3:*)"],
-      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
+      "readOnlyFlags": [
+        "--allowedTools=Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr checks:*),Bash(gh api:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*)",
+        "--disallowedTools=Edit,Write,NotebookEdit"
+      ],
       "promptPrefix": "",
       "outputCapture": "stdout"
     },
@@ -154,7 +158,10 @@ Minimum config shape:
       "command": "claude",
       "promptArgs": ["--model", "claude-sonnet-5", "-p"],
       "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools=Bash(git:*),Bash(gh:*),Bash(python3:*)"],
-      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
+      "readOnlyFlags": [
+        "--allowedTools=Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr checks:*),Bash(gh api:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*)",
+        "--disallowedTools=Edit,Write,NotebookEdit"
+      ],
       "promptPrefix": "",
       "outputCapture": "stdout"
     }
@@ -221,11 +228,21 @@ Current notes:
   so treat it as a last resort. Similarly, codex's `workspace-write`
   sandbox disables network by default, which breaks dependency fetches and
   pushes; the `-c sandbox_workspace_write.network_access=true` override keeps
-  the filesystem sandbox while restoring network.
+  the filesystem sandbox while restoring network. Networked read-only Codex
+  reviewers need `-c sandbox_read_only.network_access=true`; this checkout's
+  probe succeeded against PR #36, but if your Codex build rejects the key, use a
+  network-capable Claude reviewer profile instead. Headless Claude reviewers
+  need a narrow read-only `--allowedTools=` list for `gh pr diff/view/checks/api`
+  and `git diff/log/show`; do not use `Bash(gh:*)`, because the runner owns PR
+  writes. For the Antigravity `agy` CLI, put `-p` at the end of role flags rather
+  than in `promptArgs`; otherwise it consumes the next flag as the prompt before
+  the runner's final positional prompt is appended.
 - An `AUTOFIX` job is a short-lived subprocess launched through the same
   `run_agent_job` machinery as IMPLEMENT and REVIEW jobs. It is not a daemon and
   no fixer process is kept alive after its single job. The prompt includes the
-  phase content, the blocking event message, and the newest phase log tail.
+  phase content, the blocking event message, the newest phase log tail, the PR
+  URL when the phase has one, and the `review.json` path when review findings
+  exist.
   With `autoCommit=true`, fixer prompts require committing, pushing, and
   updating the existing PR before the job exits; with `autoCommit=false`, they
   explicitly forbid committing. All fixer prompts forbid invoking `autorun`,
@@ -250,7 +267,9 @@ Current notes:
   the primary reviewer profile for that review; `roleFallbacks.reviewer` still
   applies after it. If triage fails, times out, or returns invalid JSON, the
   runner records the reason in a `review.triage` event and reviews with the
-  `complex` profile without blocking the phase.
+  `complex` profile without blocking the phase. Triage receives a bounded file
+  stat, not the full patch; very wide PRs are truncated with a `+N more files`
+  note.
 - `checks` run as shell commands from the repo root, in order. The first failure
   stops the check job.
 - `timeoutMinutes` applies per agent/check process.
@@ -278,20 +297,19 @@ Current notes:
   on the base blocks the phase instead of being clobbered.
 - `mergeOnClose=false` keeps a human in the loop: after CLOSE_PHASE the runner
   stops and asks you to merge the phase PR before it will start the next phase.
-- Review output must be strict JSON with `status`, `summary`, `findings`, and
-  `recommendedFixPrompt`. `findings` is grouped by bucket, currently
-  `blocking`, `shouldFix`, and `nitpick`. `PASS` is valid only when every
-  findings bucket is empty; any non-empty bucket is treated as
-  `CHANGES_REQUESTED` and sent to the review-triggered FIX prompt. During the
-  migration, legacy `blockingIssues` and `nonBlockingIssues` payloads are still
-  accepted: `blockingIssues` maps to `findings.blocking`, while
-  `nonBlockingIssues` maps to `findings.shouldFix`. The runner still writes
-  those legacy fields into normalized `review.json` for compatibility. The
-  extractor tolerates common agent framing: prose before or after the JSON, a
-  ```json code fence anywhere in the output (the last parseable block wins),
-  and the `claude -p --output-format json` envelope (the document is read from
-  its `result` field). Output with no parseable JSON document blocks the phase
-  and leaves the raw output in `review.log`.
+- Review output must be strict JSON with exactly `status`, `summary`, and
+  `findings`. `findings` is grouped by `blocking`, `shouldFix`, and `nitpick`.
+  `blocking` and `shouldFix` are gating buckets: either one turns a mistaken
+  `PASS` into `CHANGES_REQUESTED` and sends the phase to a review-triggered
+  `FIX` job. `nitpick` is advisory; it is preserved in `review.json` and PR
+  comments for humans but does not start a fixer. A `CHANGES_REQUESTED` review
+  with no gating findings is invalid and blocks closed. On re-review, the
+  reviewer verifies prior findings and may raise new findings only when they are
+  `blocking`. The extractor tolerates common agent framing: prose before or
+  after the JSON, a ```json code fence anywhere in the output (the last
+  parseable block wins), and the `claude -p --output-format json` envelope (the
+  document is read from its `result` field). Output with no parseable JSON
+  document blocks the phase and leaves the raw output in `review.log`.
 - With `autoCommit=true`, the runner mirrors non-passing normalized
   `review.json` results back to the published PR after extraction. `PASS` does
   not post a GitHub approval; it advances directly to `CLOSE_PHASE`, and
@@ -299,9 +317,9 @@ Current notes:
   and `BLOCKED` post the review as a plain PR comment — the runner never issues
   a formal review verdict (`gh pr review --approve/--request-changes`), because
   GitHub forbids requesting changes or approving your own PR and the runner
-  authors the PRs it reviews. The body is mechanical: it includes the review status,
-  summary, all finding buckets, the recommended fix prompt, and an idempotency
-  marker with the plan path, phase number, review job id, and reviewed SHA.
+  authors the PRs it reviews. The body is mechanical: it includes a compact
+  verdict line, summary, non-empty finding buckets, and an idempotency marker
+  with the plan path, phase number, review job id, and reviewed SHA.
   GitHub posting is a workflow gate for non-passing published PR reviews:
   failures record a `review.github_post_failed` event and block the phase before
   the runner starts any review-triggered fix. The normalized `review.json`
