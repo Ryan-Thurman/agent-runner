@@ -897,7 +897,7 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertEqual(review["status"], "PASS")
             self.assertEqual(published_sha, phase_row(home, repo)["published_sha"])
 
-    def test_published_pr_requested_updates_posts_request_changes_body(self):
+    def test_published_pr_requested_updates_posts_comment_body(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -935,10 +935,10 @@ class Phase6LoopTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertEqual(phase_row(home, repo)["status"], "BLOCKED")
-            post = json.loads((gh_state / "github-review.json").read_text())
-            self.assertEqual(post["action"], "--request-changes")
-            self.assertFalse((gh_state / "github-comment.json").exists())
-            body = (gh_state / "github-review-body.md").read_text(encoding="utf-8")
+            post = json.loads((gh_state / "github-comment.json").read_text())
+            self.assertEqual(post["action"], "comment")
+            self.assertFalse((gh_state / "github-review.json").exists())
+            body = (gh_state / "github-comment-body.md").read_text(encoding="utf-8")
             self.assertIn("# Phase 6 Review: CHANGES_REQUESTED", body)
             self.assertIn("### blocking", body)
             self.assertIn("Create fix-marker.txt", body)
@@ -1064,7 +1064,7 @@ class Phase6LoopTests(unittest.TestCase):
             phase_jobs = jobs(home, phase["id"])
             self.assertIn("CLOSE_PHASE", [job["type"] for job in phase_jobs])
 
-    def test_github_request_changes_post_failure_blocks_before_fixing(self):
+    def test_github_review_post_failure_blocks_before_fixing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -1570,10 +1570,13 @@ class Phase6LoopTests(unittest.TestCase):
             phase_jobs = jobs(home, phase["id"])
             self.assertEqual([job["type"] for job in phase_jobs].count("REVIEW"), 2)
             self.assertEqual([job["type"] for job in phase_jobs].count("FIX"), 1)
-            post = json.loads((gh_state / "github-review.json").read_text())
-            self.assertEqual(post["action"], "--request-changes")
+            # The runner posts every non-PASS review as a plain comment: it
+            # never issues a formal review verdict on its own PR.
+            self.assertFalse((gh_state / "github-review.json").exists())
+            post = json.loads((gh_state / "github-comment.json").read_text())
+            self.assertEqual(post["action"], "comment")
             self.assertEqual(post["prUrl"], "https://example.test/pull/1")
-            body = (gh_state / "github-review-body.md").read_text(encoding="utf-8")
+            body = (gh_state / "github-comment-body.md").read_text(encoding="utf-8")
             self.assertIn("# Phase 6 Review: CHANGES_REQUESTED", body)
             self.assertIn("second review found a new blocker", body)
             self.assertIn("Create second-marker.txt", body)

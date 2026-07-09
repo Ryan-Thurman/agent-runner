@@ -1082,19 +1082,11 @@ def _run_gh_review_post(
     review: dict[str, Any],
     body_path: Path,
 ) -> None:
-    status = review["status"]
-    if status == "BLOCKED":
-        command = ["gh", "pr", "comment", pr_url, "--body-file", str(body_path)]
-    else:
-        command = [
-            "gh",
-            "pr",
-            "review",
-            pr_url,
-            "--request-changes",
-            "--body-file",
-            str(body_path),
-        ]
+    # The runner authors its own PRs, and GitHub forbids formal review
+    # verdicts (`gh pr review --approve/--request-changes`) on your own PR.
+    # Always post the review body as a plain comment so the runner never
+    # tries to request changes or approve — it only reports and merges.
+    command = ["gh", "pr", "comment", pr_url, "--body-file", str(body_path)]
 
     try:
         result = subprocess.run(

@@ -287,9 +287,11 @@ Current notes:
 - With `autoCommit=true`, the runner mirrors non-passing normalized
   `review.json` results back to the published PR after extraction. `PASS` does
   not post a GitHub approval; it advances directly to `CLOSE_PHASE`, and
-  `mergeOnClose=true` merges after close validation. `CHANGES_REQUESTED` posts
-  a whole-PR request-changes review, and `BLOCKED` posts a PR comment instead
-  of a review decision. The body is mechanical: it includes the review status,
+  `mergeOnClose=true` merges after close validation. Both `CHANGES_REQUESTED`
+  and `BLOCKED` post the review as a plain PR comment — the runner never issues
+  a formal review verdict (`gh pr review --approve/--request-changes`), because
+  GitHub forbids requesting changes or approving your own PR and the runner
+  authors the PRs it reviews. The body is mechanical: it includes the review status,
   summary, all finding buckets, the recommended fix prompt, and an idempotency
   marker with the plan path, phase number, review job id, and reviewed SHA.
   GitHub posting is a workflow gate for non-passing published PR reviews:
