@@ -77,6 +77,33 @@ asserts a one-line evidence note and its wrapped two-line equivalent produce the
 same phase content hash. The existing `Checks:`-block and single-line-evidence
 cases still pass unchanged.
 
+## Follow-up: hand-written status and evidence blocks
+
+The same block recurred from the other direction. A phase closed by hand carried
+a prose status marker and a bare `Evidence:` header:
+
+```
+Status: completed on 2026-07-09.
+
+Evidence:
+- `cargo test` passed.
+```
+
+`STATUS_RE` matches only the canonical `Status: <STATE>` form, and `EVIDENCE_RE`
+required a value on the `Evidence:` line, so neither was recognized as metadata
+and both were hashed as protected body. Normalizing them into canonical form --
+exactly what the closer prompt demands -- deleted lines the validator counted as
+body.
+
+`_extract_status_and_hash_lines()` now treats any `Status:` line under the
+heading as a runner-owned marker (a non-canonical value simply leaves the phase
+`PENDING`), allows blank lines between it and the evidence block, and accepts a
+bare `Evidence:` header as the block's start. Regression tests:
+`test_handwritten_status_and_evidence_block_are_runner_metadata`,
+`test_bare_evidence_header_block_does_not_change_phase_hash`, and
+`test_body_line_starting_with_status_word_stays_protected` (which pins that
+prose deeper in the body beginning with `Status:` stays protected).
+
 ## Unblocking an already-blocked close
 
 The parser fix prevents recurrence but does not retroactively change a hash that
