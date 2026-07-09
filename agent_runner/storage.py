@@ -14,6 +14,7 @@ DB_FILENAME = "runner.sqlite"
 
 JOB_TYPES = {
     "ROADMAP_PLAN",
+    "PLAN_VERIFY",
     "IMPLEMENT",
     "RUN_CHECKS",
     "REVIEW",

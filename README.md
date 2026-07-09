@@ -62,6 +62,7 @@ Minimum `.agent-runner.json` shape:
 ```json
 {
   "planPath": "docs/plan.md",
+  "planVerify": [],
   "checks": ["python3 -m unittest discover -s tests"],
   "agents": {
     "codex": {
@@ -126,6 +127,8 @@ rules.
 - `--version`: print the installed `agent-runner` package version and exit.
 - `run`: register or resume the plan, reap orphaned `RUNNING` jobs, and run the
   next job derived from SQLite phase status.
+- `plan-validate [--plan PATH] [--verify COMMAND]`: parse a plan and run
+  configured `planVerify` commands without registering phases or running them.
 - `status`: print human status to stderr and JSON state to stdout.
 - `pause`: mark the project `PAUSED`; active jobs finish, then the loop stops at
   the next job boundary.
@@ -134,6 +137,11 @@ rules.
   had when it blocked so `run` can retry it.
 - `logs [-n N]`: print the latest phase log directory and tail the newest log.
 - `reset-lock`: clear a stale project lock when no runner is active.
+
+`planVerify` commands run from the repo root and receive
+`AGENT_RUNNER_PLAN_PATH`, `AGENT_RUNNER_PLAN_ABS_PATH`,
+`AGENT_RUNNER_PLAN_PHASE_COUNT`, and `AGENT_RUNNER_PLAN_HASH` in their
+environment. Use `--verify COMMAND` for one-off validation commands.
 
 ## Live Job Previews
 

@@ -124,6 +124,7 @@ Minimum config shape:
 ```json
 {
   "planPath": "docs/plan.md",
+  "planVerify": [],
   "checks": [
     "python3 -m compileall -q .",
     "python3 -m unittest discover -s tests"
@@ -211,6 +212,9 @@ Current notes:
   A failed post (no `gh`, no remote, not authenticated) only prints a warning
   and is retried on the next run. The issue body is also written to
   `autofix-escalation.md` in the phase log directory.
+- `planVerify` is optional. When set, `agent-runner plan-validate` runs those
+  shell commands from the repo root after parsing the plan and checking for
+  explicit `Status:` markers.
 - Agent CLI flag pitfalls the runner cannot detect for you: the runner appends
   the prompt as the final positional argument, and the `claude` CLI's
   `--allowedTools`/`--disallowedTools` options are variadic — written as
@@ -375,6 +379,38 @@ Useful statuses while dogfooding:
 - `MERGING`: close commit landed; ready to retry the phase PR merge.
 - `BLOCKED`: implementation failed or the phase needs human intervention.
 - `COMPLETE`: done; the loop skips it.
+
+## Plan Validation
+
+Validate a plan without registering it or running any phase:
+
+```sh
+python3 -m agent_runner plan-validate
+```
+
+The command parses the configured `planPath`, requires at least one phase, and
+requires an explicit valid `Status:` marker directly under each phase heading.
+If `.agent-runner.json` has `planVerify`, those shell commands run next. Add
+one-off commands with `--verify`:
+
+```sh
+python3 -m agent_runner plan-validate \
+  --plan docs/plan-roadmap.md \
+  --verify "python3 scripts/verify_plan.py"
+```
+
+Verifier commands run from the repo root and receive these environment
+variables:
+
+- `AGENT_RUNNER_REPO_ROOT`
+- `AGENT_RUNNER_PLAN_PATH`
+- `AGENT_RUNNER_PLAN_ABS_PATH`
+- `AGENT_RUNNER_PLAN_PHASE_COUNT`
+- `AGENT_RUNNER_PLAN_HASH`
+
+Verification records a `PLAN_VERIFY` job and a `plan.validated` event. It does
+not create plan or phase rows; `agent-runner run` still owns registration and
+execution.
 
 ## Roadmap Planning
 

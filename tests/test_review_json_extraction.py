@@ -173,6 +173,7 @@ class ReviewTriageInterpretationTests(unittest.TestCase):
                 simple="simple-reviewer", complex="complex-reviewer"
             ),
             plan_path="docs/plan.md",
+            plan_verify=[],
             checks=[],
             max_retries_per_phase=0,
             auto_fix_attempts=0,
