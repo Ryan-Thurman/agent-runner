@@ -14,7 +14,6 @@ from .storage import PHASE_STATUSES, phase_log_dir
 PHASE_HEADING_RE = re.compile(r"^## Phase\s+(\d+):\s*(.+?)\s*$")
 STATUS_RE = re.compile(r"^Status:\s*([A-Z_]+)\s*$")
 EVIDENCE_RE = re.compile(r"^Evidence:\s*(.+?)\s*$")
-CHECKS_RE = re.compile(r"^Checks:\s*(.+?)\s*$")
 PROTECTED_CHANGE_STATUSES = {
     "IMPLEMENTING",
     "CHECKING",
@@ -309,6 +308,14 @@ def _bounded_plan_context(text: str) -> str:
 
 
 def _skip_runner_metadata(lines: list[str], evidence_index: int) -> int:
+    # The runner-owned evidence block runs from the `Evidence:` line up to the
+    # next blank line, and every line in it is metadata excluded from the
+    # protected phase hash: a possibly-wrapped evidence value plus an optional
+    # `Checks:` line. Skipping the whole contiguous block (not just blocks that
+    # happen to contain a `Checks:` line) keeps close-phase evidence rewrites --
+    # e.g. collapsing a wrapped evidence note down to one line -- from counting
+    # as a protected body change. The phase body is separated from this block by
+    # a blank line.
     hash_start_index = evidence_index + 1
     if hash_start_index >= len(lines) or not lines[hash_start_index].strip():
         return hash_start_index
@@ -316,11 +323,7 @@ def _skip_runner_metadata(lines: list[str], evidence_index: int) -> int:
     blank_index = hash_start_index
     while blank_index < len(lines) and lines[blank_index].strip():
         blank_index += 1
-
-    metadata_lines = lines[hash_start_index:blank_index]
-    if any(CHECKS_RE.match(line.rstrip("\r\n")) for line in metadata_lines):
-        return blank_index
-    return hash_start_index
+    return blank_index
 
 
 def _next_heading_index(

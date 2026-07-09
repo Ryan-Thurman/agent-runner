@@ -287,9 +287,11 @@ Current notes:
 - With `autoCommit=true`, the runner mirrors non-passing normalized
   `review.json` results back to the published PR after extraction. `PASS` does
   not post a GitHub approval; it advances directly to `CLOSE_PHASE`, and
-  `mergeOnClose=true` merges after close validation. `CHANGES_REQUESTED` posts
-  a whole-PR request-changes review, and `BLOCKED` posts a PR comment instead
-  of a review decision. The body is mechanical: it includes the review status,
+  `mergeOnClose=true` merges after close validation. Both `CHANGES_REQUESTED`
+  and `BLOCKED` post the review as a plain PR comment — the runner never issues
+  a formal review verdict (`gh pr review --approve/--request-changes`), because
+  GitHub forbids requesting changes or approving your own PR and the runner
+  authors the PRs it reviews. The body is mechanical: it includes the review status,
   summary, all finding buckets, the recommended fix prompt, and an idempotency
   marker with the plan path, phase number, review job id, and reviewed SHA.
   GitHub posting is a workflow gate for non-passing published PR reviews:
@@ -328,11 +330,14 @@ Rules:
   requirements.
 - Add `Status: <STATE>` directly under the phase heading.
 - If the status line is missing, the runner treats the phase as `PENDING`.
-- The status line and the runner-owned `Evidence:` line immediately after it are
-  excluded from the phase content hash, so close-phase write-back does not count
-  as a plan body change. For compatibility with earlier write-backs, a wrapped
-  evidence block that contains a `Checks:` line is also treated as runner-owned
-  metadata.
+- The status line and the runner-owned `Evidence:` block immediately after it
+  are excluded from the phase content hash, so close-phase write-back does not
+  count as a plan body change. The evidence block runs from the `Evidence:` line
+  up to the next blank line, so a wrapped multi-line evidence note (and an
+  optional `Checks:` line) is all treated as runner-owned metadata. This means
+  rewriting the evidence -- for example collapsing a wrapped note down to one
+  line during close -- never trips the protected-body check. Keep a blank line
+  between the evidence block and the phase body.
 - Duplicate phase numbers and invalid status values are rejected.
 
 Useful statuses while dogfooding:
