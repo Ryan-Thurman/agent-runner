@@ -1,7 +1,7 @@
 {
   "projectName": "agent-runner",
-  "planName": "Agent Runner Roadmap Execution Plan",
-  "planPath": "docs/plan-roadmap.md",
+  "planName": "Review Contract Execution Plan",
+  "planPath": "docs/plan-review-contract.md",
   "baseBranch": "main",
   "checks": [
     "python3 -m compileall -q .",
@@ -20,14 +20,14 @@
       "command": "codex",
       "promptArgs": ["exec"],
       "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
-      "readOnlyFlags": ["--sandbox", "read-only"],
+      "readOnlyFlags": ["--sandbox", "read-only", "-c", "sandbox_read_only.network_access=true"],
       "outputCapture": "last-message-file"
     },
     "antigravity": {
       "command": "agy",
-      "promptArgs": ["-p", "--print-timeout", "40m", "--model", "Gemini 3.1 Pro (High)"],
-      "writeFlags": ["--dangerously-skip-permissions"],
-      "readOnlyFlags": ["--sandbox"],
+      "promptArgs": ["--print-timeout", "40m", "--model", "Gemini 3.1 Pro (High)"],
+      "writeFlags": ["--dangerously-skip-permissions", "-p"],
+      "readOnlyFlags": ["--sandbox", "-p"],
       "outputCapture": "stdout"
     }
   },

@@ -15,6 +15,7 @@ from agent_runner.config import (
     NODE_CHECKS,
     PLACEHOLDER_CHECKS,
     SAMPLE_CONFIG,
+    claude_read_only_allowed_tools,
     load_config,
     project_slug,
 )
@@ -301,6 +302,46 @@ class Phase1CliTests(unittest.TestCase):
         self.assertTrue(claude_profiles)
         for profile in claude_profiles:
             self.assertIn("--model", profile["promptArgs"])
+
+    def test_claude_read_only_allowed_tools_stay_read_only(self):
+        allowed_tools = claude_read_only_allowed_tools()
+        tools = allowed_tools.split(",")
+
+        self.assertIn("Bash(gh pr diff:*)", tools)
+        self.assertIn("Bash(gh pr view:*)", tools)
+        self.assertIn("Bash(gh pr checks:*)", tools)
+        self.assertIn("Bash(gh api:*)", tools)
+        self.assertIn("Bash(git diff:*)", tools)
+        self.assertIn("Bash(git log:*)", tools)
+        self.assertIn("Bash(git show:*)", tools)
+        self.assertNotIn("Bash(gh:*)", tools)
+        for forbidden in ("gh pr merge", "gh pr comment", "git push"):
+            self.assertNotIn(forbidden, allowed_tools)
+
+    def test_generated_claude_reviewer_flags_use_joined_allowed_and_disallowed(self):
+        data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+
+        for name in ("claude-opus", "claude-sonnet"):
+            read_only_flags = data["agents"][name]["readOnlyFlags"]
+            allowed = [
+                flag for flag in read_only_flags if flag.startswith("--allowedTools=")
+            ]
+            disallowed = [
+                flag for flag in read_only_flags if flag.startswith("--disallowedTools=")
+            ]
+
+            self.assertEqual(allowed, [f"--allowedTools={claude_read_only_allowed_tools()}"])
+            self.assertEqual(disallowed, ["--disallowedTools=Edit,Write,NotebookEdit"])
+            self.assertNotIn("--allowedTools", read_only_flags)
+            self.assertNotIn("--disallowedTools", read_only_flags)
+
+    def test_generated_antigravity_places_print_flag_after_role_flags(self):
+        data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+        antigravity = data["agents"]["antigravity"]
+
+        self.assertNotIn("-p", antigravity["promptArgs"])
+        self.assertEqual(antigravity["writeFlags"][-1], "-p")
+        self.assertEqual(antigravity["readOnlyFlags"][-1], "-p")
 
     def test_run_outside_git_and_missing_config_fail_clearly(self):
         with tempfile.TemporaryDirectory() as tmp:
