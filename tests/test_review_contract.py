@@ -54,6 +54,8 @@ class ReviewContractTests(unittest.TestCase):
             self.assertIn("PR #36 (https://github.com/example/repo/pull/36)", prompt)
             self.assertIn("gh pr diff https://github.com/example/repo/pull/36", prompt)
             self.assertIn("Checks log path:", prompt)
+            self.assertIn("nitpick is advisory", prompt)
+            self.assertIn("Return PASS only when blocking and shouldFix are empty", prompt)
             self.assertNotIn("diff --git", prompt)
             self.assertNotIn("recommendedFixPrompt", prompt)
 
@@ -135,7 +137,7 @@ class ReviewContractTests(unittest.TestCase):
                 "findings": {
                     "blocking": ["Create fix-marker.txt"],
                     "shouldFix": ["Tidy the generated text"],
-                    "nitpick": [],
+                    "nitpick": ["Shorten the marker comment"],
                 },
             }
         )
@@ -151,14 +153,18 @@ class ReviewContractTests(unittest.TestCase):
         self.assertTrue(
             prompt.startswith(
                 "These are the findings from the code review of "
-                "PR #36 (https://github.com/example/repo/pull/36). Fix all of them."
+                "PR #36 (https://github.com/example/repo/pull/36). "
+                "Fix all blocking and should-fix findings."
             )
         )
         self.assertIn("gh pr diff https://github.com/example/repo/pull/36", prompt)
+        self.assertIn("Must-fix review findings", prompt)
         self.assertIn("### Blocking", prompt)
         self.assertIn("- [ ] Create fix-marker.txt", prompt)
         self.assertIn("### Should fix", prompt)
         self.assertIn("- [ ] Tidy the generated text", prompt)
+        self.assertIn("Optional nitpicks, only if trivial", prompt)
+        self.assertIn("- [ ] Shorten the marker comment", prompt)
         self.assertNotIn("recommendedFixPrompt", prompt)
         self.assertNotIn("```json", prompt)
 

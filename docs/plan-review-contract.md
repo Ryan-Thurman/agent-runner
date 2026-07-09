@@ -162,7 +162,13 @@ Acceptance Criteria:
 - `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` pass.
 
 ## Phase 3: Stop nitpicks from churning the review loop
-Status: PENDING
+Status: COMPLETE
+Evidence: commit pending; `python3 -m compileall -q .` passed;
+`python3 -m unittest discover -s tests -v` passed (210 tests). Added focused
+coverage in `tests/test_phase6_loop.py` for nitpick-only reviews passing without
+a review-triggered FIX job and shouldFix-only reviews still spawning FIX. Updated
+`agent_runner/phase_loop.py` prompt, re-review, gating, and review-fix checklist
+behavior; updated `tests/test_review_contract.py` for the new bucket semantics.
 
 `_review_requested_updates` flattens all three finding buckets, and
 `_validate_review_payload` coerces `PASS` to `CHANGES_REQUESTED` whenever that list

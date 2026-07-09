@@ -241,6 +241,28 @@ if (
             }
         }))
         raise SystemExit(0)
+    if mode == "NITPICK_ONLY":
+        print(json.dumps({
+            "status": "PASS",
+            "summary": "advisory polish only",
+            "findings": {
+                "blocking": [],
+                "shouldFix": [],
+                "nitpick": ["Consider shortening the marker comment"]
+            }
+        }))
+        raise SystemExit(0)
+    if mode == "SHOULD_FIX_ONLY" and not Path("fix-marker.txt").exists():
+        print(json.dumps({
+            "status": "CHANGES_REQUESTED",
+            "summary": "should-fix requested update",
+            "findings": {
+                "blocking": [],
+                "shouldFix": ["Create fix-marker.txt"],
+                "nitpick": []
+            }
+        }))
+        raise SystemExit(0)
     if mode == "LEGACY_NONBLOCKING_FIX" and not Path("fix-marker.txt").exists():
         print(json.dumps({
             "status": "CHANGES_REQUESTED",
@@ -1336,7 +1358,7 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertNotIn("fake coder completed", first_prompt)
             self.assertIn("Previous review.json path:", second_prompt)
             self.assertIn(
-                "Verify all prior requested updates are resolved",
+                "Raise a new finding only if it is blocking",
                 second_prompt,
             )
             self.assertNotIn("Create fix-marker.txt", second_prompt)
@@ -1427,14 +1449,82 @@ class Phase6LoopTests(unittest.TestCase):
                 [(job["type"], job["trigger"]) for job in phase_jobs],
             )
             fix_prompt = (trace / "fix-1.md").read_text(encoding="utf-8")
-            self.assertIn("Requested updates by bucket", fix_prompt)
+            self.assertIn("Must-fix review findings", fix_prompt)
             self.assertIn("### Blocking", fix_prompt)
             self.assertIn("- [ ] Create fix-marker.txt", fix_prompt)
             self.assertIn("Create fix-marker.txt", fix_prompt)
             self.assertIn("### Should fix", fix_prompt)
             self.assertIn("Tidy the generated text", fix_prompt)
+            self.assertIn("Optional nitpicks, only if trivial", fix_prompt)
             self.assertIn("### Nitpick", fix_prompt)
             self.assertIn("Use a shorter marker comment", fix_prompt)
+
+    def test_nitpick_only_review_passes_without_fix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[])
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "AGENT_MODE": "NITPICK_ONLY"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            phase_jobs = jobs(home, phase["id"])
+            self.assertNotIn(
+                ("FIX", "review"),
+                [(job["type"], job["trigger"]) for job in phase_jobs],
+            )
+            review = json.loads(
+                (Path(phase["log_dir"]) / "review.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(review["status"], "PASS")
+            self.assertEqual(
+                review["findings"]["nitpick"],
+                ["Consider shortening the marker comment"],
+            )
+
+    def test_should_fix_review_still_runs_fix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase6_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase6_agent(script)
+            write_plan(repo)
+            write_config(repo, script, checks=[])
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "AGENT_MODE": "SHOULD_FIX_ONLY"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            phase = phase_row(home, repo)
+            self.assertEqual(phase["status"], "COMPLETE")
+            self.assertIn(
+                ("FIX", "review"),
+                [(job["type"], job["trigger"]) for job in jobs(home, phase["id"])],
+            )
 
     def test_legacy_non_blocking_issues_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -26,9 +26,11 @@ from .storage import (
 
 
 REVIEW_FINDING_BUCKETS = ("blocking", "shouldFix", "nitpick")
+REVIEW_GATING_BUCKETS = ("blocking", "shouldFix")
 REVIEW_RESOLVED_INSTRUCTION = (
-    "Verify all prior requested updates are resolved; then report any remaining "
-    "or new requested updates grouped by finding bucket."
+    "On re-review, verify each prior finding is resolved. Raise a new finding "
+    "only if it is blocking; do not introduce new shouldFix or nitpick findings "
+    "on a re-review."
 )
 REVIEW_FIX_ATTEMPT_LIMIT = 2
 
@@ -3244,9 +3246,11 @@ def _review_prompt(
         "- Group every requested update in findings by bucket: blocking for "
         "must-fix correctness or safety issues, shouldFix for expected phase "
         "cleanup, and nitpick for small requested polish.\n"
+        "- blocking and shouldFix findings send the phase back for a FIX job; "
+        "nitpick is advisory, shown to a human, and does not gate the phase.\n"
         "- Findings are free-form strings, one finding per string, one line each.\n"
-        "- Return PASS only when every findings bucket is empty.\n"
-        "- Return CHANGES_REQUESTED when any findings bucket has entries.\n"
+        "- Return PASS only when blocking and shouldFix are empty.\n"
+        "- Return CHANGES_REQUESTED when blocking or shouldFix has entries.\n"
         "- Return no keys other than status, summary, and findings, and no prose "
         "outside the JSON.\n\n"
         "Make one comprehensive pass over the phase, diff, and check output. "
@@ -3327,7 +3331,7 @@ def _review_fix_prompt(
     if pr_url:
         pre_prompt = (
             f"These are the findings from the code review of {format_pr_url(pr_url)}. "
-            "Fix all of them.\n\n"
+            "Fix all blocking and should-fix findings.\n\n"
         )
         diff_instruction = (
             f"- The diff is not included; use `gh pr diff {pr_url}` for context.\n"
@@ -3335,7 +3339,7 @@ def _review_fix_prompt(
     else:
         pre_prompt = (
             "These are the findings from the code review of the staged phase work. "
-            "Fix all of them.\n\n"
+            "Fix all blocking and should-fix findings.\n\n"
         )
         diff_instruction = (
             "- The diff is not included; use `git diff` or `git diff --staged` "
@@ -3357,8 +3361,10 @@ def _review_fix_prompt(
         + "Fix only the listed review requested updates for this phase.\n\n"
         f"Phase {phase.phase_number}: {phase.title}\n\n"
         "Rules:\n"
-        "- Fix only the requested updates listed below.\n"
-        "- Address every listed bucket in this pass; the runner allows only up to "
+        "- Fix all must-fix review findings listed below.\n"
+        "- Nitpicks are optional; address them only if they are trivial while you "
+        "are already touching the same code.\n"
+        "- Address every must-fix bucket in this pass; the runner allows only up to "
         f"{REVIEW_FIX_ATTEMPT_LIMIT} review-triggered FIX attempt(s) before it "
         "blocks, so resolve everything now rather than deferring.\n"
         f"{baseline_rule}"
@@ -3378,14 +3384,17 @@ def _review_fix_prompt(
         f"{publish}"
         "Phase body:\n"
         f"{phase.content}\n\n"
-        "Requested updates by bucket:\n"
-        f"{_review_findings_checklist(review['findings'])}"
+        "Must-fix review findings:\n"
+        f"{_review_findings_checklist(review['findings'], buckets=REVIEW_GATING_BUCKETS)}"
+        f"{_optional_nitpick_checklist(review['findings'])}"
     )
 
 
-def _review_findings_checklist(findings: dict[str, list[str]]) -> str:
+def _review_findings_checklist(
+    findings: dict[str, list[str]], *, buckets: tuple[str, ...]
+) -> str:
     lines: list[str] = []
-    for bucket in REVIEW_FINDING_BUCKETS:
+    for bucket in buckets:
         issues = findings.get(bucket, [])
         if not issues:
             continue
@@ -3396,6 +3405,16 @@ def _review_findings_checklist(findings: dict[str, list[str]]) -> str:
     if not lines:
         return "- [ ] No findings were provided.\n"
     return "\n".join(lines)
+
+
+def _optional_nitpick_checklist(findings: dict[str, list[str]]) -> str:
+    nitpicks = findings.get("nitpick", [])
+    if not nitpicks:
+        return ""
+    return (
+        "\nOptional nitpicks, only if trivial:\n"
+        f"{_review_findings_checklist(findings, buckets=('nitpick',))}"
+    )
 
 
 def _markdown_checklist_item(value: str) -> list[str]:
@@ -3627,8 +3646,8 @@ def _checks_blocker_summary(checks: JobResult) -> str:
 
 def _review_requested_updates(findings: dict[str, list[Any]]) -> list[Any]:
     updates = []
-    for issues in findings.values():
-        updates.extend(issues)
+    for bucket in REVIEW_GATING_BUCKETS:
+        updates.extend(findings.get(bucket, []))
     return updates
 
 
