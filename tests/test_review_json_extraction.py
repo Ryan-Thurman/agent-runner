@@ -18,7 +18,6 @@ REVIEW_JSON = json.dumps(
         "status": "PASS",
         "summary": "looks good",
         "findings": {"blocking": [], "shouldFix": [], "nitpick": []},
-        "recommendedFixPrompt": "",
     },
     indent=2,
 )
@@ -31,7 +30,6 @@ PREVIOUS_REVIEW = (
             "status": "CHANGES_REQUESTED",
             "summary": "fix the bug",
             "findings": {"blocking": ["bug"], "shouldFix": [], "nitpick": []},
-            "recommendedFixPrompt": "fix it",
         },
         indent=2,
         sort_keys=True,

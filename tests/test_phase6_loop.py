@@ -214,9 +214,11 @@ if (
         print(json.dumps({
             "status": "BLOCKED",
             "summary": "reviewer cannot proceed",
-            "blockingIssues": ["external blocker"],
-            "nonBlockingIssues": ["non-gating note"],
-            "recommendedFixPrompt": ""
+            "findings": {
+                "blocking": ["external blocker"],
+                "shouldFix": ["non-gating note"],
+                "nitpick": []
+            }
         }))
         raise SystemExit(0)
     if mode == "FENCED_PASS":
@@ -224,9 +226,7 @@ if (
         print(json.dumps({
             "status": "PASS",
             "summary": "accepted in markdown",
-            "blockingIssues": [],
-            "nonBlockingIssues": [],
-            "recommendedFixPrompt": ""
+            "findings": {"blocking": [], "shouldFix": [], "nitpick": []}
         }))
         print("```")
         raise SystemExit(0)
@@ -238,8 +238,7 @@ if (
                 "blocking": ["Create fix-marker.txt"],
                 "shouldFix": ["Tidy the generated text"],
                 "nitpick": ["Use a shorter marker comment"]
-            },
-            "recommendedFixPrompt": "Create the marker and address all buckets."
+            }
         }))
         raise SystemExit(0)
     if mode == "LEGACY_NONBLOCKING_FIX" and not Path("fix-marker.txt").exists():
@@ -259,17 +258,18 @@ if (
                 "blocking": [],
                 "shouldFix": ["Create fix-marker.txt"],
                 "nitpick": []
-            },
-            "recommendedFixPrompt": "Create the marker"
+            }
         }))
         raise SystemExit(0)
     if mode == "REVIEW_FIX" and not Path("fix-marker.txt").exists():
         print(json.dumps({
             "status": "CHANGES_REQUESTED",
             "summary": "fix marker is missing",
-            "blockingIssues": ["Create fix-marker.txt"],
-            "nonBlockingIssues": ["Should Fix: tidy wording"],
-            "recommendedFixPrompt": "Create the marker"
+            "findings": {
+                "blocking": ["Create fix-marker.txt"],
+                "shouldFix": ["Should Fix: tidy wording"],
+                "nitpick": []
+            }
         }))
         raise SystemExit(0)
     if mode == "REVIEW_DRIP_FEED":
@@ -277,25 +277,27 @@ if (
             print(json.dumps({
                 "status": "CHANGES_REQUESTED",
                 "summary": "fix marker is missing",
-                "blockingIssues": ["Create fix-marker.txt"],
-                "nonBlockingIssues": [],
-                "recommendedFixPrompt": "Create the marker"
+                "findings": {
+                    "blocking": ["Create fix-marker.txt"],
+                    "shouldFix": [],
+                    "nitpick": []
+                }
             }))
             raise SystemExit(0)
         print(json.dumps({
             "status": "CHANGES_REQUESTED",
             "summary": "second review found a new blocker",
-            "blockingIssues": ["Create second-marker.txt"],
-            "nonBlockingIssues": [],
-            "recommendedFixPrompt": "Create the second marker"
+            "findings": {
+                "blocking": ["Create second-marker.txt"],
+                "shouldFix": [],
+                "nitpick": []
+            }
         }))
         raise SystemExit(0)
     print(json.dumps({
         "status": "PASS",
         "summary": "accepted",
-        "blockingIssues": [],
-        "nonBlockingIssues": [],
-        "recommendedFixPrompt": ""
+        "findings": {"blocking": [], "shouldFix": [], "nitpick": []}
     }))
     raise SystemExit(0)
 
@@ -847,8 +849,13 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertEqual(len(phase["published_sha"]), 40)
             review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("Review the published phase PR independently", review_prompt)
-            self.assertIn("Published PR: https://example.test/pull/1", review_prompt)
-            self.assertIn("published PR diff", review_prompt)
+            self.assertIn("Published PR: PR #1 (https://example.test/pull/1)", review_prompt)
+            self.assertIn("PR URL: https://example.test/pull/1", review_prompt)
+            self.assertIn("Reviewed SHA:", review_prompt)
+            self.assertIn("Base branch: main", review_prompt)
+            self.assertIn("gh pr diff https://example.test/pull/1", review_prompt)
+            self.assertIn("Checks log path:", review_prompt)
+            self.assertNotIn("diff --git", review_prompt)
             self.assertIn("generated.txt", review_prompt)
             self.assertNotIn("fake coder completed", review_prompt)
 
@@ -941,14 +948,15 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertEqual(post["action"], "comment")
             self.assertFalse((gh_state / "github-review.json").exists())
             body = (gh_state / "github-comment-body.md").read_text(encoding="utf-8")
-            self.assertIn("# Phase 6 Review: CHANGES_REQUESTED", body)
-            self.assertIn("### blocking", body)
+            self.assertIn("**Phase 6 review - CHANGES_REQUESTED**", body)
+            self.assertIn("**Blocking**", body)
             self.assertIn("Create fix-marker.txt", body)
-            self.assertIn("### shouldFix", body)
+            self.assertIn("**Should fix**", body)
             self.assertIn("Tidy the generated text", body)
-            self.assertIn("### nitpick", body)
+            self.assertIn("**Nitpick**", body)
             self.assertIn("Use a shorter marker comment", body)
-            self.assertIn("Create the marker and address all buckets.", body)
+            self.assertNotIn("Recommended Fix Prompt", body)
+            self.assertNotIn("- None", body)
             self.assertIn("plan=docs/plan.md", body)
             self.assertIn("phase=6", body)
             self.assertIn(f"reviewed_sha={published_sha}", body)
@@ -997,11 +1005,12 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertEqual(post["prUrl"], "https://example.test/pull/1")
             self.assertFalse((gh_state / "github-review.json").exists())
             body = (gh_state / "github-comment-body.md").read_text(encoding="utf-8")
-            self.assertIn("# Phase 6 Review: BLOCKED", body)
+            self.assertIn("**Phase 6 review - BLOCKED**", body)
             self.assertIn("reviewer cannot proceed", body)
             self.assertIn("external blocker", body)
             self.assertIn("non-gating note", body)
-            self.assertIn("### nitpick", body)
+            self.assertNotIn("**Nitpick**", body)
+            self.assertNotIn("- None", body)
             self.assertIn("plan=docs/plan.md", body)
             self.assertIn("phase=6", body)
             self.assertIn(f"reviewed_sha={published_sha}", body)
@@ -1325,12 +1334,12 @@ class Phase6LoopTests(unittest.TestCase):
             second_prompt = (trace / "review-2.md").read_text(encoding="utf-8")
             fix_prompt = (trace / "fix-1.md").read_text(encoding="utf-8")
             self.assertNotIn("fake coder completed", first_prompt)
-            self.assertIn("Previous review.json", second_prompt)
+            self.assertIn("Previous review.json path:", second_prompt)
             self.assertIn(
                 "Verify all prior requested updates are resolved",
                 second_prompt,
             )
-            self.assertIn("Create fix-marker.txt", second_prompt)
+            self.assertNotIn("Create fix-marker.txt", second_prompt)
             self.assertIn("Create fix-marker.txt", fix_prompt)
             self.assertIn("Should Fix: tidy wording", fix_prompt)
 
@@ -1419,14 +1428,15 @@ class Phase6LoopTests(unittest.TestCase):
             )
             fix_prompt = (trace / "fix-1.md").read_text(encoding="utf-8")
             self.assertIn("Requested updates by bucket", fix_prompt)
-            self.assertIn('"blocking"', fix_prompt)
+            self.assertIn("### Blocking", fix_prompt)
+            self.assertIn("- [ ] Create fix-marker.txt", fix_prompt)
             self.assertIn("Create fix-marker.txt", fix_prompt)
-            self.assertIn('"shouldFix"', fix_prompt)
+            self.assertIn("### Should fix", fix_prompt)
             self.assertIn("Tidy the generated text", fix_prompt)
-            self.assertIn('"nitpick"', fix_prompt)
+            self.assertIn("### Nitpick", fix_prompt)
             self.assertIn("Use a shorter marker comment", fix_prompt)
 
-    def test_legacy_non_blocking_issues_are_requested_updates(self):
+    def test_legacy_non_blocking_issues_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "repo"
@@ -1450,18 +1460,13 @@ class Phase6LoopTests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.returncode, 1)
             phase = phase_row(home, repo)
-            self.assertEqual(phase["status"], "COMPLETE")
-            self.assertEqual(phase["retry_count"], 1)
-            phase_jobs = jobs(home, phase["id"])
-            self.assertIn(
+            self.assertEqual(phase["status"], "BLOCKED")
+            self.assertNotIn(
                 ("FIX", "review"),
-                [(job["type"], job["trigger"]) for job in phase_jobs],
+                [(job["type"], job["trigger"]) for job in jobs(home, phase["id"])],
             )
-            fix_prompt = (trace / "fix-1.md").read_text(encoding="utf-8")
-            self.assertIn('"shouldFix"', fix_prompt)
-            self.assertIn("Should Fix: create fix-marker.txt", fix_prompt)
 
     def test_pass_with_non_empty_findings_is_normalized_to_changes_requested(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1579,7 +1584,7 @@ class Phase6LoopTests(unittest.TestCase):
             self.assertEqual(post["action"], "comment")
             self.assertEqual(post["prUrl"], "https://example.test/pull/1")
             body = (gh_state / "github-comment-body.md").read_text(encoding="utf-8")
-            self.assertIn("# Phase 6 Review: CHANGES_REQUESTED", body)
+            self.assertIn("**Phase 6 review - CHANGES_REQUESTED**", body)
             self.assertIn("second review found a new blocker", body)
             self.assertIn("Create second-marker.txt", body)
 

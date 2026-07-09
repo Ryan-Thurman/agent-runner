@@ -132,9 +132,7 @@ if "Review the published phase PR independently" in prompt:
     print(json.dumps({
         "status": "PASS",
         "summary": "accepted",
-        "blockingIssues": [],
-        "nonBlockingIssues": [],
-        "recommendedFixPrompt": ""
+        "findings": {"blocking": [], "shouldFix": [], "nitpick": []}
     }))
     raise SystemExit(0)
 

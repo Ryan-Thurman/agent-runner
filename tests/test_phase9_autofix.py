@@ -154,17 +154,17 @@ if (
         print(json.dumps({
             "status": "BLOCKED",
             "summary": "published review needs auto-fix",
-            "blockingIssues": ["fixed.txt is missing from the published diff"],
-            "nonBlockingIssues": [],
-            "recommendedFixPrompt": "Create fixed.txt and publish the PR update."
+            "findings": {
+                "blocking": ["fixed.txt is missing from the published diff"],
+                "shouldFix": [],
+                "nitpick": []
+            }
         }))
         raise SystemExit(0)
     print(json.dumps({
         "status": "PASS",
         "summary": "accepted",
-        "blockingIssues": [],
-        "nonBlockingIssues": [],
-        "recommendedFixPrompt": ""
+        "findings": {"blocking": [], "shouldFix": [], "nitpick": []}
     }))
     raise SystemExit(0)
 
@@ -357,7 +357,9 @@ class AutofixLoopTests(unittest.TestCase):
             self.assertIn("Never invoke `autorun`, `agent-runner`", autofix_prompt)
             review_prompt = (trace / "review-1.md").read_text(encoding="utf-8")
             self.assertIn("fixed.txt", review_prompt)
-            self.assertIn("fixed by auto-fix", review_prompt)
+            self.assertIn("git diff --staged", review_prompt)
+            self.assertIn("Checks log path:", review_prompt)
+            self.assertNotIn("fixed by auto-fix", review_prompt)
             phase_events = events(home, phase["id"])
             autofix_events = [
                 event for event in phase_events if event["event_type"] == "phase.autofix"
@@ -466,7 +468,8 @@ class AutofixLoopTests(unittest.TestCase):
             self.assertEqual([job["type"] for job in phase_jobs].count("REVIEW"), 2)
             self.assertEqual([job["type"] for job in phase_jobs].count("AUTOFIX"), 1)
             second_review = (trace / "review-2.md").read_text(encoding="utf-8")
-            self.assertIn(f"Published SHA: {phase['published_sha']}", second_review)
+            self.assertIn(f"Reviewed SHA: {phase['published_sha']}", second_review)
+            self.assertIn("Previous review.json path:", second_review)
             published_files = subprocess.check_output(
                 ["git", "show", "--format=", "--name-only", phase["published_sha"]],
                 cwd=repo,

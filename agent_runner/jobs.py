@@ -377,10 +377,10 @@ def _bounded_prompt(prompt: str, prompt_path: Path) -> str:
 
     `execve` caps argv plus environ at 1 MiB on macOS, and the prompt is one
     argv entry, so an oversized prompt fails the job with "Argument list too
-    long" before the agent starts. Callers bound their own large sections (see
-    `diffs.elide_diff`); this is the last resort that keeps a job runnable when
-    one of them grows unexpectedly. The untruncated prompt is on disk already,
-    so point the agent at it.
+    long" before the agent starts. Callers should avoid embedding unbounded
+    content; this is the last resort that keeps a job runnable when one of them
+    grows unexpectedly. The untruncated prompt is on disk already, so point the
+    agent at it.
     """
     encoded = prompt.encode("utf-8")
     if len(encoded) <= MAX_PROMPT_BYTES:

@@ -88,7 +88,18 @@ Acceptance Criteria:
 - `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` pass.
 
 ## Phase 2: Replace the diff with the PR URL and shrink the review contract
-Status: PENDING
+Status: COMPLETE
+Evidence: commit pending; `python3 -m compileall -q .` passed;
+`python3 -m unittest discover -s tests -v` passed (208 tests); `rg -n
+"from agent_runner\.diffs|from \.diffs|import agent_runner\.diffs|elide_diff|_published_phase_diff\(|_git_diff_staged\("
+agent_runner tests` returned no matches. Files changed: `agent_runner/phase_loop.py`,
+`agent_runner/jobs.py`, deleted `agent_runner/diffs.py`, deleted
+`tests/test_diff_elision.py`, added `tests/test_review_contract.py`, updated review
+fixtures and expectations across `tests/test_phase1_cli.py`,
+`tests/test_phase3_plan.py`, `tests/test_phase5_loop.py`, `tests/test_phase6_loop.py`,
+`tests/test_phase7_close.py`, `tests/test_phase8_operator.py`,
+`tests/test_phase9_autofix.py`, `tests/test_review_json_extraction.py`, and updated
+`docs/plan-review-contract.md`.
 
 The REVIEW job died three times with `[Errno 7] Argument list too long: 'codex'`
 because `_review_prompt` pastes the whole `gh pr diff` patch into a prompt that
