@@ -22,6 +22,14 @@ crash recovery, log-tailing, and roadmap-to-plan loops.
 - `CHECKING`: resume by running checks without running IMPLEMENT again.
 - `REVIEWING`: run review. `PASS` runs `CLOSE_PHASE`; `CHANGES_REQUESTED`
   runs a `FIX` job with `trigger="review"` if retries remain; `BLOCKED` stops.
+  The runner allows up to `REVIEW_FIX_ATTEMPT_LIMIT` (2) review-triggered `FIX`
+  attempts, each followed by a re-review, before it blocks; the review-fix
+  prompt is built to make each attempt count: it carries the reviewed baseline
+  SHA and requires
+  the coder to confirm HEAD advanced (guarding against no-op "pushed but
+  byte-identical" rounds), to fix the root cause rather than re-patch a
+  recurring symptom, and to keep the existing suite green (widening any adjacent
+  guard test) so a fix cannot introduce a regression.
 - `FIXING`: resume the last available fix prompt, then rerun checks.
 - `CLOSING`: run the closer profile with write flags, validate the plan
   write-back and handoff, optionally commit, and mark the phase `COMPLETE`.

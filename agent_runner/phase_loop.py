@@ -30,7 +30,7 @@ REVIEW_RESOLVED_INSTRUCTION = (
     "Verify all prior requested updates are resolved; then report any remaining "
     "or new requested updates grouped by finding bucket."
 )
-REVIEW_FIX_ATTEMPT_LIMIT = 1
+REVIEW_FIX_ATTEMPT_LIMIT = 2
 
 # The GitHub API is eventually consistent after a push, so the merge preflight
 # retries a PR-head mismatch before blocking the phase.
@@ -905,6 +905,7 @@ def _run_review(
                 parsed_phase,
                 review,
                 require_publish=config.auto_commit,
+                reviewed_sha=phase["published_sha"],
             ),
             blocker_summary=_review_finding_summary(findings),
             source_job=result,
@@ -3147,7 +3148,11 @@ def _checks_fix_prompt(
 
 
 def _review_fix_prompt(
-    phase: ParsedPhase, review: dict[str, Any], *, require_publish: bool
+    phase: ParsedPhase,
+    review: dict[str, Any],
+    *,
+    require_publish: bool,
+    reviewed_sha: Optional[str] = None,
 ) -> str:
     publish = _publish_instructions(require_publish, update_existing=True)
     recommended_fix_prompt = review["recommendedFixPrompt"].strip()
@@ -3159,13 +3164,34 @@ def _review_fix_prompt(
             f"{recommended_fix_prompt}\n"
             "```\n"
         )
+    baseline_rule = (
+        "- This change MUST land on the branch. After committing and pushing, "
+        f"confirm `git rev-parse HEAD` differs from the reviewed baseline "
+        f"{reviewed_sha[:12]}. A byte-identical tree means your edit never took "
+        "effect (unsaved, uncommitted, or unpushed) — do not report success "
+        "until the SHA has advanced.\n"
+        if reviewed_sha
+        else "- This change MUST land on the branch: commit and push, and confirm "
+        "the branch HEAD advanced before reporting success. A byte-identical "
+        "tree means your edit never took effect.\n"
+    )
     return (
         "Fix only the listed review requested updates for this phase.\n\n"
         f"Phase {phase.phase_number}: {phase.title}\n\n"
         "Rules:\n"
         "- Fix only the requested updates listed below.\n"
-        "- Address every listed bucket in this pass; the runner allows only one "
-        "review-triggered FIX and one re-review before blocking.\n"
+        "- Address every listed bucket in this pass; the runner allows only up to "
+        f"{REVIEW_FIX_ATTEMPT_LIMIT} review-triggered FIX attempt(s) before it "
+        "blocks, so resolve everything now rather than deferring.\n"
+        f"{baseline_rule}"
+        "- Fix the root cause, not the symptom. If the review keeps flagging the "
+        "same area across rounds, correct the underlying invariant rather than "
+        "patching the reported edge case.\n"
+        "- Do not introduce regressions. Your edit may touch code other tests and "
+        "phases depend on: run the full existing test suite (not just any test you "
+        "add) and confirm no previously-passing test now fails. If a sibling test "
+        "already guards behavior adjacent to what you change, widen it to cover the "
+        "transition you are modifying instead of leaving it narrow.\n"
         "- Do not start future phases.\n"
         "- Avoid unrelated refactors.\n"
         "- Add or update tests when behavior changes.\n\n"
