@@ -3696,9 +3696,9 @@ def _single_line(text: str, *, limit: int) -> str:
 
 def _extract_review_json(result: JobResult, log_dir: Path) -> dict[str, Any]:
     raw_output = _review_capture_output(result)
-    # The review prompt embeds the previous review.json verbatim; treat any
-    # candidate byte-identical to it as an echo of that quote, never as the
-    # reviewer's new verdict.
+    # Older prompts embedded the previous review.json verbatim. Keep rejecting
+    # byte-identical echoes so a stale verdict cannot be revived from logs or
+    # copied context.
     previous_review_path = log_dir / "review.json"
     stale_document = None
     if previous_review_path.exists():

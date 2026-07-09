@@ -246,3 +246,43 @@ Acceptance Criteria:
 - `docs/design.md` and `docs/usage.md` contain no reference to `recommendedFixPrompt`,
   `blockingIssues`, `nonBlockingIssues`, or `elide_diff`.
 - `python3 -m compileall -q .` and `python3 -m unittest discover -s tests -v` pass.
+
+## Current State
+
+Status: COMPLETE
+Branch: `dev/bound-review-prompt-argmax`
+Last Completed Step: Final PR readiness review
+Next Step: Push the branch and open/update PR #36.
+PR Readiness Result: Ready for PR. No blocking findings found in the final
+in-session review against `origin/main...HEAD`.
+
+Checks:
+- `python3 -m compileall -q .` passed.
+- `python3 -m unittest discover -s tests -v` passed (211 tests).
+- `rg -n "from agent_runner\.diffs|from \.diffs|import agent_runner\.diffs|elide_diff|_published_phase_diff\(|_git_diff_staged\(" agent_runner tests` returned no matches.
+- `rg -n "recommendedFixPrompt|blockingIssues|nonBlockingIssues|elide_diff" docs/design.md docs/usage.md` returned no matches.
+
+Commits:
+- `e40a5b1` - `chore: add reviewer read-only access`
+- `afad0dc` - `feat: replace review diff with PR contract`
+- `41d9ee0` - `fix: gate review fixes on actionable buckets`
+- `d723e57` - `docs: reconcile review contract`
+- Final plan-state/comment cleanup in this commit.
+
+## Activity Log
+
+- 2026-07-09: Completed Phase 1; added Claude read-only allowlist, Codex
+  read-only network flag, Antigravity prompt flag correction, probes, tests, and
+  plan evidence.
+- 2026-07-09: Completed Phase 2; removed inlined review diffs, narrowed review
+  JSON, deleted diff elision, updated fixtures/tests, and added review contract tests.
+- 2026-07-09: Completed Phase 3; limited review gating to `blocking` and
+  `shouldFix`, made `nitpick` advisory, updated prompts and tests.
+- 2026-07-09: Completed Phase 4; bounded triage diff stats, added autofix PR/review
+  context, reconciled design/usage/reference docs, and ran final checks.
+
+## Resume Instructions
+
+All planned implementation phases are complete. If resuming from here, inspect
+`git status --short --branch`, rerun the configured checks if any files changed,
+push `dev/bound-review-prompt-argmax`, and open or update PR #36.
