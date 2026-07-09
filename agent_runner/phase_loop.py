@@ -268,13 +268,35 @@ def reconcile_manually_merged_phase_prs(
             phase, parsed_phase=parsed_phase
         )
         if proof_errors:
-            return _block_manual_reconciliation(
-                connection,
-                project_id=project_id,
-                plan_id=plan_id,
-                phase=phase,
-                message="; ".join(proof_errors),
-            )
+            if _manual_reconciliation_can_repair_missing_close_marker(
+                phase, parsed_phase=parsed_phase
+            ):
+                try:
+                    marker_commit = _repair_manually_merged_missing_close_marker(
+                        repo_root,
+                        config=config,
+                        phase=phase,
+                        head_sha=head_sha,
+                        merge_commit=merge_commit,
+                    )
+                except JobError as exc:
+                    return _block_manual_reconciliation(
+                        connection,
+                        project_id=project_id,
+                        plan_id=plan_id,
+                        phase=phase,
+                        message=str(exc),
+                    )
+            else:
+                return _block_manual_reconciliation(
+                    connection,
+                    project_id=project_id,
+                    plan_id=plan_id,
+                    phase=phase,
+                    message="; ".join(proof_errors),
+                )
+        else:
+            marker_commit = None
 
         update_phase_status(connection, phase["id"], "COMPLETE")
         update_phase_publish_metadata(
@@ -300,6 +322,7 @@ def reconcile_manually_merged_phase_prs(
                 "headSha": head_sha,
                 "mergeCommit": merge_commit,
                 "baseBranch": config.base_branch,
+                "markerCommit": marker_commit,
             },
         )
         print(
@@ -337,6 +360,203 @@ def _manual_reconciliation_proof_errors(
             f"{phase['content_hash'][:12]}"
         )
     return errors
+
+
+def _manual_reconciliation_can_repair_missing_close_marker(
+    phase: sqlite3.Row, *, parsed_phase: ParsedPhase
+) -> bool:
+    return (
+        parsed_phase.status != "COMPLETE"
+        and parsed_phase.content_hash == phase["content_hash"]
+    )
+
+
+def _repair_manually_merged_missing_close_marker(
+    repo_root: Path,
+    *,
+    config: RunnerConfig,
+    phase: sqlite3.Row,
+    head_sha: str,
+    merge_commit: str,
+) -> Optional[str]:
+    if not config.auto_commit or not config.merge_on_close:
+        raise JobError(
+            "merged PR lacks close marker, and automatic close repair requires "
+            "autoCommit=true and mergeOnClose=true"
+        )
+
+    dirty_paths = _git_dirty_paths(repo_root)
+    if dirty_paths:
+        paths = ", ".join(sorted(dirty_paths)[:5])
+        suffix = "" if len(dirty_paths) <= 5 else ", ..."
+        raise JobError(
+            "merged PR lacks close marker, but the worktree is dirty: "
+            f"{paths}{suffix}"
+        )
+
+    _checkout_base_branch_for_manual_repair(repo_root, base_branch=config.base_branch)
+    if not _git_ref_contains_commit(repo_root, "HEAD", merge_commit):
+        raise JobError(
+            f"current {config.base_branch} does not contain merged PR commit "
+            f"{merge_commit[:12]}"
+        )
+
+    fresh_plan = parse_plan_file(repo_root, config.plan_path)
+    fresh_phase = _parsed_phase(fresh_plan, phase["phase_number"])
+    if fresh_phase.content_hash != phase["content_hash"]:
+        raise JobError(
+            "merged PR lacks close marker, and the base-branch phase body hash "
+            f"{fresh_phase.content_hash[:12]} does not match registered phase "
+            f"{phase['content_hash'][:12]}"
+        )
+    if fresh_phase.status == "COMPLETE":
+        return None
+
+    _mark_plan_phase_complete_after_manual_merge(
+        repo_root,
+        config=config,
+        phase=phase,
+        head_sha=head_sha,
+    )
+    _write_manual_merge_handoff(repo_root, config=config, phase=phase)
+
+    repaired_plan = parse_plan_file(repo_root, config.plan_path)
+    repaired_phase = _parsed_phase(repaired_plan, phase["phase_number"])
+    _validate_close_phase_outputs(
+        repo_root=repo_root,
+        plan_path=config.plan_path,
+        phase=phase,
+        fresh_phase=repaired_phase,
+    )
+
+    _git_add_all(repo_root)
+    if not _git_dirty_paths(repo_root):
+        return None
+
+    message = f"Phase {phase['phase_number']}: mark manually merged phase complete"
+    result = _git_commit(repo_root, message)
+    detail = result.stderr.strip() or result.stdout.strip() or "git commit failed"
+    if result.returncode != 0 and _git_identity_missing(detail):
+        result = _git_commit(repo_root, message, fallback_identity=True)
+        detail = result.stderr.strip() or result.stdout.strip() or "git commit failed"
+    if result.returncode != 0:
+        raise JobError(detail)
+
+    _git_push_current_branch(repo_root)
+    return _git_head_sha(repo_root)
+
+
+def _checkout_base_branch_for_manual_repair(
+    repo_root: Path, *, base_branch: str
+) -> None:
+    _git_run(
+        repo_root,
+        ["fetch", "-q", "origin", base_branch],
+        error_context=f"failed to fetch origin/{base_branch}",
+    )
+    if _git_branch_exists(repo_root, base_branch):
+        _git_run(
+            repo_root,
+            ["switch", "-q", base_branch],
+            error_context=f"failed to switch to {base_branch}",
+        )
+        _git_run(
+            repo_root,
+            ["merge", "--ff-only", f"origin/{base_branch}"],
+            error_context=f"failed to fast-forward {base_branch}",
+        )
+        return
+
+    _git_run(
+        repo_root,
+        ["switch", "-q", "-c", base_branch, f"origin/{base_branch}"],
+        error_context=f"failed to create local {base_branch}",
+    )
+
+
+def _mark_plan_phase_complete_after_manual_merge(
+    repo_root: Path,
+    *,
+    config: RunnerConfig,
+    phase: sqlite3.Row,
+    head_sha: str,
+) -> None:
+    plan_path = repo_root / config.plan_path
+    lines = plan_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    start_index = None
+    for index, line in enumerate(lines):
+        match = re.match(r"^## Phase\s+([0-9]+):", line.rstrip("\r\n"))
+        if match and int(match.group(1)) == phase["phase_number"]:
+            start_index = index
+            break
+    if start_index is None:
+        raise JobError(
+            f"phase {phase['phase_number']} is missing from {config.plan_path}"
+        )
+
+    end_index = len(lines)
+    for index in range(start_index + 1, len(lines)):
+        if re.match(r"^## Phase\s+[0-9]+:", lines[index].rstrip("\r\n")):
+            end_index = index
+            break
+
+    status_index = start_index + 1
+    while status_index < end_index and not lines[status_index].strip():
+        status_index += 1
+
+    evidence = (
+        f"Evidence: manually merged {format_pr_url(phase['pr_url'])} at "
+        f"{head_sha[:12]}; runner repaired close marker\n"
+    )
+    if status_index < end_index and re.match(
+        r"^Status:\s*[A-Z_]+\s*$", lines[status_index].rstrip("\r\n")
+    ):
+        replace_end = status_index + 1
+        include_blank = False
+        if replace_end < end_index and re.match(
+            r"^Evidence:\s*.+$", lines[replace_end].rstrip("\r\n")
+        ):
+            replace_end += 1
+            while replace_end < end_index and lines[replace_end].strip():
+                replace_end += 1
+            if replace_end < end_index:
+                replace_end += 1
+                include_blank = True
+        metadata_lines = ["Status: COMPLETE\n", evidence]
+        if include_blank:
+            metadata_lines.append("\n")
+        lines[status_index:replace_end] = metadata_lines
+    else:
+        metadata_lines = ["Status: COMPLETE\n", evidence, "\n"]
+        lines[start_index + 1 : start_index + 1] = metadata_lines
+
+    plan_path.write_text("".join(lines), encoding="utf-8")
+
+
+def _write_manual_merge_handoff(
+    repo_root: Path, *, config: RunnerConfig, phase: sqlite3.Row
+) -> None:
+    handoff_path = repo_root / _handoff_path(config.plan_path, phase)
+    handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    handoff_path.write_text(
+        "# Phase handoff\n\n"
+        "## Completed Work\n"
+        f"PR {phase['pr_url']} was merged outside the runner; the runner "
+        "repaired the phase close marker on the base branch.\n\n"
+        "## Decisions\n"
+        "Preserved the manually merged PR as the source of implementation "
+        "truth and wrote only runner-owned close metadata.\n\n"
+        "## Files Changed\n"
+        f"{config.plan_path}\n"
+        f"{_handoff_path(config.plan_path, phase)}\n\n"
+        "## Checks Run\n"
+        "Used the successful checks already recorded before the manual merge.\n\n"
+        "## Open Risks\n"
+        "Review and merge were completed outside the normal runner close path.\n\n"
+        "## Next-Phase Context\n"
+        "Continue with the next pending phase from the updated base branch.\n",
+        encoding="utf-8",
+    )
 
 
 def _block_manual_reconciliation(

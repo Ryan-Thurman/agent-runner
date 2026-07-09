@@ -464,13 +464,18 @@ work. For blocked registered phases with PR metadata, the runner checks
 `MERGED`, it verifies that the configured `baseBranch` contains the merge
 commit, fetching `origin/<baseBranch>` once if needed.
 
-The phase is marked `COMPLETE` only when the plan also marks that phase
-`Status: COMPLETE` and the protected phase body hash still matches the
-registered SQLite hash. On success, `blocked_from` is cleared, `published_sha`
-is refreshed from the PR head SHA, and a `phase.reconciled` event is recorded.
-If the merged PR lacks matching plan evidence, the runner leaves the phase
-blocked with a message explaining which proof is missing instead of guessing.
-Open or otherwise unmerged PRs are not reconciled.
+If the plan already marks that phase `Status: COMPLETE` and the protected phase
+body hash still matches the registered SQLite hash, the phase is marked
+`COMPLETE` directly. If the PR was merged before `CLOSE_PHASE` wrote the marker,
+but the protected phase body hash still matches, the runner checks out and
+fast-forwards the configured `baseBranch`, writes only runner-owned close
+metadata (`Status: COMPLETE`, evidence, and a handoff), commits and pushes that
+repair to the base branch, then marks the phase `COMPLETE`. On success,
+`blocked_from` is cleared, `published_sha` is refreshed from the PR head SHA,
+and a `phase.reconciled` event is recorded. If the merged PR's phase body no
+longer matches the registered phase, the runner leaves the phase blocked with a
+message explaining which proof is missing instead of guessing. Open or otherwise
+unmerged PRs are not reconciled.
 
 To pause at the next job boundary while a run is active:
 
