@@ -36,7 +36,7 @@ from .phase_loop import (
     restart_count,
     run_phase_loop,
 )
-from .jobs import run_agent_job
+from .jobs import run_agent_job, run_plan_verify_job
 from .plan import STATUS_RE, parse_plan_file, register_or_resume_plan
 from .storage import (
     PHASE_STATUSES,
@@ -50,6 +50,7 @@ from .storage import (
     record_event,
     reap_orphaned_jobs,
     rows_to_dicts,
+    slug_for_path,
     update_phase_publish_metadata,
     update_phase_status,
     update_project_status,
@@ -143,6 +144,28 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     roadmap_parser.set_defaults(func=cmd_plan_roadmap)
+
+    plan_validate_parser = subcommands.add_parser(
+        "plan-validate",
+        aliases=["plan-verify"],
+        help="validate a plan without running it",
+    )
+    plan_validate_parser.add_argument(
+        "--plan",
+        default=None,
+        help="plan path to validate (default: configured planPath)",
+    )
+    plan_validate_parser.add_argument(
+        "--verify",
+        action="append",
+        default=None,
+        metavar="COMMAND",
+        help=(
+            "extra shell verification command to run after configured "
+            "planVerify commands; may be repeated"
+        ),
+    )
+    plan_validate_parser.set_defaults(func=cmd_plan_validate)
 
     reset_parser = subcommands.add_parser("reset-lock", help="clear this project lock")
     reset_parser.set_defaults(func=cmd_reset_lock)
@@ -1014,6 +1037,88 @@ def cmd_plan_roadmap(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan_validate(args: argparse.Namespace) -> int:
+    repo_root = find_git_root()
+    config = load_config(repo_root)
+    emit_config_warnings(config.warnings)
+    home = ensure_runner_layout()
+    slug = project_slug(repo_root)
+    plan_path = _repo_relative_cli_path(
+        repo_root, args.plan or config.plan_path, label="plan path"
+    )
+    parsed_plan = parse_plan_file(repo_root, plan_path)
+    _validate_executable_plan_file(parsed_plan)
+
+    commands = [*config.plan_verify, *(args.verify or [])]
+    if not commands:
+        print(
+            f"[agent-runner] plan parsed: {plan_path} "
+            f"with {len(parsed_plan.phases)} phase(s)",
+            file=sys.stderr,
+        )
+        print(
+            "[agent-runner] no planVerify commands configured; "
+            "only structural validation ran",
+            file=sys.stderr,
+        )
+        return 0
+
+    lock = ProjectLock(home / "locks", slug, repo_root)
+    try:
+        with lock, SignalLockRelease(lock):
+            print(f"[agent-runner] acquired lock for {slug}", file=sys.stderr)
+            with connect_db(home) as db:
+                project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+                reaped_jobs = reap_orphaned_jobs(db, project["id"])
+                if reaped_jobs:
+                    print(
+                        f"[agent-runner] reaped {len(reaped_jobs)} orphaned job(s)",
+                        file=sys.stderr,
+                    )
+                result = run_plan_verify_job(
+                    db,
+                    project_id=project["id"],
+                    commands=commands,
+                    repo_root=repo_root,
+                    log_dir=home
+                    / "logs"
+                    / slug
+                    / "plan-validate"
+                    / slug_for_path(plan_path),
+                    timeout_seconds=config.timeout_minutes * 60,
+                    plan_path=plan_path,
+                    phase_count=len(parsed_plan.phases),
+                    plan_hash=parsed_plan.content_hash,
+                )
+                if result.status != "SUCCEEDED":
+                    raise AgentRunnerError(
+                        f"plan verification failed; inspect {result.log_path}"
+                    )
+                record_event(
+                    db,
+                    project_id=project["id"],
+                    job_id=result.job_id,
+                    event_type="plan.validated",
+                    message=f"validated plan {plan_path}",
+                    data={
+                        "planPath": plan_path,
+                        "phaseCount": len(parsed_plan.phases),
+                        "contentHash": parsed_plan.content_hash,
+                        "commandCount": len(commands),
+                    },
+                )
+    except KeyboardInterrupt:
+        print("[agent-runner] interrupted; lock released", file=sys.stderr)
+        return 130
+
+    print(
+        f"[agent-runner] plan validated: {plan_path} "
+        f"with {len(parsed_plan.phases)} phase(s)",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def cmd_reset_lock(args: argparse.Namespace) -> int:
     repo_root = find_git_root()
     home = ensure_runner_layout()
@@ -1104,10 +1209,16 @@ def _roadmap_plan_prompt(*, roadmap_path: str, output_path: str) -> str:
 
 
 def _validate_roadmap_plan_file(parsed_plan) -> None:
-    if not parsed_plan.phases:
-        raise AgentRunnerError(f"generated plan has no phases: {parsed_plan.path}")
+    _validate_executable_plan_file(parsed_plan)
+    pending_count = sum(1 for phase in parsed_plan.phases if phase.status == "PENDING")
+    if pending_count == 0:
+        raise AgentRunnerError("generated plan has no `Status: PENDING` phases")
 
-    pending_count = 0
+
+def _validate_executable_plan_file(parsed_plan) -> None:
+    if not parsed_plan.phases:
+        raise AgentRunnerError(f"plan has no phases: {parsed_plan.path}")
+
     marker_errors: list[str] = []
     for phase in parsed_plan.phases:
         status_line = next(
@@ -1120,10 +1231,6 @@ def _validate_roadmap_plan_file(parsed_plan) -> None:
                 f"phase {phase.phase_number} is missing a Status marker"
             )
             continue
-        if phase.status == "PENDING":
-            pending_count += 1
 
     if marker_errors:
         raise AgentRunnerError("; ".join(marker_errors))
-    if pending_count == 0:
-        raise AgentRunnerError("generated plan has no `Status: PENDING` phases")

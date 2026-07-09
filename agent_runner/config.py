@@ -58,6 +58,7 @@ class RunnerConfig:
     role_fallbacks: dict[str, list[str]]
     review_triage: ReviewTriageConfig | None
     plan_path: str
+    plan_verify: list[str]
     checks: list[str]
     max_retries_per_phase: int
     auto_fix_attempts: int
@@ -137,6 +138,7 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
     agents_data = _required_dict(data, "agents")
     roles = _required_dict(data, "roles")
     plan_path = _required_string(data, "planPath")
+    plan_verify = _optional_string_list(data, "planVerify", default=[])
     checks = _required_string_list(data, "checks")
 
     if not checks:
@@ -203,6 +205,7 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
         role_fallbacks=role_fallbacks,
         review_triage=review_triage,
         plan_path=plan_path,
+        plan_verify=plan_verify,
         checks=checks,
         max_retries_per_phase=max_retries,
         auto_fix_attempts=auto_fix_attempts,
@@ -398,6 +401,15 @@ def _required_string_list(data: dict[str, Any], key: str) -> list[str]:
     return _string_list(value, key)
 
 
+def _optional_string_list(
+    data: dict[str, Any], key: str, *, default: list[str]
+) -> list[str]:
+    value = data.get(key, default)
+    if not isinstance(value, list):
+        raise ConfigError(f"invalid config: field {key!r} must be a list")
+    return _string_list(value, key)
+
+
 def _string_list(value: list[Any], field_name: str) -> list[str]:
     if not all(isinstance(item, str) for item in value):
         raise ConfigError(f"invalid {field_name}: expected a list of strings")
@@ -448,6 +460,10 @@ def _optional_bool(data: dict[str, Any], key: str, *, default: bool) -> bool:
 SAMPLE_CONFIG_TEMPLATE = """{{
   // Path to the markdown plan parsed by later phases.
   "planPath": "docs/plan.md",
+
+  // Optional commands for `agent-runner plan-validate`; receive plan metadata
+  // in AGENT_RUNNER_PLAN_* environment variables.
+  "planVerify": [],
 
   // Project checks detected by init; review these before the first run.
   "checks": {checks},

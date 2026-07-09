@@ -159,6 +159,7 @@ class Phase1CliTests(unittest.TestCase):
             self.assertEqual(config.roles["coder"], "codex")
             self.assertEqual(config.roles["reviewer"], "claude-opus")
             self.assertEqual(config.roles["fixer"], "claude-opus")
+            self.assertEqual(config.plan_verify, [])
             self.assertEqual(config.auto_fix_attempts, 2)
             self.assertEqual(config.agents["claude-opus"].prompt_prefix, "")
             self.assertIsNotNone(config.review_triage)
@@ -483,6 +484,13 @@ class Phase1CliTests(unittest.TestCase):
             config = load_config(repo)
             self.assertEqual(config.role_fallbacks, {"planner": ["antigravity"]})
             self.assertEqual(config.warnings, [])
+
+            data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
+            data["planVerify"] = [123]
+            (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "planVerify"):
+                load_config(repo)
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
             data["mergeStrategy"] = "octopus"

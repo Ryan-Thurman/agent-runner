@@ -254,16 +254,94 @@ def run_checks_job(
     log_dir: Path,
     timeout_seconds: float,
 ) -> JobResult:
+    return _run_shell_commands_job(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase_id,
+        job_type="RUN_CHECKS",
+        commands=commands,
+        repo_root=repo_root,
+        log_dir=log_dir,
+        log_filename="checks.log",
+        timeout_seconds=timeout_seconds,
+        role="checks",
+        profile_name="shell",
+        failure_error_prefix="check failed",
+        failure_event_type="checks.failed",
+        failure_event_message_prefix="check failed",
+    )
+
+
+def run_plan_verify_job(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    commands: list[str],
+    repo_root: Path,
+    log_dir: Path,
+    timeout_seconds: float,
+    plan_path: str,
+    phase_count: int,
+    plan_hash: str,
+) -> JobResult:
+    plan_abs_path = (repo_root / plan_path).resolve()
+    extra_env = {
+        "AGENT_RUNNER_REPO_ROOT": str(repo_root.resolve()),
+        "AGENT_RUNNER_PLAN_PATH": plan_path,
+        "AGENT_RUNNER_PLAN_ABS_PATH": str(plan_abs_path),
+        "AGENT_RUNNER_PLAN_PHASE_COUNT": str(phase_count),
+        "AGENT_RUNNER_PLAN_HASH": plan_hash,
+    }
+    return _run_shell_commands_job(
+        connection,
+        project_id=project_id,
+        plan_id=None,
+        phase_id=None,
+        job_type="PLAN_VERIFY",
+        commands=commands,
+        repo_root=repo_root,
+        log_dir=log_dir,
+        log_filename="plan-verify.log",
+        timeout_seconds=timeout_seconds,
+        role="plan-verify",
+        profile_name="shell",
+        failure_error_prefix="plan verify failed",
+        failure_event_type="plan_verify.failed",
+        failure_event_message_prefix="plan verify failed",
+        extra_env=extra_env,
+    )
+
+
+def _run_shell_commands_job(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: Optional[int],
+    phase_id: Optional[int],
+    job_type: str,
+    commands: list[str],
+    repo_root: Path,
+    log_dir: Path,
+    log_filename: str,
+    timeout_seconds: float,
+    role: str,
+    profile_name: str,
+    failure_error_prefix: str,
+    failure_event_type: Optional[str] = None,
+    failure_event_message_prefix: Optional[str] = None,
+    extra_env: Optional[dict[str, str]] = None,
+) -> JobResult:
     _ensure_no_running_job(connection, project_id)
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "checks.log"
+    log_path = log_dir / log_filename
     started_sha = _git_sha(repo_root)
     job = create_job(
         connection,
         project_id=project_id,
         plan_id=plan_id,
         phase_id=phase_id,
-        job_type="RUN_CHECKS",
+        job_type=job_type,
         status="RUNNING",
         log_path=log_path,
         started_sha=started_sha,
@@ -277,9 +355,9 @@ def run_checks_job(
         log_path.write_text("", encoding="utf-8")
         _print_job_start(
             job_id=job["id"],
-            job_type="RUN_CHECKS",
-            role="checks",
-            profile_name="shell",
+            job_type=job_type,
+            role=role,
+            profile_name=profile_name,
             log_path=log_path,
         )
         for command in commands:
@@ -292,16 +370,17 @@ def run_checks_job(
                 log_header=f"$ {command}\n",
                 command_display=command,
                 live_preview_context=_live_preview_context(
-                    "RUN_CHECKS", "checks", "checks"
+                    job_type, role, profile_name
                 ),
+                extra_env=extra_env,
                 on_spawn=lambda pid: _record_job_spawn(
-                    connection, job["id"], "RUN_CHECKS", pid
+                    connection, job["id"], job_type, pid
                 ),
             )
             if process_error is not None or exit_code != 0:
                 failed_command = command
                 final_exit_code = exit_code
-                error = process_error or f"check failed: {command}"
+                error = process_error or f"{failure_error_prefix}: {command}"
                 break
     except KeyboardInterrupt:
         _mark_job_interrupted(connection, job["id"], repo_root)
@@ -323,19 +402,20 @@ def run_checks_job(
     if status == "FAILED":
         _print_job_failure(
             job_id=job["id"],
-            job_type="RUN_CHECKS",
+            job_type=job_type,
             error=error,
             log_path=log_path,
         )
-    if failed_command is not None:
+    if failed_command is not None and failure_event_type is not None:
+        message_prefix = failure_event_message_prefix or failure_error_prefix
         _record_event(
             connection,
             project_id=project_id,
             plan_id=plan_id,
             phase_id=phase_id,
             job_id=job["id"],
-            event_type="checks.failed",
-            message=f"check failed: {failed_command}",
+            event_type=failure_event_type,
+            message=f"{message_prefix}: {failed_command}",
         )
     row = get_job(connection, job["id"])
     return JobResult(
@@ -403,6 +483,7 @@ def _run_process(
     log_header: str,
     command_display: Optional[str] = None,
     live_preview_context: Optional[LivePreviewContext] = None,
+    extra_env: Optional[dict[str, str]] = None,
     on_spawn: Optional[Callable[[int], None]] = None,
 ) -> tuple[Optional[int], str, str, Optional[str]]:
     live_preview = _live_preview_writer(live_preview_context)
@@ -420,11 +501,16 @@ def _run_process(
             stdout_chunks: list[str] = []
             stderr_chunks: list[str] = []
             lock = threading.Lock()
+            env = None
+            if extra_env is not None:
+                env = os.environ.copy()
+                env.update(extra_env)
             try:
                 process = subprocess.Popen(
                     command,
                     cwd=repo_root,
                     shell=shell,
+                    env=env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -537,6 +623,8 @@ def _live_preview_context(
 ) -> LivePreviewContext:
     if job_type == "RUN_CHECKS":
         return LivePreviewContext(subject="checks", verb="checking")
+    if job_type == "PLAN_VERIFY":
+        return LivePreviewContext(subject="plan", verb="verifying")
 
     verb_by_job_type = {
         "ROADMAP_PLAN": "planning",
