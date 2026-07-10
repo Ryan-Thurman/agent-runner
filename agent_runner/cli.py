@@ -24,8 +24,10 @@ from .phase_loop import (
     PhaseLoopResult,
     RESTART_COUNT_ENV,
     extract_pr_number,
-    _count_jobs,
     _git_add_all,
+    _git_current_branch,
+    _git_head_sha,
+    _git_rev_parse,
     _publish_instructions,
     _record_phase_published,
     _profiles_for_role,
@@ -337,9 +339,6 @@ def _run_autofix_loop(
         if _requires_human_intent(blocking_message):
             return result
 
-        # Counted from the jobs table so runner restarts (including the
-        # self-restart after a merge) cannot reset the budget and re-spend
-        # fixer attempts on the same phase.
         used_attempts = _autofix_attempt_count(db, phase["id"])
         if used_attempts >= config.auto_fix_attempts:
             _post_autofix_escalation_issue(
@@ -404,7 +403,7 @@ def _run_autofix_loop(
             )
             return result
 
-        phase = _prepare_successful_autofix_resume(
+        phase, resume_status = _prepare_successful_autofix_resume(
             db,
             project_id=project_id,
             plan_id=plan_id,
@@ -418,7 +417,7 @@ def _run_autofix_loop(
             project_id=project_id,
             plan_id=plan_id,
             phase=phase,
-            to_status=phase["blocked_from"],
+            to_status=resume_status,
         )
         record_event(
             db,
@@ -449,6 +448,28 @@ def _run_autofix_loop(
     return result
 
 
+# Statuses reached only after a review passed. Resuming into one of these skips
+# the reviewer, so a job that lands new commits must route back through
+# CHECKING first.
+POST_REVIEW_STATUSES = frozenset({"CLOSING", "MERGING"})
+
+
+def _job_landed_commits(db, job_id: int) -> bool:
+    row = db.execute(
+        "SELECT started_sha, finished_sha FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    started, finished = row["started_sha"], row["finished_sha"]
+    return bool(started and finished and started != finished)
+
+
+def _autofix_resume_status(*, blocked_from: str, landed_commits: bool) -> str:
+    if landed_commits and blocked_from in POST_REVIEW_STATUSES:
+        return "CHECKING"
+    return blocked_from
+
+
 def _prepare_successful_autofix_resume(
     db,
     *,
@@ -459,9 +480,12 @@ def _prepare_successful_autofix_resume(
     config,
     repo_root: Path,
 ):
+    landed_commits = _job_landed_commits(db, job_id)
     if not config.auto_commit:
         _git_add_all(repo_root)
-        return phase
+        return phase, _autofix_resume_status(
+            blocked_from=phase["blocked_from"], landed_commits=landed_commits
+        )
 
     metadata = _verify_published_phase(repo_root)
     phase = update_phase_publish_metadata(
@@ -480,11 +504,26 @@ def _prepare_successful_autofix_resume(
         phase=phase,
         metadata=metadata,
     )
-    return phase
+    return phase, _autofix_resume_status(
+        blocked_from=phase["blocked_from"], landed_commits=landed_commits
+    )
 
 
 def _autofix_attempt_count(db, phase_id: int) -> int:
-    return _count_jobs(db, phase_id, "AUTOFIX")
+    # Counted from the jobs table rather than a phase column so runner restarts
+    # cannot reset the budget. An interrupted job (Ctrl-C, runner kill) never
+    # reached a verdict and gets its attempt back; a real failure has an
+    # exit_code or a timeout error and spends one.
+    row = db.execute(
+        """
+        SELECT COUNT(*) AS count FROM jobs
+        WHERE phase_id = ?
+          AND type = 'AUTOFIX'
+          AND NOT (exit_code IS NULL AND error = 'interrupted')
+        """,
+        (phase_id,),
+    ).fetchone()
+    return row["count"]
 
 
 def _post_autofix_escalation_issue(
@@ -633,6 +672,14 @@ def _requires_human_intent(blocking_message: str) -> bool:
             "protected phase body",
             "registered phase",
             "body on origin/",
+            # Publish/close preflight mismatches are bookkeeping, not code
+            # defects: the tree is fine and the fixer has nothing to fix. Worse,
+            # a "successful" autofix would re-stamp published_sha over the
+            # mismatch and drop straight back into CLOSING, closing code no
+            # reviewer ever saw.
+            "does not match reviewed published sha",
+            "does not match reviewed published branch",
+            "push the branch before review",
         )
     )
 
@@ -714,6 +761,47 @@ def _newest_phase_log_tail(log_dir: Path) -> str:
     )
 
 
+def _reviewed_head_moved(repo_root: Optional[Path], phase) -> bool:
+    """True when the phase branch is checked out but HEAD has advanced past the
+    commit the reviewer actually saw."""
+    if repo_root is None:
+        return False
+    branch_name = phase["branch_name"]
+    reviewed_sha = phase["published_sha"]
+    if not branch_name or not reviewed_sha:
+        return False
+    try:
+        # A different branch is its own error; let the preflight report it.
+        if _git_current_branch(repo_root) != branch_name:
+            return False
+        return _git_head_sha(repo_root) != reviewed_sha
+    except AgentRunnerError:
+        return False
+
+
+def _warn_if_branch_unpushed(repo_root: Path, phase) -> None:
+    """Publish verification compares the PR head to local HEAD, so an unpushed
+    commit blocks the phase again the moment the run resumes."""
+    branch_name = phase["branch_name"]
+    if not branch_name:
+        return
+    try:
+        if _git_current_branch(repo_root) != branch_name:
+            return
+        local_head = _git_head_sha(repo_root)
+        remote_head = _git_rev_parse(repo_root, f"origin/{branch_name}")
+    except AgentRunnerError:
+        return
+    if local_head == remote_head:
+        return
+    print(
+        f"[agent-runner] warning: local HEAD {local_head[:12]} is not on "
+        f"origin/{branch_name} ({remote_head[:12]}); push the branch before "
+        "`agent-runner run` or the phase will block on publish",
+        file=sys.stderr,
+    )
+
+
 def _unblock_phase(
     db,
     *,
@@ -721,6 +809,7 @@ def _unblock_phase(
     plan_id: int,
     phase,
     to_status: Optional[str],
+    repo_root: Optional[Path] = None,
 ) -> str:
     if phase["status"] != "BLOCKED":
         raise AgentRunnerError(
@@ -739,6 +828,20 @@ def _unblock_phase(
         raise AgentRunnerError(
             f"cannot unblock to {target}; choose one of {', '.join(resumable)}"
         )
+
+    # Restoring straight into CLOSING re-blocks on the close preflight when a
+    # local commit landed after the review. Send the new work back through
+    # checks and review instead. MERGING is deliberately excluded: the closer
+    # commits the plan metadata before the phase reaches MERGING, so HEAD is
+    # legitimately past the reviewed SHA there.
+    if target == "CLOSING" and _reviewed_head_moved(repo_root, phase):
+        print(
+            f"[agent-runner] phase {phase['phase_number']} HEAD moved past the "
+            f"reviewed commit {phase['published_sha'][:12]}; unblocking to "
+            f"CHECKING instead of {target} so the new commits are reviewed",
+            file=sys.stderr,
+        )
+        target = "CHECKING"
 
     update_phase_status(db, phase["id"], target)
     record_event(
@@ -915,7 +1018,9 @@ def cmd_unblock(args: argparse.Namespace) -> int:
             plan_id=plan["id"],
             phase=phase,
             to_status=args.to,
+            repo_root=repo_root,
         )
+        _warn_if_branch_unpushed(repo_root, phase)
     print(
         f"[agent-runner] phase {phase['phase_number']} unblocked to {target}; "
         "run `agent-runner run` to continue",
