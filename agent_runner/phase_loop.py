@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from .config import AgentProfile, RunnerConfig
+from .config import AgentProfile, RunnerConfig, fallback_profile_names
 from .errors import AgentRunnerError, JobError
 from .jobs import JobResult, is_quota_failure, run_agent_job, run_checks_job
 from .plan import PLAN_CONTEXT_CHAR_LIMIT, ParsedPhase, ParsedPlan, parse_plan_file
@@ -1388,16 +1388,15 @@ def _run_close_phase(
             )
 
     pre_close_hash = _phase_body_hash_on_disk(repo_root, config, phase)
-    profile = _profile_for_role(config, "coder")
     log_dir = Path(phase["log_dir"])
-    result = run_agent_job(
+    result, _profile = _run_agent_job_with_fallbacks(
         connection,
         project_id=project_id,
         plan_id=plan_id,
         phase_id=phase["id"],
         job_type="CLOSE_PHASE",
         role="closer",
-        profile=profile,
+        profiles=_profiles_for_role(config, "closer"),
         prompt=_close_phase_prompt(
             config=config,
             phase=phase,
@@ -2091,7 +2090,7 @@ def _profile_for_role(config: RunnerConfig, role: str):
 def _profiles_for_role(config: RunnerConfig, role: str) -> list[AgentProfile]:
     profiles = [_profile_for_role(config, role)]
     seen = {profiles[0].name}
-    for name in config.role_fallbacks.get(role, []):
+    for name in fallback_profile_names(config, role):
         if name not in seen:
             profiles.append(config.agents[name])
             seen.add(name)
@@ -2130,7 +2129,7 @@ def _review_profiles_from_primary(
 ) -> list[AgentProfile]:
     profiles = [config.agents[primary_profile_name]]
     seen = {primary_profile_name}
-    for name in config.role_fallbacks.get("reviewer", []):
+    for name in fallback_profile_names(config, "reviewer"):
         if name not in seen:
             profiles.append(config.agents[name])
             seen.add(name)
@@ -2173,15 +2172,14 @@ def _run_review_triage(
         )
         return triage
 
-    simple_profile = config.agents[config.review_triage.simple]
-    result = run_agent_job(
+    result, _profile = _run_agent_job_with_fallbacks(
         connection,
         project_id=project_id,
         plan_id=plan_id,
         phase_id=phase["id"],
         job_type="TRIAGE",
         role="triage",
-        profile=simple_profile,
+        profiles=_profiles_for_role(config, "triage"),
         prompt=prompt,
         repo_root=repo_root,
         log_dir=log_dir,

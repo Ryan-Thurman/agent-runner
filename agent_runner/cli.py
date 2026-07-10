@@ -11,7 +11,11 @@ from . import __version__
 from .config import (
     CONFIG_FILENAME,
     PLACEHOLDER_CHECKS,
+    KNOWN_ROLES,
+    RunnerConfig,
+    apply_preset,
     detect_default_checks,
+    fallback_profile_names,
     load_config,
     project_slug,
     sample_config_for_checks,
@@ -38,13 +42,15 @@ from .phase_loop import (
     restart_count,
     run_phase_loop,
 )
-from .jobs import run_agent_job, run_plan_verify_job
+from .jobs import run_plan_verify_job
 from .plan import STATUS_RE, parse_plan_file, register_or_resume_plan
 from .storage import (
     PHASE_STATUSES,
     connect_db,
+    find_project_by_repo_path,
     get_project,
     get_or_create_project,
+    set_active_preset,
     list_phases_for_plan,
     list_plans_for_project,
     list_recent_events,
@@ -169,6 +175,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan_validate_parser.set_defaults(func=cmd_plan_validate)
 
+    agents_parser = subcommands.add_parser(
+        "agents", help="show or swap the agent profile behind each role"
+    )
+    agents_group = agents_parser.add_mutually_exclusive_group()
+    agents_group.add_argument(
+        "--use", metavar="PRESET", help="switch every role named by this preset"
+    )
+    agents_group.add_argument(
+        "--clear",
+        action="store_true",
+        help="drop the active preset and use the config's roles",
+    )
+    agents_parser.set_defaults(func=cmd_agents)
+
     reset_parser = subcommands.add_parser("reset-lock", help="clear this project lock")
     reset_parser.set_defaults(func=cmd_reset_lock)
 
@@ -202,9 +222,13 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     repo_root = find_git_root()
-    config = load_config(repo_root)
-    emit_config_warnings(config.warnings)
     home = ensure_runner_layout()
+    config = load_active_config(repo_root, home)
+    emit_config_warnings(config.warnings)
+    if config.active_preset:
+        print(
+            f"[agent-runner] agent preset: {config.active_preset}", file=sys.stderr
+        )
     slug = project_slug(repo_root)
     lock = ProjectLock(home / "locks", slug, repo_root)
 
@@ -360,24 +384,24 @@ def _run_autofix_loop(
             return paused
 
         attempt = used_attempts + 1
-        profile = config.agents[config.roles["fixer"]]
+        profiles = _profiles_for_role(config, "fixer")
         print(
             "[agent-runner] "
             f"phase {phase['phase_number']} blocked; auto-fix attempt "
-            f"{attempt}/{config.auto_fix_attempts} with profile {profile.name}",
+            f"{attempt}/{config.auto_fix_attempts} with profile {profiles[0].name}",
             file=sys.stderr,
             flush=True,
         )
 
         parsed_phase = _parsed_phase_for_number(parsed_plan, phase["phase_number"])
-        fix_result = run_agent_job(
+        fix_result, used_profile = _run_agent_job_with_fallbacks(
             db,
             project_id=project_id,
             plan_id=plan_id,
             phase_id=phase["id"],
             job_type="AUTOFIX",
             role="fixer",
-            profile=profile,
+            profiles=profiles,
             prompt=_autofix_prompt(
                 phase=phase,
                 parsed_phase=parsed_phase,
@@ -433,7 +457,7 @@ def _run_autofix_loop(
             data={
                 "attempt": attempt,
                 "maxAttempts": config.auto_fix_attempts,
-                "profile": profile.name,
+                "profile": used_profile.name,
                 "to": target,
             },
         )
@@ -880,6 +904,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         running_jobs = list_running_jobs_for_project(db, project["id"])
 
     print(f"[agent-runner] project: {repo_root}", file=sys.stderr)
+    if project["active_preset"]:
+        print(
+            f"[agent-runner] agent preset: {project['active_preset']}", file=sys.stderr
+        )
     if reaped_jobs:
         print(
             f"[agent-runner] reaped {len(reaped_jobs)} orphaned job(s)",
@@ -1067,9 +1095,9 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 def cmd_plan_roadmap(args: argparse.Namespace) -> int:
     repo_root = find_git_root()
-    config = load_config(repo_root)
-    emit_config_warnings(config.warnings)
     home = ensure_runner_layout()
+    config = load_active_config(repo_root, home)
+    emit_config_warnings(config.warnings)
     slug = project_slug(repo_root)
     roadmap_path = _repo_relative_cli_path(
         repo_root, args.roadmap, label="roadmap path"
@@ -1224,6 +1252,65 @@ def cmd_plan_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_agents(args: argparse.Namespace) -> int:
+    repo_root = find_git_root()
+    home = ensure_runner_layout()
+
+    if args.use is not None or args.clear:
+        preset = None if args.clear else args.use
+        config = load_config(repo_root)
+        if preset is not None and preset not in config.presets:
+            known = ", ".join(sorted(config.presets)) or "none configured"
+            raise ConfigError(f"unknown preset {preset!r}: expected one of {known}")
+
+        slug = project_slug(repo_root)
+        with connect_db(home) as db:
+            project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+            previous = project["active_preset"]
+            set_active_preset(db, project["id"], preset)
+            record_event(
+                db,
+                project_id=project["id"],
+                plan_id=None,
+                phase_id=None,
+                job_id=None,
+                event_type="agents.preset",
+                message=(
+                    f"agent preset: {previous or 'none'} -> {preset or 'none'}"
+                ),
+                data={"previous": previous, "preset": preset},
+            )
+        if preset is None:
+            print("[agent-runner] cleared the agent preset", file=sys.stderr)
+        else:
+            print(f"[agent-runner] switched to preset {preset!r}", file=sys.stderr)
+
+    config = load_active_config(repo_root, home)
+    emit_config_warnings(config.warnings)
+
+    print(f"[agent-runner] project: {repo_root}")
+    print(f"[agent-runner] preset: {config.active_preset or 'none (config roles)'}")
+    for role in sorted(KNOWN_ROLES):
+        profile = config.roles.get(role)
+        if profile is None:
+            print(f"[agent-runner]   {role:<9} -> (unset)")
+            continue
+        derived = "" if role in config.declared_roles else " [derived]"
+        chain = [name for name in fallback_profile_names(config, role) if name != profile]
+        fallbacks = f" fallback: {' -> '.join(chain)}" if chain else " fallback: none"
+        print(f"[agent-runner]   {role:<9} -> {profile}{derived}{fallbacks}")
+
+    if config.presets:
+        available = ", ".join(sorted(config.presets))
+        print(f"[agent-runner] presets: {available}")
+    else:
+        print(
+            f"[agent-runner] presets: none defined; add a \"presets\" block to "
+            f"{CONFIG_FILENAME}"
+        )
+    return 0
+
+
 def cmd_reset_lock(args: argparse.Namespace) -> int:
     repo_root = find_git_root()
     home = ensure_runner_layout()
@@ -1235,6 +1322,30 @@ def cmd_reset_lock(args: argparse.Namespace) -> int:
 def emit_config_warnings(warnings: list[str]) -> None:
     for warning in warnings:
         print(f"[agent-runner] warning: {warning}", file=sys.stderr)
+
+
+def load_active_config(repo_root: Path, home: Path) -> RunnerConfig:
+    """Load the config with the project's active preset applied, if any.
+
+    The preset lives in the runner database rather than `.agent-runner.json`
+    so that `agents --use` never has to rewrite — and reformat — a config file
+    the operator maintains by hand.
+    """
+    config = load_config(repo_root)
+    with connect_db(home) as db:
+        project = find_project_by_repo_path(db, repo_root)
+    if project is None or not project["active_preset"]:
+        return config
+
+    preset = project["active_preset"]
+    if preset not in config.presets:
+        config.warnings.append(
+            f"active preset {preset!r} is no longer defined in {CONFIG_FILENAME}; "
+            "falling back to the config's roles (clear it with "
+            "`agent-runner agents --clear`)"
+        )
+        return config
+    return apply_preset(config, preset)
 
 
 def _newest_log_file(log_dir: Path) -> Optional[Path]:

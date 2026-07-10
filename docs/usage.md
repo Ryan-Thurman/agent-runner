@@ -172,6 +172,10 @@ Minimum config shape:
     "reviewer": "claude-opus",
     "fixer": "claude-opus"
   },
+  "presets": {
+    "codex": { "coder": "codex", "fixer": "claude-opus" },
+    "claude": { "coder": "claude-opus", "fixer": "claude-opus" }
+  },
   "roleFallbacks": {
     "reviewer": ["antigravity"],
     "coder": ["claude-sonnet"]
@@ -256,16 +260,41 @@ Current notes:
   holds the project lock.
 - `promptPrefix` is optional. When set, the runner prepends it to every prompt
   sent to that agent profile.
+- `roles` maps each of the runner's six roles to an agent profile. `coder` and
+  `reviewer` are required; `fixer` is required when `autoFixAttempts > 0`.
+  `closer` (CLOSE_PHASE) defaults to whatever `coder` is, and `triage` defaults
+  to `reviewTriage.simple`, so most configs never name them. `planner` is only
+  used by `plan-roadmap`. Every role dispatches its own agent job and every role
+  falls back independently:
+
+  | Role | Job | Sandbox |
+  | --- | --- | --- |
+  | `coder` | `IMPLEMENT`, `FIX` | write |
+  | `reviewer` | `REVIEW` | read-only |
+  | `closer` | `CLOSE_PHASE` | write |
+  | `fixer` | `AUTOFIX` | write |
+  | `triage` | `TRIAGE` | read-only |
+  | `planner` | `ROADMAP_PLAN` | write |
+
+- `presets` is optional and maps a preset name to the roles it moves. Swap the
+  fleet with `agent-runner agents --use claude` and revert with
+  `agent-runner agents --clear`. The active preset is stored per project in the
+  runner database rather than written back to `.agent-runner.json`, so swapping
+  never reformats a config you maintain by hand; `agent-runner status` and
+  `agent-runner run` both print it. A preset need only name the roles it
+  changes, and roles that derive from another (`closer`, `triage`) follow their
+  source unless the preset or config pins them. Run `agent-runner agents` with
+  no flags to print the effective mapping and each role's fallback chain.
 - `roleFallbacks` is optional and maps a role to an ordered list of agent
-  profiles. When a coder IMPLEMENT/FIX job, planner ROADMAP_PLAN job, or
-  reviewer REVIEW job fails with a quota/rate-limit error (429, "usage limit",
-  "quota exceeded", and similar), the runner reruns the job with the next
-  profile and records a `<jobtype>.fallback` event such as
-  `implement.fallback`, `roadmap_plan.fallback`, `fix.fallback`, or
-  `review.fallback`. Any other failure blocks the job without falling back.
-  Other roles are accepted but warned about. The sample config includes an
-  `antigravity` profile (the `agy` CLI) suitable as a fallback on a separate
-  quota pool.
+  profiles. When any agent job fails with a quota/rate-limit error (429, "usage
+  limit", "quota exceeded", and similar), the runner reruns it with the next
+  profile and records a `<jobtype>.fallback` event such as `implement.fallback`,
+  `close_phase.fallback`, `autofix.fallback`, or `review.fallback`. Any other
+  failure blocks the job without falling back. A role with no chain of its own
+  inherits one: `closer` and `fixer` follow `coder`, `triage` follows
+  `reviewer`. Declaring an empty list opts a role out of inheriting. The sample
+  config includes an `antigravity` profile (the `agy` CLI) suitable as a
+  fallback on a separate quota pool.
 - `reviewTriage` is optional. When configured, the runner launches one
   read-only `TRIAGE` job before each `REVIEW` using the `simple` profile. The
   triage prompt includes the phase body and a stat-only diff summary, then asks

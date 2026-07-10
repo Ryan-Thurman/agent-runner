@@ -105,6 +105,7 @@ def write_config(
         data["roles"] = {"coder": "coderish", "reviewer": "reviewish"}
     data["roleFallbacks"] = {}
     data.pop("reviewTriage", None)
+    data.pop("presets", None)
     data["autoFixAttempts"] = 0
     data["checks"] = [
         f"{shlex.quote(sys.executable)} -c "

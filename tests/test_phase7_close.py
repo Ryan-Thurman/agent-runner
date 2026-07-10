@@ -89,6 +89,9 @@ def write_config(
     *,
     auto_commit: bool = True,
     merge_on_close: bool = False,
+    roles: Optional[dict[str, str]] = None,
+    role_fallbacks: Optional[dict[str, list[str]]] = None,
+    with_backup_agent: bool = False,
 ) -> None:
     data = json.loads(strip_json_comments(SAMPLE_CONFIG))
     data["agents"] = {
@@ -100,9 +103,19 @@ def write_config(
             "outputCapture": "stdout",
         }
     }
-    data["roles"] = {"coder": "fake", "reviewer": "fake"}
-    data["roleFallbacks"] = {}
+    if with_backup_agent:
+        # Same script, but `--backup` lets it tell which profile invoked it.
+        data["agents"]["backup"] = {
+            "command": sys.executable,
+            "promptArgs": [str(agent_script), "--backup"],
+            "writeFlags": ["--write-flag"],
+            "readOnlyFlags": ["--read-only-flag"],
+            "outputCapture": "stdout",
+        }
+    data["roles"] = roles or {"coder": "fake", "reviewer": "fake"}
+    data["roleFallbacks"] = role_fallbacks or {}
     data.pop("reviewTriage", None)
+    data.pop("presets", None)
     data["autoFixAttempts"] = 0
     data["checks"] = [
         f"{shlex.quote(sys.executable)} -c "
@@ -138,6 +151,12 @@ if "Review the published phase PR independently" in prompt:
 
 if "Close the accepted phase" in prompt:
     (trace / "close-argv.json").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+    is_backup = "--backup" in sys.argv
+    if os.environ.get("CLOSE_QUOTA_FAIL") == "1" and not is_backup:
+        print("ERROR: You've hit your usage limit.", file=sys.stderr)
+        raise SystemExit(1)
+    if is_backup:
+        (trace / "close-backup.txt").write_text("backup closed\n", encoding="utf-8")
     if os.environ.get("CLOSE_FAIL") == "1":
         print("closer failed")
         raise SystemExit(9)
@@ -522,6 +541,66 @@ class Phase7CloseTests(unittest.TestCase):
                 ),
                 [(event["event_type"], event["message"]) for event in events],
             )
+
+    def test_close_phase_quota_failure_falls_back_to_the_coders_backup(self):
+        """A quota-exhausted closer must hand off, not block the phase.
+
+        The closer is not named in `roles`, so it derives from the coder and
+        inherits the coder's fallback chain.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            bin_dir = root / "bin"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            bin_dir.mkdir()
+            git_init(repo)
+            subprocess.run(
+                ["git", "checkout", "-q", "-b", "dev/test-phase"], cwd=repo, check=True
+            )
+            write_phase7_agent(script)
+            write_fake_gh(bin_dir / "gh")
+            write_plan(repo)
+            write_config(
+                repo,
+                script,
+                with_backup_agent=True,
+                role_fallbacks={"coder": ["backup"]},
+            )
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={
+                    "TRACE_DIR": str(trace),
+                    "CLOSE_QUOTA_FAIL": "1",
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "CLOSE_PHASE hit a quota/rate limit with profile 'fake'; "
+                "falling back to profile 'backup'",
+                result.stderr,
+            )
+            self.assertTrue((trace / "close-backup.txt").exists())
+            self.assertEqual(phase_rows(home, repo)[0]["status"], "COMPLETE")
+            self.assertEqual(
+                parse_plan_file(repo, "docs/plan.md").phases[0].status, "COMPLETE"
+            )
+            with connect_db(home) as db:
+                events = db.execute(
+                    "SELECT event_type FROM events ORDER BY id"
+                ).fetchall()
+            event_types = [event["event_type"] for event in events]
+            self.assertIn("close_phase.fallback", event_types)
+            self.assertNotIn("phase.blocked", event_types)
 
     def test_closer_failure_blocks_without_marking_complete(self):
         with tempfile.TemporaryDirectory() as tmp:

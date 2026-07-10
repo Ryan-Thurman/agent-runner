@@ -1,7 +1,7 @@
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,20 @@ REQUIRED_AGENT_FIELDS = {
 OUTPUT_CAPTURE_MODES = {"stdout", "last-message-file", "structured-stdout"}
 
 MERGE_STRATEGIES = {"merge", "squash", "rebase"}
+
+# Every role the runner can dispatch an agent job under. Each one is
+# independently swappable and independently falls back on a quota failure.
+KNOWN_ROLES = {"coder", "reviewer", "planner", "fixer", "closer", "triage"}
+
+# Roles the runner derives when the config does not name them explicitly.
+# `closer` runs CLOSE_PHASE, which writes the handoff commit, so it tracks the
+# coder unless it is pinned. `triage` classifies review difficulty, so it tracks
+# the cheap half of reviewTriage.
+DERIVED_ROLES = {"closer": "coder"}
+
+# Where a role looks for its fallback chain when `roleFallbacks` does not name
+# it. A role that declares its own list (even an empty one) never inherits.
+ROLE_FALLBACK_PARENT = {"closer": "coder", "fixer": "coder", "triage": "reviewer"}
 
 
 @dataclass(frozen=True)
@@ -69,6 +83,12 @@ class RunnerConfig:
     merge_on_close: bool
     merge_strategy: str
     warnings: list[str]
+    # `roles` is the effective mapping the runner dispatches on; `declared_roles`
+    # is what the config actually named, so a preset can re-derive `closer` and
+    # `triage` instead of freezing whatever they happened to resolve to.
+    declared_roles: dict[str, str] = field(default_factory=dict)
+    presets: dict[str, dict[str, str]] = field(default_factory=dict)
+    active_preset: str | None = None
 
 
 def strip_json_comments(text: str) -> str:
@@ -171,10 +191,19 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
         if required_role not in normalized_roles:
             raise ConfigError(f"invalid roles: missing required role {required_role!r}")
 
-    role_fallbacks = _validate_role_fallbacks(
-        data, agents=agents, roles=normalized_roles, warnings=warnings
-    )
+    for role in normalized_roles:
+        if role not in KNOWN_ROLES:
+            allowed = ", ".join(sorted(KNOWN_ROLES))
+            raise ConfigError(f"invalid roles.{role}: expected one of {allowed}")
+
     review_triage = _validate_review_triage(data, agents=agents)
+    declared_roles = dict(normalized_roles)
+    effective_roles = _effective_roles(declared_roles, review_triage=review_triage)
+
+    role_fallbacks = _validate_role_fallbacks(
+        data, agents=agents, roles=effective_roles
+    )
+    presets = _validate_presets(data, agents=agents)
 
     max_retries = _required_int(data, "maxRetriesPerPhase", minimum=0)
     auto_fix_attempts = _optional_int(data, "autoFixAttempts", default=0, minimum=0)
@@ -201,8 +230,11 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
         path=path,
         data=data,
         agents=agents,
-        roles=normalized_roles,
+        roles=effective_roles,
+        declared_roles=declared_roles,
         role_fallbacks=role_fallbacks,
+        presets=presets,
+        active_preset=None,
         review_triage=review_triage,
         plan_path=plan_path,
         plan_verify=plan_verify,
@@ -321,12 +353,93 @@ def _validate_agent_profile(name: str, profile: dict[str, Any]) -> AgentProfile:
     )
 
 
+def _effective_roles(
+    declared_roles: dict[str, str], *, review_triage: ReviewTriageConfig | None
+) -> dict[str, str]:
+    """Fill in the roles the runner dispatches but the config need not name."""
+    roles = dict(declared_roles)
+    for role, source in DERIVED_ROLES.items():
+        if role not in roles and source in roles:
+            roles[role] = roles[source]
+    if "triage" not in roles and review_triage is not None:
+        roles["triage"] = review_triage.simple
+    return roles
+
+
+def fallback_profile_names(config: "RunnerConfig", role: str) -> list[str]:
+    """Fallback profiles for a role, inheriting the parent role's chain.
+
+    A role that names its own chain — including an explicitly empty one — is
+    taken at its word and never inherits.
+    """
+    declared = config.role_fallbacks.get(role)
+    if declared is not None:
+        return declared
+    parent = ROLE_FALLBACK_PARENT.get(role)
+    if parent is None:
+        return []
+    return config.role_fallbacks.get(parent, [])
+
+
+def apply_preset(config: RunnerConfig, name: str) -> RunnerConfig:
+    """Return `config` with every role the preset names swapped to its profile.
+
+    Derived roles are recomputed from the merged set, so a preset that moves
+    `coder` also moves the `closer` that was tracking it.
+    """
+    if name not in config.presets:
+        known = ", ".join(sorted(config.presets)) or "none configured"
+        raise ConfigError(f"unknown preset {name!r}: expected one of {known}")
+
+    declared_roles = {**config.declared_roles, **config.presets[name]}
+    return replace(
+        config,
+        roles=_effective_roles(declared_roles, review_triage=config.review_triage),
+        declared_roles=declared_roles,
+        active_preset=name,
+    )
+
+
+def _validate_presets(
+    data: dict[str, Any], *, agents: dict[str, AgentProfile]
+) -> dict[str, dict[str, str]]:
+    value = data.get("presets")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("invalid presets: expected an object")
+
+    presets: dict[str, dict[str, str]] = {}
+    for name, mapping in value.items():
+        if not isinstance(name, str) or not name:
+            raise ConfigError("invalid presets: preset names must be non-empty strings")
+        if not isinstance(mapping, dict):
+            raise ConfigError(f"invalid presets.{name}: expected an object")
+        if not mapping:
+            raise ConfigError(f"invalid presets.{name}: must name at least one role")
+
+        roles: dict[str, str] = {}
+        for role, profile_name in mapping.items():
+            if role not in KNOWN_ROLES:
+                allowed = ", ".join(sorted(KNOWN_ROLES))
+                raise ConfigError(
+                    f"invalid presets.{name}.{role}: expected one of {allowed}"
+                )
+            if not isinstance(profile_name, str) or profile_name not in agents:
+                raise ConfigError(
+                    f"invalid presets.{name}.{role}: "
+                    f"unknown agent profile {profile_name!r}"
+                )
+            roles[role] = profile_name
+        presets[name] = roles
+    return presets
+
+
 def _validate_role_fallbacks(
     data: dict[str, Any],
     *,
     agents: dict[str, AgentProfile],
     roles: dict[str, str],
-    warnings: list[str],
 ) -> dict[str, list[str]]:
     value = data.get("roleFallbacks")
     if value is None:
@@ -348,11 +461,6 @@ def _validate_role_fallbacks(
                 raise ConfigError(
                     f"invalid roleFallbacks.{role}: unknown agent profile {name!r}"
                 )
-        if role not in {"coder", "reviewer", "planner"} and names:
-            warnings.append(
-                f"roleFallbacks.{role} is configured but only the coder, planner, "
-                "and reviewer roles fall back on quota failures today"
-            )
         role_fallbacks[role] = names
     return role_fallbacks
 
@@ -515,6 +623,9 @@ SAMPLE_CONFIG_TEMPLATE = """{{
     }}
   }},
 
+  // Every agent job runs under a role, and every role is swappable. Omit
+  // "closer" (CLOSE_PHASE) to have it track the coder, and "triage" to have it
+  // track reviewTriage.simple.
   "roles": {{
     "coder": "codex",
     // Reviews are pinned to Opus/Sonnet deliberately; do not use the claude CLI default.
@@ -522,9 +633,17 @@ SAMPLE_CONFIG_TEMPLATE = """{{
     "fixer": "claude-opus"
   }},
 
-  // When a role's agent fails on a quota/rate limit, the runner retries coder
-  // IMPLEMENT/FIX, planner ROADMAP_PLAN, and reviewer REVIEW jobs with these
-  // profiles in order.
+  // Swap the whole fleet with `agent-runner agents --use <name>`; inspect the
+  // current mapping with `agent-runner agents`. A preset need only name the
+  // roles it moves.
+  "presets": {{
+    "codex": {{ "coder": "codex", "fixer": "claude-opus" }},
+    "claude": {{ "coder": "claude-opus", "fixer": "claude-opus" }}
+  }},
+
+  // When a role's agent fails on a quota/rate limit, the runner retries the job
+  // with these profiles in order. Roles that name no chain inherit one:
+  // closer and fixer follow coder, triage follows reviewer.
   "roleFallbacks": {{ "reviewer": ["antigravity"], "coder": ["claude-sonnet"] }},
 
   // Route simple reviews to Sonnet and behavioral reviews to Opus; both models

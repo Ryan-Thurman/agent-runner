@@ -66,6 +66,7 @@ def write_config(
         data["roles"]["planner"] = planner_profile
     data["roleFallbacks"] = role_fallbacks or {}
     data.pop("reviewTriage", None)
+    data.pop("presets", None)
     data["autoFixAttempts"] = 0
     data["autoCommit"] = False
     data["allowDirty"] = True

@@ -51,6 +51,7 @@ def write_config(repo: Path, *, plan_verify: Optional[list[str]] = None) -> None
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
     data["roleFallbacks"] = {}
     data.pop("reviewTriage", None)
+    data.pop("presets", None)
     data["autoFixAttempts"] = 0
     data["autoCommit"] = False
     data["mergeOnClose"] = False

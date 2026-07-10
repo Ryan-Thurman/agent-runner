@@ -80,13 +80,16 @@ These are changes to the draft worked out elsewhere; they fix real failure modes
    worktrees). Keep coder/reviewer args fully in `.agent-runner.json` (draft already does).
 10. **Rename `FIX_REVIEW` → `FIX`.** It handles check failures too; add a `trigger` column
     (`checks` | `review`) instead of encoding the source in the type name.
-11. **Quota fallback.** A coder, planner, or reviewer that dies on a quota/rate limit
-    should not block the job when another vendor CLI is available. `roleFallbacks`
-    lists fallback profiles by role; the runner retries IMPLEMENT/FIX, ROADMAP_PLAN,
-    and REVIEW jobs with the next profile only when the failure output matches
-    quota/rate-limit signatures (429, "usage limit", ...) and records a
-    `<jobtype>.fallback` event. Non-quota failures still block; a crashing agent is a
-    bug to surface, not to route around.
+11. **Quota fallback.** An agent that dies on a quota/rate limit should not block the
+    job when another vendor CLI is available. `roleFallbacks` lists fallback profiles
+    by role, and *every* agent job falls back — IMPLEMENT/FIX (coder), REVIEW
+    (reviewer), TRIAGE (triage), CLOSE_PHASE (closer), AUTOFIX (fixer), and
+    ROADMAP_PLAN (planner). The runner retries with the next profile only when the
+    failure output matches quota/rate-limit signatures (429, "usage limit", ...) and
+    records a `<jobtype>.fallback` event. Non-quota failures still block; a crashing
+    agent is a bug to surface, not to route around. A job that resolved its profile
+    from one role but ran under another is how CLOSE_PHASE silently lost its fallback
+    once — roles and their chains must line up.
 12. **Phase transitions are the runner's job, not the agents'.** Agents never merge
     (prompts still forbid it); with `mergeOnClose=true` the RUNNER pushes the CLOSE_PHASE
     commit (so the plan/doc write-back done by the coding agent is inside the reviewed
@@ -161,8 +164,12 @@ one-shot auto-fix for blocked phases.
 
 ## Agent profiles — roles are swappable
 
-Prompts are written per **role** (coder / reviewer / closer), never per vendor. The config
-describes each agent as a profile, and roles reference a profile:
+Prompts are written per **role**, never per vendor. The runner dispatches every agent job
+under one of six roles — `coder`, `reviewer`, `closer`, `fixer`, `triage`, `planner` — and
+each is independently swappable. Only `coder` and `reviewer` are required: `closer` (which
+runs CLOSE_PHASE) derives from the coder when unnamed, and `triage` derives from
+`reviewTriage.simple`. The config describes each agent as a profile, and roles reference a
+profile:
 
 ```json
 {
@@ -191,11 +198,18 @@ describes each agent as a profile, and roles reference a profile:
 ```
 
 Swapping who codes and who reviews is flipping the two `roles` values. The runner applies
-`writeFlags` to coder/closer jobs and `readOnlyFlags` to reviewer jobs, so the
-reviewer-never-edits invariant holds whichever agent reviews. Same-vendor for both roles is
-also fine — independence comes from the fresh process/context, not the vendor.
+`writeFlags` to coder/closer/fixer/planner jobs and `readOnlyFlags` to reviewer/triage jobs,
+so the reviewer-never-edits invariant holds whichever agent reviews. Same-vendor for both
+roles is also fine — independence comes from the fresh process/context, not the vendor.
 Profiles can also set `promptPrefix`; when present, the runner prepends it to every
 prompt sent to that profile.
+
+To move the whole fleet at once, declare a `presets` block naming the roles each preset
+moves, then `agent-runner agents --use <name>`. The active preset is per-project runner
+state (a column on `projects`), not a config edit — so switching agents never rewrites, or
+reformats, the config file an operator maintains by hand. `agent-runner agents` prints the
+effective role → profile mapping with each role's fallback chain, and `--clear` reverts to
+the config's `roles`.
 
 Invoking the toolbelt from headless agents: with the packs installed in the target repo
 (`install.sh --harness`), `claude -p "/dev-implement-task …"` runs the installed command

@@ -97,6 +97,7 @@ def write_config(
     data["roles"] = {"coder": "fake", "reviewer": "fake"}
     data["roleFallbacks"] = {}
     data.pop("reviewTriage", None)
+    data.pop("presets", None)
     data["autoFixAttempts"] = 0
     data["checks"] = checks
     data["allowDirty"] = allow_dirty

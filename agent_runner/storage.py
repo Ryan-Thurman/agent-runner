@@ -140,6 +140,7 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
     )
     _ensure_column(connection, "jobs", "pid", "INTEGER")
     _ensure_column(connection, "phases", "blocked_from", "TEXT")
+    _ensure_column(connection, "projects", "active_preset", "TEXT")
     _ensure_jobs_type_check_covers_job_types(connection)
     _ensure_jobs_indexes(connection)
     connection.commit()
@@ -249,6 +250,22 @@ def update_project_status(
     if row is None:
         raise LookupError(f"project is not registered: {project_id}")
     return row
+
+
+def set_active_preset(
+    connection: sqlite3.Connection, project_id: int, preset: Optional[str]
+) -> sqlite3.Row:
+    connection.execute(
+        """
+        UPDATE projects
+        SET active_preset = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (preset, utc_now_iso(), project_id),
+    )
+    connection.commit()
+    return get_project(connection, project_id)
 
 
 def get_project(connection: sqlite3.Connection, project_id: int) -> sqlite3.Row:
