@@ -202,7 +202,9 @@ Current notes:
   require `roles.fixer`. Each phase can consume up to that many auto-fix
   attempts total; the count is derived from the `AUTOFIX` jobs recorded for the
   phase, so restarting `run` (including the automatic post-merge restart) does
-  not reset the budget.
+  not reset the budget. An `AUTOFIX` job interrupted before it reached a verdict
+  (Ctrl-C, runner kill) does not spend an attempt; a real failure or timeout
+  does.
 - When the fixer gives up — the budget is exhausted or an `AUTOFIX` job fails —
   the runner escalates by filing a GitHub issue on the repo (`gh issue create`)
   containing the phase, the blocking message, the give-up reason, and the
@@ -659,13 +661,28 @@ Review-driven fixes are stricter than check-driven fixes: the runner allows one
 review-triggered FIX, then one re-review. If that re-review still reports
 blocking issues, the phase blocks instead of starting another PR review cycle.
 
+If you commit on the phase branch while it is blocked, `unblock` restores
+`CHECKING` rather than `CLOSING`, because the close preflight requires HEAD to
+be the exact commit the reviewer saw — restoring `CLOSING` would re-block
+immediately. The new commits go back through checks and review before the phase
+closes. `MERGING` is exempt: the closer commits the plan metadata before the
+phase reaches `MERGING`, so HEAD is legitimately past the reviewed commit there.
+`unblock` also warns when local HEAD is not on `origin/<branch>`, since publish
+verification compares the PR head to local HEAD and blocks on an unpushed
+commit; push before rerunning `run`.
+
 When auto-fix is enabled, `run` tries the configured `fixer` before returning
 the blocked result, but only for resumable blocks with `blocked_from` recorded.
-It skips blockers that need human intent, such as protected plan-content
-changes. If the fixer process fails or the phase has consumed its
-`autoFixAttempts` budget (counted from the phase's recorded `AUTOFIX` jobs, so
-it survives runner restarts), the phase remains `BLOCKED` and the command
-exits non-zero as usual.
+It skips blockers that need human intent: protected plan-content changes, and
+publish/close preflight mismatches (an unpushed branch, or HEAD moved past the
+reviewed commit). Those are bookkeeping states, not code defects — the fixer has
+nothing to repair, and letting it "succeed" would re-stamp the reviewed SHA and
+close code no reviewer saw. When an auto-fix does land new commits on a phase
+blocked from `CLOSING` or `MERGING`, the phase resumes at `CHECKING` so those
+commits are reviewed rather than merged unseen. If the fixer process fails or
+the phase has consumed its `autoFixAttempts` budget (counted from the phase's
+recorded `AUTOFIX` jobs, so it survives runner restarts), the phase remains
+`BLOCKED` and the command exits non-zero as usual.
 
 ## Logs and State
 

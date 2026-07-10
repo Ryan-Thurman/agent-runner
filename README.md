@@ -134,7 +134,9 @@ rules.
   the next job boundary.
 - `resume`: mark the project `ACTIVE` so the next `run` continues.
 - `unblock [--phase N] [--to STATUS]`: reset a `BLOCKED` phase to the status it
-  had when it blocked so `run` can retry it.
+  had when it blocked so `run` can retry it. If you committed on the phase
+  branch since the review, it restores `CHECKING` so the new work is reviewed
+  before the phase closes.
 - `logs [-n N]`: print the latest phase log directory and tail the newest log.
 - `reset-lock`: clear a stale project lock when no runner is active.
 
