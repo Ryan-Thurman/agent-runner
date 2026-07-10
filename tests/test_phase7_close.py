@@ -185,6 +185,15 @@ if "Phase 2: Second phase" in prompt:
     raise SystemExit(7)
 
 Path("generated.txt").write_text("created\n", encoding="utf-8")
+if os.environ.get("CODER_EDITS_PLAN") == "1":
+    plan = Path("docs/plan.md")
+    text = plan.read_text(encoding="utf-8")
+    text = text.replace("Create generated.txt.", "Created generated.txt.")
+    text = text.replace(
+        "## Phase 1: First phase\n",
+        "## Phase 1: First phase\nStatus: COMPLETE 2026-07-09\nEvidence: done\n",
+    )
+    plan.write_text(text, encoding="utf-8")
 subprocess.run(["git", "add", "-A"], check=True)
 subprocess.run(["git", "commit", "-qm", "implement phase"], check=True)
 print("https://example.test/pull/1")
@@ -540,6 +549,44 @@ class Phase7CloseTests(unittest.TestCase):
             rows = phase_rows(home, repo)
             self.assertEqual(rows[0]["status"], "BLOCKED")
             self.assertNotIn("Status: COMPLETE", (repo / "docs/plan.md").read_text())
+
+    def test_coder_editing_the_phase_body_blocks_at_implement_not_close(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            home = root / "home"
+            trace = root / "trace"
+            script = root / "phase7_agent.py"
+            repo.mkdir()
+            git_init(repo)
+            write_phase7_agent(script)
+            write_plan(repo)
+            write_config(repo, script, auto_commit=False)
+            commit_all(repo)
+
+            result = run_cli(
+                repo,
+                home,
+                "run",
+                extra_env={"TRACE_DIR": str(trace), "CODER_EDITS_PLAN": "1"},
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("BLOCKED after IMPLEMENT plan drift", result.stderr)
+            rows = phase_rows(home, repo)
+            self.assertEqual(rows[0]["status"], "BLOCKED")
+            with connect_db(home) as db:
+                jobs = [
+                    row["type"]
+                    for row in db.execute("SELECT type FROM jobs ORDER BY id").fetchall()
+                ]
+                blocked = db.execute(
+                    "SELECT message FROM events WHERE event_type = 'phase.blocked'"
+                ).fetchone()
+            # The drift is caught by the job that caused it: no CHECK, REVIEW,
+            # FIX, or CLOSE_PHASE work is spent on an unclosable phase.
+            self.assertEqual(jobs, ["IMPLEMENT"])
+            self.assertIn("IMPLEMENT changed the plan phase body", blocked["message"])
 
     def test_invalid_closer_plan_write_back_blocks_phase(self):
         with tempfile.TemporaryDirectory() as tmp:

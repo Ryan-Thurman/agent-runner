@@ -378,6 +378,46 @@ Rules:
   deeper in the body that happens to begin with `Status:` stays protected.
 - Duplicate phase numbers and invalid status values are rejected.
 
+### The plan file is runner-owned
+
+The runner tracks phase progress in its own database and hashes each phase body
+to detect drift, so the plan file is input, not a progress tracker. Only the
+closer writes to it, and only the `Status:` and `Evidence:` metadata lines.
+
+Writer prompts (IMPLEMENT, FIX) say so explicitly. That rule exists because
+the upstream toolbelt commands disagree with it: `/dev-implement-task` and
+`/dev-fix-review-issues` were written for an interactive loop where the plan
+document *is* the progress tracker, and they instruct the agent to record
+status, evidence, and checks in it. A coder that follows the command file
+rewrites the phase body -- often reflowing it to past tense once the work is
+done -- and the phase can no longer close.
+
+This repo handles that in two layers, both untracked so upstream is not
+forked. The installed copies (`.claude/commands/dev-*.md`,
+`.atb/skills/dev-lite-workflow/`, `.atb/templates/dev-*.md`) have the
+plan-write steps and `Plan Document Updates` output sections removed. The rule
+itself is stated once, in `CLAUDE.md` and `AGENTS.md` below the toolbelt
+marker block — so both Claude Code and Codex writers get it regardless of
+which command or skill file they read. Reinstalling or updating the toolbelt
+restores the upstream skill text (the CLAUDE.md/AGENTS.md additions sit
+outside the managed block and survive), which is why the prompt rule and the
+drift check below stay regardless. See `docs/toolbelt-plan-ownership.md` for
+the upstream fix request.
+
+After a writer job succeeds, the runner re-parses the plan and compares the
+phase body hash against the registered one. A mismatch blocks the phase
+immediately, attributed to the job that caused it:
+
+```
+phase 2 BLOCKED after IMPLEMENT plan drift: body hash ... does not match the
+registered phase ...
+```
+
+Blocking at the writer job keeps CHECK, REVIEW, FIX, and CLOSE_PHASE from
+running against a phase that cannot close. If a body change is intentional,
+restore the phase body and re-register the plan (see below) rather than letting
+an agent edit it mid-phase.
+
 Useful statuses while dogfooding:
 
 - `PENDING`: ready for the runner to start.
@@ -594,6 +634,12 @@ When `CLOSE_PHASE` succeeds, the runner validates that the closer wrote:
 
 Closer failure, timeout, missing handoff, missing completion marker, or protected
 phase-body hash drift marks the phase `BLOCKED` instead of silently completing it.
+
+On hash drift the runner names the responsible job. It snapshots the phase body
+before spawning the closer, so a body that was already drifted when the closer
+started is reported as an earlier job's edit rather than the closer's -- the
+closer only ever rewrites `Status:` and `Evidence:`, and blaming it sends you to
+the wrong log.
 
 When a phase reaches `BLOCKED`, use `python3 -m agent_runner status` and the
 latest events to see why. IMPLEMENT failures are recorded as events and in the

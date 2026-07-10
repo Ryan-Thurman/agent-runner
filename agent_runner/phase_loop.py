@@ -784,7 +784,10 @@ def _run_implement(
         role="coder",
         profiles=_profiles_for_role(config, "coder"),
         prompt=_implement_prompt(
-            repo_root, parsed_phase, require_publish=config.auto_commit
+            repo_root,
+            parsed_phase,
+            require_publish=config.auto_commit,
+            plan_path=config.plan_path,
         ),
         repo_root=repo_root,
         log_dir=Path(phase["log_dir"]),
@@ -803,6 +806,19 @@ def _run_implement(
             f"phase {phase['phase_number']} BLOCKED after IMPLEMENT failure",
             blocked=True,
         )
+
+    drift = _plan_drift_result_after_job(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=phase,
+        job=result,
+        config=config,
+        repo_root=repo_root,
+        source="IMPLEMENT",
+    )
+    if drift is not None:
+        return drift
 
     _stage_implementation_changes(repo_root, preexisting_dirty_paths)
     update_phase_status(connection, phase["id"], "CHECKING")
@@ -927,7 +943,10 @@ def _run_checks(
         repo_root=repo_root,
         trigger="checks",
         prompt=_checks_fix_prompt(
-            parsed_phase, result, require_publish=config.auto_commit
+            parsed_phase,
+            result,
+            require_publish=config.auto_commit,
+            plan_path=config.plan_path,
         ),
         blocker_summary=_checks_blocker_summary(result),
         source_job=result,
@@ -1128,6 +1147,7 @@ def _run_review(
                 review,
                 pr_url=phase["pr_url"],
                 require_publish=config.auto_commit,
+                plan_path=config.plan_path,
                 reviewed_sha=phase["published_sha"],
             ),
             blocker_summary=_review_finding_summary(findings),
@@ -1367,6 +1387,7 @@ def _run_close_phase(
                 message=str(exc),
             )
 
+    pre_close_hash = _phase_body_hash_on_disk(repo_root, config, phase)
     profile = _profile_for_role(config, "coder")
     log_dir = Path(phase["log_dir"])
     result = run_agent_job(
@@ -1412,6 +1433,7 @@ def _run_close_phase(
             plan_path=config.plan_path,
             phase=phase,
             fresh_phase=fresh_phase,
+            pre_close_hash=pre_close_hash,
         )
     except AgentRunnerError as exc:
         _block_phase_after_job(
@@ -1735,6 +1757,19 @@ def _run_fix(
             blocked=True,
         )
 
+    drift = _plan_drift_result_after_job(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=phase,
+        job=fix_result,
+        config=config,
+        repo_root=repo_root,
+        source="FIX",
+    )
+    if drift is not None:
+        return drift
+
     _git_add_all(repo_root)
     update_phase_status(connection, phase["id"], "CHECKING")
     record_event(
@@ -1871,6 +1906,19 @@ def _run_fix_without_increment(
             f"phase {phase['phase_number']} BLOCKED after FIX failure",
             blocked=True,
         )
+    drift = _plan_drift_result_after_job(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase=phase,
+        job=fix_result,
+        config=config,
+        repo_root=repo_root,
+        source="FIX",
+    )
+    if drift is not None:
+        return drift
+
     _git_add_all(repo_root)
     update_phase_status(connection, phase["id"], "CHECKING")
     record_event(
@@ -2019,6 +2067,18 @@ def _parsed_phase(parsed_plan: ParsedPlan, phase_number: int) -> ParsedPhase:
         if phase.phase_number == phase_number:
             return phase
     raise JobError(f"registered phase {phase_number} is missing from parsed plan")
+
+
+def _phase_body_hash_on_disk(
+    repo_root: Path, config: RunnerConfig, phase: sqlite3.Row
+) -> Optional[str]:
+    # Best-effort snapshot for blame attribution only; a plan that fails to
+    # parse here is reported by the validation that follows the job.
+    try:
+        fresh_plan = parse_plan_file(repo_root, config.plan_path)
+        return _parsed_phase(fresh_plan, phase["phase_number"]).content_hash
+    except AgentRunnerError:
+        return None
 
 
 def _profile_for_role(config: RunnerConfig, role: str):
@@ -3081,6 +3141,56 @@ def _block_phase_after_job(
     )
 
 
+def _plan_drift_result_after_job(
+    connection: sqlite3.Connection,
+    *,
+    project_id: int,
+    plan_id: int,
+    phase: sqlite3.Row,
+    job: JobResult,
+    config: RunnerConfig,
+    repo_root: Path,
+    source: str,
+) -> Optional[PhaseLoopResult]:
+    # Writer jobs run against the plan file, and a coder that edits the phase
+    # body invalidates the spec every later job is working from. Catch it at the
+    # job that caused it: without this, the drift survives CHECK, REVIEW, and
+    # FIX and only surfaces in CLOSE_PHASE validation, where it reads as the
+    # closer's fault.
+    try:
+        fresh_plan = parse_plan_file(repo_root, config.plan_path)
+        fresh_phase = _parsed_phase(fresh_plan, phase["phase_number"])
+    except AgentRunnerError as exc:
+        detail = f"the plan no longer parses: {exc}"
+    else:
+        if fresh_phase.content_hash == phase["content_hash"]:
+            return None
+        detail = (
+            f"body hash {fresh_phase.content_hash[:12]} does not match the "
+            f"registered phase {phase['content_hash'][:12]}"
+        )
+    message = (
+        f"{source} changed the plan phase body for phase "
+        f"{phase['phase_number']}: {detail}. The runner owns "
+        f"{config.plan_path}; restore the phase body to its registered text "
+        "(runner-owned `Status:`/`Evidence:` lines may stay), then run "
+        "`agent-runner unblock`."
+    )
+    _block_phase_after_job(
+        connection,
+        project_id=project_id,
+        plan_id=plan_id,
+        phase_id=phase["id"],
+        job=job,
+        message=message,
+    )
+    return PhaseLoopResult(
+        f"phase {phase['phase_number']} BLOCKED after {source} plan drift: "
+        f"{detail}",
+        blocked=True,
+    )
+
+
 def _block_retries_exhausted(
     connection: sqlite3.Connection,
     *,
@@ -3168,17 +3278,38 @@ def _count_jobs(
     return int(row["count"])
 
 
+def _plan_ownership_rule(plan_path: str) -> str:
+    # The runner tracks phase progress in its own database and hashes the phase
+    # body to detect drift, so the plan file is runner-owned input: only the
+    # closer job may write its `Status:`/`Evidence:` metadata lines. Toolbelt
+    # commands like /dev-implement-task were written for an interactive loop
+    # where the plan doubles as the progress tracker, and they instruct the
+    # agent to record status and evidence in it. Say so explicitly here, or the
+    # coder follows the command file and drifts the protected body.
+    return (
+        f"- Do not edit `{plan_path}`. The runner owns that file and tracks "
+        "phase status itself. Never mark a phase complete, add status or "
+        "evidence notes, or reword the phase body to past tense once the work "
+        "is done -- a phase whose body no longer matches the registered text "
+        "fails its protected-body check and blocks the run. If a project "
+        "command tells you to update the plan document, skip that step.\n"
+    )
+
+
 def _implement_prompt(
-    repo_root: Path, phase: ParsedPhase, *, require_publish: bool
+    repo_root: Path, phase: ParsedPhase, *, require_publish: bool, plan_path: str
 ) -> str:
     publish = _publish_instructions(require_publish)
     plan_context = _plan_context_section(phase)
+    plan_rule = _plan_ownership_rule(plan_path)
     if _toolbelt_installed(repo_root):
         return (
             "/dev-implement-task\n\n"
             f"Phase {phase.phase_number}: {phase.title}\n\n"
             "Scope rules: implement only this phase; do not start future phases; "
-            "avoid unrelated refactors; add or update tests with behavior changes.\n\n"
+            "avoid unrelated refactors; add or update tests with behavior changes.\n"
+            f"{plan_rule}"
+            "\n"
             f"{plan_context}"
             f"{publish}"
             f"{phase.content}"
@@ -3191,6 +3322,7 @@ def _implement_prompt(
         "- Do not start future phases.\n"
         "- Avoid unrelated refactors.\n"
         "- Add or update tests for behavior changes.\n"
+        f"{plan_rule}"
         "- Return a brief summary, files changed, tests run, risks, and suggested "
         "commit message.\n\n"
         f"{plan_context}"
@@ -3328,7 +3460,7 @@ def _review_triage_prompt(
 
 
 def _checks_fix_prompt(
-    phase: ParsedPhase, checks: JobResult, *, require_publish: bool
+    phase: ParsedPhase, checks: JobResult, *, require_publish: bool, plan_path: str
 ) -> str:
     output = ""
     if checks.log_path.exists():
@@ -3341,7 +3473,9 @@ def _checks_fix_prompt(
         "- Fix only issues demonstrated by the check output below.\n"
         "- Do not start future phases.\n"
         "- Avoid unrelated refactors.\n"
-        "- Add or update tests when behavior changes.\n\n"
+        "- Add or update tests when behavior changes.\n"
+        f"{_plan_ownership_rule(plan_path)}"
+        "\n"
         f"{_plan_context_section(phase)}"
         f"{publish}"
         "Phase body:\n"
@@ -3357,6 +3491,7 @@ def _review_fix_prompt(
     *,
     pr_url: Optional[str],
     require_publish: bool,
+    plan_path: str,
     reviewed_sha: Optional[str] = None,
 ) -> str:
     publish = _publish_instructions(require_publish, update_existing=True)
@@ -3411,7 +3546,9 @@ def _review_fix_prompt(
         "transition you are modifying instead of leaving it narrow.\n"
         "- Do not start future phases.\n"
         "- Avoid unrelated refactors.\n"
-        "- Add or update tests when behavior changes.\n\n"
+        "- Add or update tests when behavior changes.\n"
+        f"{_plan_ownership_rule(plan_path)}"
+        "\n"
         f"{_plan_context_section(phase)}"
         f"{publish}"
         "Phase body:\n"
@@ -3516,12 +3653,24 @@ def _validate_close_phase_outputs(
     plan_path: str,
     phase: sqlite3.Row,
     fresh_phase: ParsedPhase,
+    pre_close_hash: Optional[str] = None,
 ) -> None:
     if fresh_phase.status != "COMPLETE":
         raise JobError(
             "closer did not set the plan phase marker to Status: COMPLETE"
         )
     if fresh_phase.content_hash != phase["content_hash"]:
+        # Blame the job that actually edited the body. The body can already be
+        # drifted when the closer starts -- an earlier writer job edited the
+        # plan -- and accusing the closer sends the operator to the wrong log.
+        if pre_close_hash is not None and pre_close_hash != phase["content_hash"]:
+            raise JobError(
+                "the plan phase body already differed from the registered "
+                f"phase {phase['content_hash'][:12]} before CLOSE_PHASE ran, so "
+                "an earlier job edited it; the closer is not the cause. Restore "
+                "the phase body to its registered text, then run "
+                "`agent-runner unblock`"
+            )
         raise JobError(
             "closer changed the protected phase body; only status/evidence "
             "metadata write-back is allowed"

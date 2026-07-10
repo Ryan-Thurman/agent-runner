@@ -148,6 +148,7 @@ class ReviewContractTests(unittest.TestCase):
             review,
             pr_url="https://github.com/example/repo/pull/36",
             require_publish=True,
+            plan_path="docs/plan.md",
             reviewed_sha="abcdef1234567890",
         )
 
