@@ -8,35 +8,39 @@
     "python3 -m unittest discover -s tests -v"
   ],
   "agents": {
-    "claude": {
-      "command": "claude",
-      "promptArgs": ["-p"],
-      "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools=Bash(git:*),Bash(gh:*),Bash(python3:*)"],
-      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
-      "promptPrefix": "use a sonnet 5 or opus agent for this PR. If its simple code never use the opus agent. Reserve opus for complex PR reviews",
-      "outputCapture": "stdout"
-    },
     "codex": {
       "command": "codex",
-      "promptArgs": ["exec"],
+      "promptArgs": ["exec", "--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=\"high\""],
       "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
       "readOnlyFlags": ["--sandbox", "read-only", "-c", "sandbox_read_only.network_access=true"],
       "outputCapture": "last-message-file"
     },
-    "antigravity": {
-      "command": "agy",
-      "promptArgs": ["--print-timeout", "40m", "--model", "Gemini 3.1 Pro (High)"],
-      "writeFlags": ["--dangerously-skip-permissions", "-p"],
-      "readOnlyFlags": ["--sandbox", "-p"],
+    "codex-docs": {
+      "command": "codex",
+      "promptArgs": ["exec", "--model", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"high\""],
+      "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
+      "readOnlyFlags": ["--sandbox", "read-only", "-c", "sandbox_read_only.network_access=true"],
+      "outputCapture": "last-message-file"
+    },
+    "claude-opus": {
+      "command": "claude",
+      "promptArgs": ["--model", "claude-opus-4-8", "-p"],
+      "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools=Bash(git:*),Bash(gh:*),Bash(python3:*)"],
+      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
+      "outputCapture": "stdout"
+    },
+    "claude-sonnet": {
+      "command": "claude",
+      "promptArgs": ["--model", "claude-sonnet-5", "-p"],
+      "writeFlags": ["--permission-mode=acceptEdits", "--allowedTools=Bash(git:*),Bash(gh:*),Bash(python3:*)"],
+      "readOnlyFlags": ["--disallowedTools=Edit,Write,NotebookEdit"],
       "outputCapture": "stdout"
     }
   },
   "roles": {
     "coder": "codex",
-    "reviewer": "codex"
-  },
-  "roleFallbacks": {
-    "reviewer": ["antigravity"]
+    "reviewer": "codex",
+    "closer": "codex-docs"
   },
   "maxRetriesPerPhase": 3,
   "timeoutMinutes": 45,

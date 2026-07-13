@@ -335,14 +335,6 @@ class Phase1CliTests(unittest.TestCase):
             self.assertNotIn("--allowedTools", read_only_flags)
             self.assertNotIn("--disallowedTools", read_only_flags)
 
-    def test_generated_antigravity_places_print_flag_after_role_flags(self):
-        data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
-        antigravity = data["agents"]["antigravity"]
-
-        self.assertNotIn("-p", antigravity["promptArgs"])
-        self.assertEqual(antigravity["writeFlags"][-1], "-p")
-        self.assertEqual(antigravity["readOnlyFlags"][-1], "-p")
-
     def test_run_outside_git_and_missing_config_fail_clearly(self):
         with tempfile.TemporaryDirectory() as tmp:
             outside = Path(tmp) / "outside"
@@ -452,38 +444,38 @@ class Phase1CliTests(unittest.TestCase):
                 load_config(repo)
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
-            data["roleFallbacks"] = {"unknown-role": ["antigravity"]}
+            data["roleFallbacks"] = {"unknown-role": ["claude-sonnet"]}
             (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
 
             with self.assertRaisesRegex(ConfigError, "configured role"):
                 load_config(repo)
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
-            data["roleFallbacks"] = {"reviewer": ["antigravity"]}
+            data["roleFallbacks"] = {"reviewer": ["claude-sonnet"]}
             (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
 
             config = load_config(repo)
-            self.assertEqual(config.role_fallbacks, {"reviewer": ["antigravity"]})
+            self.assertEqual(config.role_fallbacks, {"reviewer": ["claude-sonnet"]})
             self.assertEqual(config.warnings, [])
             self.assertEqual(config.base_branch, "main")
             self.assertTrue(config.merge_on_close)
             self.assertEqual(config.merge_strategy, "squash")
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
-            data["roleFallbacks"] = {"coder": ["antigravity"]}
+            data["roleFallbacks"] = {"coder": ["claude-sonnet"]}
             (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
 
             config = load_config(repo)
-            self.assertEqual(config.role_fallbacks, {"coder": ["antigravity"]})
+            self.assertEqual(config.role_fallbacks, {"coder": ["claude-sonnet"]})
             self.assertEqual(config.warnings, [])
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))
             data["roles"]["planner"] = "claude-opus"
-            data["roleFallbacks"] = {"planner": ["antigravity"]}
+            data["roleFallbacks"] = {"planner": ["claude-sonnet"]}
             (repo / ".agent-runner.json").write_text(json.dumps(data), encoding="utf-8")
 
             config = load_config(repo)
-            self.assertEqual(config.role_fallbacks, {"planner": ["antigravity"]})
+            self.assertEqual(config.role_fallbacks, {"planner": ["claude-sonnet"]})
             self.assertEqual(config.warnings, [])
 
             data = json.loads(_strip_sample_comments(SAMPLE_CONFIG))

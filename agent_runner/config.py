@@ -580,20 +580,23 @@ SAMPLE_CONFIG_TEMPLATE = """{{
   "agents": {{
     // codex workspace-write disables network by default, which breaks
     // dependency fetches (cargo/pnpm) and pushes; the -c override re-enables
-    // network while keeping the filesystem sandbox.
+    // network while keeping the filesystem sandbox. model_reasoning_effort is
+    // a -c override too, same as the network flag.
     "codex": {{
       "command": "codex",
-      "promptArgs": ["exec"],
+      "promptArgs": ["exec", "--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=\\"high\\""],
       "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
       "readOnlyFlags": ["--sandbox", "read-only"],
       "outputCapture": "last-message-file"
     }},
-    "antigravity": {{
-      "command": "agy",
-      "promptArgs": ["--print-timeout", "40m"],
-      "writeFlags": ["--dangerously-skip-permissions", "-p"],
-      "readOnlyFlags": ["--sandbox", "-p"],
-      "outputCapture": "stdout"
+    // Same CLI, a cheaper-tuned model for doc/plan write-back (CLOSE_PHASE) —
+    // see roles.closer below.
+    "codex-docs": {{
+      "command": "codex",
+      "promptArgs": ["exec", "--model", "gpt-5.6-luna", "-c", "model_reasoning_effort=\\"high\\""],
+      "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
+      "readOnlyFlags": ["--sandbox", "read-only"],
+      "outputCapture": "last-message-file"
     }},
     // claude flag rules: --allowedTools/--disallowedTools are VARIADIC — the
     // space-separated form ("--disallowedTools", "Edit,Write") swallows the
@@ -624,13 +627,15 @@ SAMPLE_CONFIG_TEMPLATE = """{{
   }},
 
   // Every agent job runs under a role, and every role is swappable. Omit
-  // "closer" (CLOSE_PHASE) to have it track the coder, and "triage" to have it
-  // track reviewTriage.simple.
+  // "triage" to have it track reviewTriage.simple. "closer" (CLOSE_PHASE) is
+  // pinned to codex-docs below instead of tracking the coder, since it's the
+  // doc/plan write-back job.
   "roles": {{
     "coder": "codex",
     // Reviews are pinned to Opus/Sonnet deliberately; do not use the claude CLI default.
     "reviewer": "claude-opus",
-    "fixer": "claude-opus"
+    "fixer": "claude-opus",
+    "closer": "codex-docs"
   }},
 
   // Swap the whole fleet with `agent-runner agents --use <name>`; inspect the
@@ -644,7 +649,7 @@ SAMPLE_CONFIG_TEMPLATE = """{{
   // When a role's agent fails on a quota/rate limit, the runner retries the job
   // with these profiles in order. Roles that name no chain inherit one:
   // closer and fixer follow coder, triage follows reviewer.
-  "roleFallbacks": {{ "reviewer": ["antigravity"], "coder": ["claude-sonnet"] }},
+  "roleFallbacks": {{ "coder": ["claude-sonnet"] }},
 
   // Route simple reviews to Sonnet and behavioral reviews to Opus; both models
   // are explicitly pinned in the profiles above.

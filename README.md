@@ -67,17 +67,17 @@ Minimum `.agent-runner.json` shape:
   "agents": {
     "codex": {
       "command": "codex",
-      "promptArgs": ["exec"],
+      "promptArgs": ["exec", "--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=\"high\""],
       "writeFlags": ["--sandbox", "workspace-write"],
       "readOnlyFlags": ["--sandbox", "read-only"],
       "outputCapture": "last-message-file"
     },
-    "antigravity": {
-      "command": "agy",
-      "promptArgs": ["-p", "--print-timeout", "40m"],
-      "writeFlags": ["--dangerously-skip-permissions"],
-      "readOnlyFlags": ["--sandbox"],
-      "outputCapture": "stdout"
+    "codex-docs": {
+      "command": "codex",
+      "promptArgs": ["exec", "--model", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"high\""],
+      "writeFlags": ["--sandbox", "workspace-write"],
+      "readOnlyFlags": ["--sandbox", "read-only"],
+      "outputCapture": "last-message-file"
     },
     "claude-opus": {
       "command": "claude",
@@ -99,9 +99,10 @@ Minimum `.agent-runner.json` shape:
   "roles": {
     "coder": "codex",
     "reviewer": "claude-opus",
-    "fixer": "claude-opus"
+    "fixer": "claude-opus",
+    "closer": "codex-docs"
   },
-  "roleFallbacks": { "reviewer": ["antigravity"], "coder": ["claude-sonnet"] },
+  "roleFallbacks": { "coder": ["claude-sonnet"] },
   "reviewTriage": { "simple": "claude-sonnet", "complex": "claude-opus" },
   "maxRetriesPerPhase": 3,
   "autoFixAttempts": 2,
