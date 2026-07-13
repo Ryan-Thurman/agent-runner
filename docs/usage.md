@@ -132,17 +132,17 @@ Minimum config shape:
   "agents": {
     "codex": {
       "command": "codex",
-      "promptArgs": ["exec"],
+      "promptArgs": ["exec", "--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=\"high\""],
       "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
       "readOnlyFlags": ["--sandbox", "read-only", "-c", "sandbox_read_only.network_access=true"],
       "outputCapture": "last-message-file"
     },
-    "antigravity": {
-      "command": "agy",
-      "promptArgs": ["--print-timeout", "40m"],
-      "writeFlags": ["--dangerously-skip-permissions", "-p"],
-      "readOnlyFlags": ["--sandbox", "-p"],
-      "outputCapture": "stdout"
+    "codex-docs": {
+      "command": "codex",
+      "promptArgs": ["exec", "--model", "gpt-5.6-luna", "-c", "model_reasoning_effort=\"high\""],
+      "writeFlags": ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"],
+      "readOnlyFlags": ["--sandbox", "read-only", "-c", "sandbox_read_only.network_access=true"],
+      "outputCapture": "last-message-file"
     },
     "claude-opus": {
       "command": "claude",
@@ -170,14 +170,14 @@ Minimum config shape:
   "roles": {
     "coder": "codex",
     "reviewer": "claude-opus",
-    "fixer": "claude-opus"
+    "fixer": "claude-opus",
+    "closer": "codex-docs"
   },
   "presets": {
     "codex": { "coder": "codex", "fixer": "claude-opus" },
     "claude": { "coder": "claude-opus", "fixer": "claude-opus" }
   },
   "roleFallbacks": {
-    "reviewer": ["antigravity"],
     "coder": ["claude-sonnet"]
   },
   "reviewTriage": {
@@ -244,9 +244,7 @@ Current notes:
   network-capable Claude reviewer profile instead. Headless Claude reviewers
   need a narrow read-only `--allowedTools=` list for `gh pr diff/view/checks/api`
   and `git diff/log/show`; do not use `Bash(gh:*)`, because the runner owns PR
-  writes. For the Antigravity `agy` CLI, put `-p` at the end of role flags rather
-  than in `promptArgs`; otherwise it consumes the next flag as the prompt before
-  the runner's final positional prompt is appended.
+  writes.
 - An `AUTOFIX` job is a short-lived subprocess launched through the same
   `run_agent_job` machinery as IMPLEMENT and REVIEW jobs. It is not a daemon and
   no fixer process is kept alive after its single job. The prompt includes the
@@ -263,9 +261,11 @@ Current notes:
 - `roles` maps each of the runner's six roles to an agent profile. `coder` and
   `reviewer` are required; `fixer` is required when `autoFixAttempts > 0`.
   `closer` (CLOSE_PHASE) defaults to whatever `coder` is, and `triage` defaults
-  to `reviewTriage.simple`, so most configs never name them. `planner` is only
-  used by `plan-roadmap`. Every role dispatches its own agent job and every role
-  falls back independently:
+  to `reviewTriage.simple`, so most configs never name them; the sample config
+  pins `closer` to its own profile anyway, since CLOSE_PHASE's doc/plan
+  write-back is a lighter job than IMPLEMENT and can run on a cheaper-tuned
+  model. `planner` is only used by `plan-roadmap`. Every role dispatches its
+  own agent job and every role falls back independently:
 
   | Role | Job | Sandbox |
   | --- | --- | --- |
@@ -292,9 +292,7 @@ Current notes:
   `close_phase.fallback`, `autofix.fallback`, or `review.fallback`. Any other
   failure blocks the job without falling back. A role with no chain of its own
   inherits one: `closer` and `fixer` follow `coder`, `triage` follows
-  `reviewer`. Declaring an empty list opts a role out of inheriting. The sample
-  config includes an `antigravity` profile (the `agy` CLI) suitable as a
-  fallback on a separate quota pool.
+  `reviewer`. Declaring an empty list opts a role out of inheriting.
 - `reviewTriage` is optional. When configured, the runner launches one
   read-only `TRIAGE` job before each `REVIEW` using the `simple` profile. The
   triage prompt includes the phase body and a stat-only diff summary, then asks

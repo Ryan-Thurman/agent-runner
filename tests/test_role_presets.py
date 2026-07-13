@@ -96,8 +96,8 @@ class RoleResolutionTests(unittest.TestCase):
         self.assertEqual(fallback_profile_names(config, "fixer"), ["claude-sonnet"])
 
     def test_triage_inherits_the_reviewers_fallback_chain(self):
-        config = self._load(roleFallbacks={"reviewer": ["antigravity"]})
-        self.assertEqual(fallback_profile_names(config, "triage"), ["antigravity"])
+        config = self._load(roleFallbacks={"reviewer": ["claude-sonnet"]})
+        self.assertEqual(fallback_profile_names(config, "triage"), ["claude-sonnet"])
 
     def test_an_explicit_chain_is_never_overridden_by_inheritance(self):
         config = self._load(

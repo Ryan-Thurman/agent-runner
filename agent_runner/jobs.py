@@ -21,8 +21,8 @@ from .storage import create_job, get_job, update_job_pid
 WRITE_ROLES = {"coder", "closer", "fixer", "planner"}
 READ_ONLY_ROLES = {"reviewer", "triage"}
 
-# Vendor CLIs word these differently (codex, claude, gemini/antigravity), so
-# match the common quota/rate-limit phrasings rather than any one CLI's text.
+# Vendor CLIs word these differently (codex, claude, ...), so match the common
+# quota/rate-limit phrasings rather than any one CLI's text.
 QUOTA_ERROR_PATTERN = re.compile(
     r"quota|rate.?limit|usage.?limit|too many requests|resource.?exhausted"
     r"|insufficient_quota|out of credits|credit balance|\b429\b",
