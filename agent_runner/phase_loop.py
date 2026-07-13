@@ -784,7 +784,6 @@ def _run_implement(
         role="coder",
         profiles=_profiles_for_role(config, "coder"),
         prompt=_implement_prompt(
-            repo_root,
             parsed_phase,
             require_publish=config.auto_commit,
             plan_path=config.plan_path,
@@ -3303,25 +3302,13 @@ def _plan_ownership_rule(plan_path: str) -> str:
 
 
 def _implement_prompt(
-    repo_root: Path, phase: ParsedPhase, *, require_publish: bool, plan_path: str
+    phase: ParsedPhase, *, require_publish: bool, plan_path: str
 ) -> str:
     publish = _publish_instructions(require_publish)
     plan_context = _plan_context_section(phase)
     plan_rule = _plan_ownership_rule(plan_path)
-    if _toolbelt_installed(repo_root):
-        return (
-            "/dev-implement-task\n\n"
-            f"Phase {phase.phase_number}: {phase.title}\n\n"
-            "Scope rules: implement only this phase; do not start future phases; "
-            "avoid unrelated refactors; add or update tests with behavior changes.\n"
-            f"{plan_rule}"
-            "\n"
-            f"{plan_context}"
-            f"{publish}"
-            f"{phase.content}"
-        )
     return (
-        "You are implementing one phase from this repository's plan.\n\n"
+        "You are the IMPLEMENT worker in agent-runner's state machine.\n\n"
         f"Phase {phase.phase_number}: {phase.title}\n\n"
         "Rules:\n"
         "- Implement only this phase.\n"
@@ -3329,6 +3316,12 @@ def _implement_prompt(
         "- Avoid unrelated refactors.\n"
         "- Add or update tests for behavior changes.\n"
         f"{plan_rule}"
+        "- Run focused implementation checks as needed, but do not run a phase "
+        "or PR review.\n"
+        "- Do not invoke `/dev-phase-review`, `/dev-pr-review`, or `pr-review`, "
+        "and do not spawn reviewer subagents. Agent-runner owns the independent "
+        "CHECKING, REVIEW, FIX, and CLOSE_PHASE jobs after this job returns.\n"
+        "- Do not decide a review verdict or merge a PR.\n"
         "- Return a brief summary, files changed, tests run, risks, and suggested "
         "commit message.\n\n"
         f"{plan_context}"
@@ -4045,14 +4038,3 @@ def _normalize_review_finding_items(values: list[Any]) -> list[str]:
         else:
             normalized.append(json.dumps(value))
     return normalized
-
-
-def _toolbelt_installed(repo_root: Path) -> bool:
-    return any(
-        path.exists()
-        for path in (
-            repo_root / ".atb" / "skills" / "dev-lite-workflow",
-            repo_root / ".agents" / "skills" / "dev-lite-workflow",
-            repo_root / "AGENTS.md",
-        )
-    )

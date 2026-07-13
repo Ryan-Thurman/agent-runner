@@ -29,31 +29,23 @@ def _phase(status: str = "COMPLETE", content_hash: str = DRIFTED_HASH) -> Parsed
 
 
 class PlanOwnershipPromptTests(unittest.TestCase):
-    """Writer prompts must override toolbelt commands that write the plan file."""
+    """Writer prompts must preserve agent-runner ownership of lifecycle state."""
 
     def _assert_rule(self, prompt: str) -> None:
         self.assertIn(f"Do not edit `{PLAN_PATH}`", prompt)
         self.assertIn("If a project command tells you to update the plan", prompt)
 
-    def test_implement_prompt_forbids_plan_edits_without_toolbelt(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            prompt = _implement_prompt(
-                Path(tmp), _phase(), require_publish=False, plan_path=PLAN_PATH
-            )
+    def test_implement_prompt_keeps_review_orchestration_with_runner(self):
+        prompt = _implement_prompt(
+            _phase(), require_publish=False, plan_path=PLAN_PATH
+        )
         self.assertNotIn("/dev-implement-task", prompt)
         self._assert_rule(prompt)
-
-    def test_implement_prompt_forbids_plan_edits_with_toolbelt(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo_root = Path(tmp)
-            (repo_root / ".atb" / "skills" / "dev-lite-workflow").mkdir(parents=True)
-            prompt = _implement_prompt(
-                repo_root, _phase(), require_publish=False, plan_path=PLAN_PATH
-            )
-        # /dev-implement-task tells the coder to record status and evidence in
-        # the plan document; the rule has to travel with the command.
-        self.assertIn("/dev-implement-task", prompt)
-        self._assert_rule(prompt)
+        self.assertIn("IMPLEMENT worker in agent-runner's state machine", prompt)
+        self.assertIn("do not run a phase or PR review", prompt)
+        self.assertIn("Do not invoke `/dev-phase-review`, `/dev-pr-review`, or `pr-review`", prompt)
+        self.assertIn("do not spawn reviewer subagents", prompt)
+        self.assertIn("CHECKING, REVIEW, FIX, and CLOSE_PHASE", prompt)
 
     def test_checks_fix_prompt_forbids_plan_edits(self):
         with tempfile.TemporaryDirectory() as tmp:
