@@ -38,12 +38,17 @@ from .phase_loop import (
     _run_agent_job_with_fallbacks,
     _single_line,
     _verify_published_phase,
+    parse_configured_plan,
     reconcile_manually_merged_phase_prs,
     restart_count,
     run_phase_loop,
 )
 from .jobs import run_plan_verify_job
-from .plan import STATUS_RE, parse_plan_file, register_or_resume_plan
+from .plan import (
+    parse_plan_file,
+    register_or_resume_plan,
+    validate_executable_plan,
+)
 from .storage import (
     PHASE_STATUSES,
     connect_db,
@@ -123,6 +128,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     unblock_parser.set_defaults(func=cmd_unblock)
+
+    mark_parser = subcommands.add_parser(
+        "mark-phase",
+        help="set a phase's status in the runner database",
+    )
+    mark_parser.add_argument("phase", type=int, help="phase number to mark")
+    mark_parser.add_argument(
+        "--status",
+        required=True,
+        metavar="STATUS",
+        help="status to record (e.g. COMPLETE to skip already-landed work)",
+    )
+    mark_parser.add_argument(
+        "--note",
+        default=None,
+        help="why the phase was marked, recorded on the event",
+    )
+    mark_parser.set_defaults(func=cmd_mark_phase)
 
     logs_parser = subcommands.add_parser("logs", help="show latest phase logs")
     logs_parser.add_argument(
@@ -235,7 +258,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         with lock, SignalLockRelease(lock):
             print(f"[agent-runner] acquired lock for {slug}", file=sys.stderr)
-            parsed_plan = parse_plan_file(repo_root, config.plan_path)
+            parsed_plan = parse_configured_plan(repo_root, config)
+            validate_executable_plan(parsed_plan)
+            _warn_if_plan_context_truncated(config, parsed_plan)
             with connect_db(home) as db:
                 project = get_or_create_project(db, slug=slug, repo_path=repo_root)
                 reaped_jobs = reap_orphaned_jobs(db, project["id"])
@@ -1057,6 +1082,71 @@ def cmd_unblock(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mark_phase(args: argparse.Namespace) -> int:
+    """Set a phase status directly, without editing the plan document.
+
+    Phase status is runner-owned and lives in the database, so resuming a plan
+    whose early phases already landed should not require hand-editing the plan
+    file. Marking those phases COMPLETE makes `run` start at the first phase
+    that still has work.
+    """
+    repo_root = find_git_root()
+    home = ensure_runner_layout()
+    config = load_active_config(repo_root, home)
+    slug = project_slug(repo_root)
+    status = args.status.upper()
+    if status not in PHASE_STATUSES:
+        allowed = ", ".join(sorted(PHASE_STATUSES))
+        raise AgentRunnerError(f"invalid status {status}; choose one of {allowed}")
+
+    # Register the plan if it is new: the phases this marks are usually the ones
+    # that landed before the plan was ever handed to the runner, so requiring a
+    # prior `run` would mean running the phases we are trying to skip.
+    parsed_plan = parse_configured_plan(repo_root, config)
+    with connect_db(home) as db:
+        project = get_or_create_project(db, slug=slug, repo_path=repo_root)
+        plan_result = register_or_resume_plan(
+            db,
+            project_id=project["id"],
+            project_slug=slug,
+            logs_dir=home / "logs",
+            parsed_plan=parsed_plan,
+        )
+        phases = list_phases_for_plan(db, plan_result.plan_id)
+        phase = next(
+            (p for p in phases if p["phase_number"] == args.phase), None
+        )
+        if phase is None:
+            raise AgentRunnerError(
+                f"plan {config.plan_path} has no phase {args.phase}"
+            )
+        if phase["status"] == status:
+            print(
+                f"[agent-runner] phase {args.phase} is already {status}",
+                file=sys.stderr,
+            )
+            return 0
+        update_phase_status(db, phase["id"], status)
+        record_event(
+            db,
+            project_id=project["id"],
+            plan_id=plan_result.plan_id,
+            phase_id=phase["id"],
+            event_type="phase.marked",
+            message=(
+                f"phase {args.phase} marked {status} by operator "
+                f"(was {phase['status']})"
+            ),
+            data={"from": phase["status"], "to": status, "note": args.note},
+        )
+    print(
+        f"[agent-runner] phase {args.phase} marked {status} "
+        f"(was {phase['status']})",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
     repo_root = find_git_root()
     home = ensure_runner_layout()
@@ -1144,7 +1234,11 @@ def cmd_plan_roadmap(args: argparse.Namespace) -> int:
                         "roadmap planning job failed; inspect "
                         f"{result.log_path}"
                     )
-                parsed_plan = parse_plan_file(repo_root, output_path)
+                parsed_plan = parse_plan_file(
+                    repo_root,
+                    output_path,
+                    context_char_limit=config.plan_context_char_limit,
+                )
                 _validate_roadmap_plan_file(parsed_plan)
                 record_event(
                     db,
@@ -1179,8 +1273,11 @@ def cmd_plan_validate(args: argparse.Namespace) -> int:
     plan_path = _repo_relative_cli_path(
         repo_root, args.plan or config.plan_path, label="plan path"
     )
-    parsed_plan = parse_plan_file(repo_root, plan_path)
-    _validate_executable_plan_file(parsed_plan)
+    parsed_plan = parse_plan_file(
+        repo_root, plan_path, context_char_limit=config.plan_context_char_limit
+    )
+    validate_executable_plan(parsed_plan)
+    _warn_if_plan_context_truncated(config, parsed_plan)
 
     commands = [*config.plan_verify, *(args.verify or [])]
     if not commands:
@@ -1425,28 +1522,19 @@ def _roadmap_plan_prompt(*, roadmap_path: str, output_path: str) -> str:
 
 
 def _validate_roadmap_plan_file(parsed_plan) -> None:
-    _validate_executable_plan_file(parsed_plan)
+    validate_executable_plan(parsed_plan)
     pending_count = sum(1 for phase in parsed_plan.phases if phase.status == "PENDING")
     if pending_count == 0:
         raise AgentRunnerError("generated plan has no `Status: PENDING` phases")
 
 
-def _validate_executable_plan_file(parsed_plan) -> None:
-    if not parsed_plan.phases:
-        raise AgentRunnerError(f"plan has no phases: {parsed_plan.path}")
-
-    marker_errors: list[str] = []
-    for phase in parsed_plan.phases:
-        status_line = next(
-            (line for line in phase.content.splitlines() if line.strip()),
-            None,
-        )
-        status_match = STATUS_RE.match(status_line) if status_line else None
-        if status_match is None:
-            marker_errors.append(
-                f"phase {phase.phase_number} is missing a Status marker"
-            )
-            continue
-
-    if marker_errors:
-        raise AgentRunnerError("; ".join(marker_errors))
+def _warn_if_plan_context_truncated(config: RunnerConfig, parsed_plan) -> None:
+    if not parsed_plan.plan_context_truncated:
+        return
+    print(
+        "[agent-runner] plan-level context exceeds "
+        f"planContextCharLimit ({config.plan_context_char_limit} characters) "
+        f"and was truncated for agent prompts; shorten the preamble in "
+        f"{parsed_plan.path} or raise planContextCharLimit in .agent-runner.json",
+        file=sys.stderr,
+    )

@@ -370,7 +370,7 @@ class RoadmapPlanCommandTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 1)
-            self.assertIn("phase 1 is missing a Status marker", result.stderr)
+            self.assertIn("phase 1 (Unfinished Alpha) is missing a `Status:` marker", result.stderr)
 
 
 if __name__ == "__main__":
