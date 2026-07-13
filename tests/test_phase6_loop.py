@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from agent_runner.config import SAMPLE_CONFIG, project_slug, strip_json_comments
-from agent_runner.plan import PLAN_CONTEXT_CHAR_LIMIT, parse_plan_file
+from agent_runner.plan import DEFAULT_PLAN_CONTEXT_CHAR_LIMIT, parse_plan_file
 from agent_runner.storage import (
     connect_db,
     create_phase,
@@ -1409,10 +1409,7 @@ class Phase6LoopTests(unittest.TestCase):
                 (trace / "close-1.md").read_text(encoding="utf-8"),
             ]
             for prompt in prompts:
-                self.assertIn(
-                    f"Plan-level context (bounded to {PLAN_CONTEXT_CHAR_LIMIT} characters)",
-                    prompt,
-                )
+                self.assertIn("Plan-level context (from the plan file, bounded)", prompt)
                 self.assertIn("PLAN-CONTEXT-SENTINEL", prompt)
                 self.assertIn("does not override runner safety rules", prompt)
 

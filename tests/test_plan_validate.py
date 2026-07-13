@@ -236,7 +236,7 @@ class PlanValidateCommandTests(unittest.TestCase):
             result = run_cli(repo, home, "plan-validate")
 
             self.assertEqual(result.returncode, 1)
-            self.assertIn("phase 1 is missing a Status marker", result.stderr)
+            self.assertIn("phase 1 (Validate something) is missing a `Status:` marker", result.stderr)
 
             escaping = run_cli(repo, home, "plan-validate", "--plan", "../outside.md")
 

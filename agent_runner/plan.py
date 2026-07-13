@@ -32,8 +32,12 @@ PROTECTED_CHANGE_STATUSES = {
     "COMPLETE",
     "BLOCKED",
 }
-PLAN_CONTEXT_CHAR_LIMIT = 4000
+DEFAULT_PLAN_CONTEXT_CHAR_LIMIT = 12000
 PLAN_CONTEXT_TRUNCATION_MARKER = "\n\n[plan context truncated]"
+# A phase the runner is going to execute must say how a command decides it is
+# done. Completed phases are exempt: they are history, and retrofitting criteria
+# onto them would be a plan edit for no gain.
+ACCEPTANCE_CRITERIA_RE = re.compile(r"^\s*\**\s*Acceptance Criteria\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,7 @@ class ParsedPlan:
     phases: list[ParsedPhase]
     content_hash: str
     plan_context: str = ""
+    plan_context_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -63,7 +68,12 @@ class PlanRegistrationResult:
     phase_count: int
 
 
-def parse_plan_markdown(text: str, *, path: str) -> ParsedPlan:
+def parse_plan_markdown(
+    text: str,
+    *,
+    path: str,
+    context_char_limit: int = DEFAULT_PLAN_CONTEXT_CHAR_LIMIT,
+) -> ParsedPlan:
     lines = text.splitlines(keepends=True)
     headings: list[tuple[int, int, str]] = []
     seen_phase_numbers: set[int] = set()
@@ -77,12 +87,16 @@ def parse_plan_markdown(text: str, *, path: str) -> ParsedPlan:
             headings.append((index, phase_number, match.group(2).strip()))
 
     first_heading_index = headings[0][0] if headings else len(lines)
-    plan_context = _bounded_plan_context("".join(lines[:first_heading_index]))
+    plan_context, plan_context_truncated = _bounded_plan_context(
+        "".join(lines[:first_heading_index]), context_char_limit
+    )
     phases: list[ParsedPhase] = []
     for heading_index, phase_number, title in headings:
         next_heading_index = _next_heading_index(headings, heading_index, len(lines))
         content_lines = lines[heading_index + 1 : next_heading_index]
-        status, hash_lines = _extract_status_and_hash_lines(content_lines)
+        status, hash_lines = _extract_status_and_hash_lines(
+            content_lines, phase_number=phase_number
+        )
         content = "".join(content_lines)
         content_hash = _hash_text("".join(hash_lines))
         phases.append(
@@ -107,10 +121,16 @@ def parse_plan_markdown(text: str, *, path: str) -> ParsedPlan:
         phases=phases,
         content_hash=content_hash,
         plan_context=plan_context,
+        plan_context_truncated=plan_context_truncated,
     )
 
 
-def parse_plan_file(repo_root: Path, plan_path: str) -> ParsedPlan:
+def parse_plan_file(
+    repo_root: Path,
+    plan_path: str,
+    *,
+    context_char_limit: int = DEFAULT_PLAN_CONTEXT_CHAR_LIMIT,
+) -> ParsedPlan:
     repo_root = repo_root.resolve()
     path = (repo_root / plan_path).resolve()
     try:
@@ -121,7 +141,63 @@ def parse_plan_file(repo_root: Path, plan_path: str) -> ParsedPlan:
         raise PlanError(f"missing plan file {plan_path}")
     if not path.is_file():
         raise PlanError(f"plan path is not a file: {plan_path}")
-    return parse_plan_markdown(path.read_text(encoding="utf-8"), path=plan_path)
+    return parse_plan_markdown(
+        path.read_text(encoding="utf-8"),
+        path=plan_path,
+        context_char_limit=context_char_limit,
+    )
+
+
+def validate_executable_plan(parsed_plan: ParsedPlan) -> None:
+    """Reject a plan the runner cannot execute unattended.
+
+    This runs before every `run`, not only on demand, because both failures it
+    catches are silent otherwise: a phase with no status marker registers as
+    PENDING and re-executes work that already merged, and a phase with no
+    command-decidable acceptance criteria gives the reviewer nothing to check
+    the implementation against.
+    """
+    if not parsed_plan.phases:
+        raise PlanError(f"plan has no phases: {parsed_plan.path}")
+
+    errors: list[str] = []
+    for phase in parsed_plan.phases:
+        first_line = next(
+            (line for line in phase.content.splitlines() if line.strip()), None
+        )
+        if first_line is None or STATUS_RE.match(first_line) is None:
+            errors.append(
+                f"phase {phase.phase_number} ({phase.title}) is missing a "
+                "`Status:` marker directly under its heading"
+            )
+            continue
+        if phase.status == "COMPLETE":
+            continue
+        if not _has_acceptance_criteria(phase.content):
+            errors.append(
+                f"phase {phase.phase_number} ({phase.title}) has no "
+                "`Acceptance Criteria:` block naming a command that decides it"
+            )
+
+    if errors:
+        raise PlanError(
+            f"plan is not executable ({parsed_plan.path}): " + "; ".join(errors)
+        )
+
+
+def _has_acceptance_criteria(content: str) -> bool:
+    lines = content.splitlines()
+    for index, line in enumerate(lines):
+        match = ACCEPTANCE_CRITERIA_RE.match(line)
+        if match is None:
+            continue
+        # A bare heading proves nothing. The criteria may sit on the heading
+        # line itself or in the block under it; either satisfies this.
+        inline = line[match.end() :].strip(" \t:*")
+        if inline:
+            return True
+        return any(rest.strip() for rest in lines[index + 1 :])
+    return False
 
 
 def register_or_resume_plan(
@@ -284,7 +360,9 @@ def register_or_resume_plan(
     )
 
 
-def _extract_status_and_hash_lines(lines: list[str]) -> tuple[str, list[str]]:
+def _extract_status_and_hash_lines(
+    lines: list[str], *, phase_number: int
+) -> tuple[str, list[str]]:
     if not lines:
         return "PENDING", []
     status_index = 0
@@ -300,13 +378,19 @@ def _extract_status_and_hash_lines(lines: list[str]) -> tuple[str, list[str]]:
     match = STATUS_RE.match(status_line)
     if match is None:
         # A hand-written marker ("Status: completed on 2026-07-09.") names no
-        # phase status, so the phase is still PENDING to the runner -- but the
-        # line is metadata the closer owns and may overwrite.
-        status = "PENDING"
-    else:
-        status = match.group(1)
-        if status not in PHASE_STATUSES:
-            raise PlanError(f"invalid phase status marker: {status}")
+        # phase status. Reading it as PENDING is the one misread the runner must
+        # never make quietly: it re-implements and re-merges work that already
+        # landed. Refuse the plan instead and make the operator say which state
+        # the phase is in. The line is still runner-owned metadata excluded from
+        # the protected body hash, so normalizing it is not a body edit.
+        allowed = ", ".join(sorted(PHASE_STATUSES))
+        raise PlanError(
+            f"phase {phase_number} has an unrecognized status marker "
+            f"{status_line.strip()!r}; write one of: {allowed}"
+        )
+    status = match.group(1)
+    if status not in PHASE_STATUSES:
+        raise PlanError(f"invalid phase status marker: {status}")
 
     hash_start_index = status_index + 1
     # Hand-written markers often separate the status from its evidence with a
@@ -322,12 +406,12 @@ def _extract_status_and_hash_lines(lines: list[str]) -> tuple[str, list[str]]:
     return status, list(lines[hash_start_index:])
 
 
-def _bounded_plan_context(text: str) -> str:
+def _bounded_plan_context(text: str, limit: int) -> tuple[str, bool]:
     context = text.strip()
-    if len(context) <= PLAN_CONTEXT_CHAR_LIMIT:
-        return context
-    content_limit = PLAN_CONTEXT_CHAR_LIMIT - len(PLAN_CONTEXT_TRUNCATION_MARKER)
-    return context[:content_limit].rstrip() + PLAN_CONTEXT_TRUNCATION_MARKER
+    if len(context) <= limit:
+        return context, False
+    content_limit = limit - len(PLAN_CONTEXT_TRUNCATION_MARKER)
+    return context[:content_limit].rstrip() + PLAN_CONTEXT_TRUNCATION_MARKER, True
 
 
 def _skip_runner_metadata(lines: list[str], evidence_index: int) -> int:

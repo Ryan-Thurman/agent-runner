@@ -221,6 +221,9 @@ Current notes:
 - `planVerify` is optional. When set, `agent-runner plan-validate` runs those
   shell commands from the repo root after parsing the plan and checking for
   explicit `Status:` markers.
+- `planContextCharLimit` is optional (default 12000, minimum 500). It bounds
+  how much of the plan preamble agent prompts carry; oversized preambles are
+  truncated and warned about on stderr.
 - Agent CLI flag pitfalls the runner cannot detect for you: the runner appends
   the prompt as the final positional argument, and the `claude` CLI's
   `--allowedTools`/`--disallowedTools` options are variadic — written as
@@ -382,16 +385,27 @@ Rules:
   for standing guidance, shared acceptance notes, or review contracts that apply
   across phases.
 - IMPLEMENT, REVIEW, FIX, and CLOSE_PHASE prompts include this plan-level
-  context, bounded deterministically to 4000 characters. Oversized preambles are
-  truncated at that cap and marked as truncated.
+  context, bounded deterministically to `planContextCharLimit` characters
+  (default 12000; minimum 500). Oversized preambles are truncated at that cap,
+  marked as truncated in the prompt, and warned about on stderr by `run` and
+  `plan-validate`, so a preamble the agents are only half-reading is visible
+  rather than silent.
 - Plan-level context is prompt data only. It can guide agents, but it does not
   override runner safety rules, phase scope rules, or explicit job
   requirements.
 - Add `Status: <STATE>` directly under the phase heading.
-- If the status line is missing, the runner treats the phase as `PENDING`. A
-  `Status:` line whose value is not a phase state -- a hand-written marker such
-  as `Status: completed on 2026-07-09.` -- also leaves the phase `PENDING`, but
-  still counts as runner-owned metadata the closer may overwrite.
+- A `Status:` line whose value is not a phase state -- a hand-written marker
+  such as `Status: completed on 2026-07-09.` -- is **rejected**. Reading it as
+  `PENDING` is the one misread the runner must never make quietly: it would
+  re-implement and re-merge a phase that already landed. The line is still
+  runner-owned metadata excluded from the body hash, so normalizing it to
+  `Status: COMPLETE` is not a body edit.
+- The parser treats a phase with no status line at all as `PENDING`, but `run`
+  and `plan-validate` refuse the plan (see Plan Validation) rather than execute
+  a phase whose state nobody declared.
+- Every phase the runner will execute needs an `Acceptance Criteria:` block
+  naming something a command can decide. Phases already marked `Status:
+  COMPLETE` are exempt -- they are history, not work.
 - The status line and the runner-owned `Evidence:` block that follows it are
   excluded from the phase content hash, so close-phase write-back does not
   count as a plan body change. The evidence block starts at the `Evidence:`
@@ -465,8 +479,18 @@ Validate a plan without registering it or running any phase:
 python3 -m agent_runner plan-validate
 ```
 
-The command parses the configured `planPath`, requires at least one phase, and
-requires an explicit valid `Status:` marker directly under each phase heading.
+The command parses the configured `planPath`, requires at least one phase,
+requires an explicit valid `Status:` marker directly under each phase heading,
+and requires an `Acceptance Criteria:` block on every phase that is not already
+`COMPLETE`.
+
+**`run` applies these same structural checks before it registers anything**, so
+an unexecutable plan fails immediately instead of part-way through an unattended
+run. The two failures this catches are silent otherwise: a phase with no status
+marker registers as `PENDING` and re-executes work that already merged, and a
+phase with no command-decidable acceptance criteria gives the reviewer nothing
+to check the implementation against.
+
 If `.agent-runner.json` has `planVerify`, those shell commands run next. Add
 one-off commands with `--verify`:
 
@@ -488,6 +512,29 @@ variables:
 Verification records a `PLAN_VERIFY` job and a `plan.validated` event. It does
 not create plan or phase rows; `agent-runner run` still owns registration and
 execution.
+
+## Resuming a Partly-Landed Plan
+
+A plan whose early phases already merged — hand-written work, or a plan the
+runner never saw — should start at the first phase that still has work, not at
+phase 1. Phase status is runner-owned and lives in the database, so tell the
+runner directly rather than editing the plan document:
+
+```sh
+python3 -m agent_runner mark-phase 2 --status COMPLETE --note "landed in #38"
+```
+
+`mark-phase` registers the plan if this is its first contact with the runner —
+requiring a prior `run` would execute the very phase you are trying to skip —
+then sets the phase status and records a `phase.marked` event with the note.
+`run` picks the first phase that is not `COMPLETE`, so marking phases 1–2 makes
+the next run start at phase 3.
+
+The alternative is to hand-write `Status: COMPLETE` under those phase headings
+before the first `run`; registration seeds phase status from the plan markers.
+Both work. `mark-phase` is preferred once a plan is registered, because after
+that point the plan document is input and the database is the source of truth
+for status.
 
 ## Roadmap Planning
 

@@ -119,9 +119,16 @@ Plans use `## Phase <number>: <title>` headings and a runner-owned
 `Status: <STATE>` line. The status and adjacent `Evidence:` line are excluded
 from phase body hashes so closeout can update the plan without superseding it.
 Markdown before the first phase heading is shared plan-level context: the runner
-includes a deterministic 4000-character bounded copy in IMPLEMENT, REVIEW, FIX,
-and CLOSE_PHASE prompts as data that cannot override runner safety or scope
-rules.
+includes a deterministic bounded copy — `planContextCharLimit`, default 12000
+characters — in IMPLEMENT, REVIEW, FIX, and CLOSE_PHASE prompts as data that
+cannot override runner safety or scope rules.
+
+Before registering anything, `run` refuses a plan it cannot execute unattended:
+a phase with no `Status:` marker (or a prose one like `Status: done last week`),
+or a not-yet-`COMPLETE` phase with no `Acceptance Criteria:` block. To start a
+plan mid-way — early phases already merged — mark them done in the runner
+database rather than editing the plan: `agent-runner mark-phase 2 --status
+COMPLETE`.
 
 ## Commands
 
@@ -130,6 +137,8 @@ rules.
   next job derived from SQLite phase status.
 - `plan-validate [--plan PATH] [--verify COMMAND]`: parse a plan and run
   configured `planVerify` commands without registering phases or running them.
+- `mark-phase N --status STATUS [--note TEXT]`: set a phase's status in the
+  runner database, e.g. `--status COMPLETE` to skip work that already landed.
 - `status`: print human status to stderr and JSON state to stdout.
 - `pause`: mark the project `PAUSED`; active jobs finish, then the loop stops at
   the next job boundary.

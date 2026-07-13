@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ConfigError
+from .plan import DEFAULT_PLAN_CONTEXT_CHAR_LIMIT
 
 
 CONFIG_FILENAME = ".agent-runner.json"
@@ -89,6 +90,7 @@ class RunnerConfig:
     declared_roles: dict[str, str] = field(default_factory=dict)
     presets: dict[str, dict[str, str]] = field(default_factory=dict)
     active_preset: str | None = None
+    plan_context_char_limit: int = DEFAULT_PLAN_CONTEXT_CHAR_LIMIT
 
 
 def strip_json_comments(text: str) -> str:
@@ -159,6 +161,12 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
     roles = _required_dict(data, "roles")
     plan_path = _required_string(data, "planPath")
     plan_verify = _optional_string_list(data, "planVerify", default=[])
+    plan_context_char_limit = _optional_int(
+        data,
+        "planContextCharLimit",
+        default=DEFAULT_PLAN_CONTEXT_CHAR_LIMIT,
+        minimum=500,
+    )
     checks = _required_string_list(data, "checks")
 
     if not checks:
@@ -238,6 +246,7 @@ def validate_config(data: dict[str, Any], path: Path) -> RunnerConfig:
         review_triage=review_triage,
         plan_path=plan_path,
         plan_verify=plan_verify,
+        plan_context_char_limit=plan_context_char_limit,
         checks=checks,
         max_retries_per_phase=max_retries,
         auto_fix_attempts=auto_fix_attempts,
@@ -572,6 +581,11 @@ SAMPLE_CONFIG_TEMPLATE = """{{
   // Optional commands for `agent-runner plan-validate`; receive plan metadata
   // in AGENT_RUNNER_PLAN_* environment variables.
   "planVerify": [],
+
+  // How much of the plan preamble (the markdown before the first phase
+  // heading) agent prompts carry. Oversized preambles are truncated and
+  // warned about. Optional; defaults to 12000.
+  "planContextCharLimit": 12000,
 
   // Project checks detected by init; review these before the first run.
   "checks": {checks},

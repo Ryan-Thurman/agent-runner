@@ -10,11 +10,12 @@ from typing import Optional
 from agent_runner.config import SAMPLE_CONFIG, project_slug, strip_json_comments
 from agent_runner.errors import PlanError
 from agent_runner.plan import (
-    PLAN_CONTEXT_CHAR_LIMIT,
+    DEFAULT_PLAN_CONTEXT_CHAR_LIMIT,
     PLAN_CONTEXT_TRUNCATION_MARKER,
     parse_plan_file,
     parse_plan_markdown,
     register_or_resume_plan,
+    validate_executable_plan,
 )
 from agent_runner.storage import connect_db, list_phases_for_plan, list_plans_for_project
 
@@ -114,26 +115,47 @@ def write_plan(repo: Path, text: str, plan_path: str = "docs/plan.md") -> None:
     path.write_text(text, encoding="utf-8")
 
 
+ACCEPTANCE = "\nAcceptance Criteria:\n- `python3 -m compileall -q .` passes.\n"
+
+
 def sample_plan(
     phase_1_body: str = "Build CLI.\n",
     phase_3_body: str = "Parse plan.\n",
     phase_1_status: str = "PENDING",
 ) -> str:
+    # `run` refuses a plan whose executable phases carry no status marker or no
+    # acceptance criteria, so the fixture it shares has both.
     return (
         "# Build Plan\n\n"
         "Ignored preamble.\n\n"
         "## Phase 1: CLI\n"
         f"Status: {phase_1_status}\n\n"
         f"{phase_1_body}"
+        f"{ACCEPTANCE}"
         "\n"
         "## Phase 3: Plan parsing\n"
+        "Status: PENDING\n\n"
         f"{phase_3_body}"
+        f"{ACCEPTANCE}"
     )
 
 
 class Phase3PlanTests(unittest.TestCase):
     def test_parser_handles_gaps_missing_status_preamble_and_trailing_phase(self):
-        parsed = parse_plan_markdown(sample_plan(), path="docs/plan.md")
+        # The parser stays lenient about a missing status marker -- `run` is what
+        # refuses to execute such a plan -- so a phase with no marker parses as
+        # PENDING here rather than raising.
+        parsed = parse_plan_markdown(
+            "# Build Plan\n\n"
+            "Ignored preamble.\n\n"
+            "## Phase 1: CLI\n"
+            "Status: PENDING\n\n"
+            "Build CLI.\n"
+            "\n"
+            "## Phase 3: Plan parsing\n"
+            "Parse plan.\n",
+            path="docs/plan.md",
+        )
 
         self.assertEqual([phase.phase_number for phase in parsed.phases], [1, 3])
         self.assertEqual(parsed.phases[0].title, "CLI")
@@ -151,7 +173,7 @@ class Phase3PlanTests(unittest.TestCase):
     def test_parser_bounds_oversized_plan_context_deterministically(self):
         oversized_preamble = (
             "# Build Plan\n\n"
-            + ("A" * (PLAN_CONTEXT_CHAR_LIMIT + 200))
+            + ("A" * (DEFAULT_PLAN_CONTEXT_CHAR_LIMIT + 200))
             + "\n\nStanding guidance after cap.\n\n"
         )
         parsed = parse_plan_markdown(
@@ -161,10 +183,63 @@ class Phase3PlanTests(unittest.TestCase):
             path="docs/plan.md",
         )
 
-        self.assertEqual(len(parsed.plan_context), PLAN_CONTEXT_CHAR_LIMIT)
+        self.assertEqual(len(parsed.plan_context), DEFAULT_PLAN_CONTEXT_CHAR_LIMIT)
         self.assertTrue(parsed.plan_context.endswith(PLAN_CONTEXT_TRUNCATION_MARKER))
         self.assertNotIn("Standing guidance after cap", parsed.plan_context)
         self.assertEqual(parsed.phases[0].plan_context, parsed.plan_context)
+
+    def test_parser_honors_a_configured_context_limit(self):
+        preamble = "# Build Plan\n\n" + ("A" * 6000) + "\n\n"
+        plan = preamble + "## Phase 1: CLI\nStatus: PENDING\n\nBuild CLI.\n"
+
+        roomy = parse_plan_markdown(plan, path="docs/plan.md", context_char_limit=12000)
+        tight = parse_plan_markdown(plan, path="docs/plan.md", context_char_limit=1000)
+
+        self.assertFalse(roomy.plan_context_truncated)
+        self.assertNotIn(PLAN_CONTEXT_TRUNCATION_MARKER, roomy.plan_context)
+        self.assertTrue(tight.plan_context_truncated)
+        self.assertEqual(len(tight.plan_context), 1000)
+        self.assertTrue(tight.plan_context.endswith(PLAN_CONTEXT_TRUNCATION_MARKER))
+
+    def test_validate_executable_plan_requires_acceptance_criteria_to_run(self):
+        without_criteria = parse_plan_markdown(
+            "## Phase 1: CLI\nStatus: PENDING\n\nBuild CLI.\n",
+            path="docs/plan.md",
+        )
+        with self.assertRaises(PlanError) as raised:
+            validate_executable_plan(without_criteria)
+        self.assertIn("phase 1 (CLI)", str(raised.exception))
+        self.assertIn("Acceptance Criteria", str(raised.exception))
+
+        with_criteria = parse_plan_markdown(
+            "## Phase 1: CLI\nStatus: PENDING\n\nBuild CLI.\n"
+            "\nAcceptance Criteria:\n- `pytest tests/test_cli.py` passes.\n",
+            path="docs/plan.md",
+        )
+        validate_executable_plan(with_criteria)
+
+    def test_validate_executable_plan_exempts_completed_phases(self):
+        # Phases that already landed are history. Demanding acceptance criteria
+        # on them would force a plan edit for work the runner will never execute.
+        parsed = parse_plan_markdown(
+            "## Phase 1: CLI\nStatus: COMPLETE\nEvidence: 252b04a.\n\nBuild CLI.\n\n"
+            "## Phase 2: Plan parsing\nStatus: PENDING\n\nParse plan.\n"
+            "\nAcceptance Criteria:\n- `pytest` passes.\n",
+            path="docs/plan.md",
+        )
+
+        validate_executable_plan(parsed)
+
+    def test_validate_executable_plan_requires_a_status_marker(self):
+        parsed = parse_plan_markdown(
+            "## Phase 1: CLI\n\nBuild CLI.\n"
+            "\nAcceptance Criteria:\n- `pytest` passes.\n",
+            path="docs/plan.md",
+        )
+
+        with self.assertRaises(PlanError) as raised:
+            validate_executable_plan(parsed)
+        self.assertIn("missing a `Status:` marker", str(raised.exception))
 
     def test_parser_rejects_duplicate_phase_numbers(self):
         text = (
@@ -265,13 +340,28 @@ class Phase3PlanTests(unittest.TestCase):
         )
         self.assertEqual(one_line.content_hash, wrapped.content_hash)
 
-    def test_handwritten_status_and_evidence_block_are_runner_metadata(self):
-        # A human closing a phase by hand writes prose in the status marker and
-        # bullets under a bare `Evidence:` header. The closer later rewrites both
-        # into canonical form; that write-back must not read as a body edit.
+    def test_prose_status_marker_is_rejected_rather_than_read_as_pending(self):
+        # Reading "Status: completed on 2026-07-09." as PENDING would make the
+        # runner re-implement and re-merge a phase that already landed. Refuse
+        # the plan instead and make the operator name the real state.
+        with self.assertRaises(PlanError) as raised:
+            parse_plan_markdown(
+                "## Phase 1: CLI\n"
+                "Status: completed on 2026-07-09.\n\n"
+                "Build CLI.\n",
+                path="docs/plan.md",
+            )
+
+        self.assertIn("phase 1", str(raised.exception))
+        self.assertIn("unrecognized status marker", str(raised.exception))
+
+    def test_handwritten_evidence_block_is_runner_metadata(self):
+        # A human closing a phase by hand writes bullets under a bare `Evidence:`
+        # header. The closer later rewrites that into a single canonical line;
+        # that write-back must not read as a body edit.
         handwritten = parse_plan_markdown(
             "## Phase 1: CLI\n\n"
-            "Status: completed on 2026-07-09.\n\n"
+            "Status: COMPLETE\n\n"
             "Evidence:\n"
             "- `cargo test` passed.\n"
             "- `cargo check` passed.\n\n"
@@ -286,8 +376,7 @@ class Phase3PlanTests(unittest.TestCase):
             path="docs/plan.md",
         )
 
-        # The prose marker names no phase status, so the phase is still PENDING.
-        self.assertEqual(handwritten.phases[0].status, "PENDING")
+        self.assertEqual(handwritten.phases[0].status, "COMPLETE")
         self.assertEqual(closed.phases[0].status, "COMPLETE")
         self.assertEqual(
             handwritten.phases[0].content_hash, closed.phases[0].content_hash
