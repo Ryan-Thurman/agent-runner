@@ -57,6 +57,8 @@ class ReviewContractTests(unittest.TestCase):
             self.assertIn("Checks log path:", prompt)
             self.assertIn("nitpick is advisory", prompt)
             self.assertIn("Return PASS only when blocking and shouldFix are empty", prompt)
+            self.assertIn("Plan lifecycle metadata is out of review scope", prompt)
+            self.assertIn("CLOSE_PHASE job writes them only after an accepted review", prompt)
             self.assertNotIn("diff --git", prompt)
             self.assertNotIn("recommendedFixPrompt", prompt)
 
